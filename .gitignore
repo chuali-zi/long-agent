@@ -9,3 +9,7 @@ build/
 .vscode/
 __pycache__/
 *.pyc
+.pytest_cache/
+*.egg-info/
+var/
+logs/
