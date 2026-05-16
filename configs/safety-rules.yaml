@@ -1,0 +1,183 @@
+# kyagent 安全规则库 —— "二次过滤"由这里驱动。
+#
+# 字段：
+#   id           : 规则唯一标识
+#   risk         : low / medium / high / critical
+#   description  : 人类可读描述
+#   pattern      : 在完整 cmdline 上做的正则匹配（与下面 argv 字段是 OR 关系，但同一条规则内部所有非空字段是 AND）
+#   command      : argv[0] basename（如 rm）
+#   flags_any    : 出现任一即匹配（如 ["-rf", "-fr"]）
+#   flags_all    : 全部出现才匹配
+#   target_in    : 任一 positional 参数落在这些前缀路径下（含通配 /*）
+#   forbid_env   : 不允许在 cmdline 中出现这些环境变量传参形式（如 LD_PRELOAD=）
+#
+# 命中即取最高 risk；策略层把 risk -> allow/confirm/deny。
+
+rules:
+  # ---- 文件销毁类 -----------------------------------------------------
+  - id: rm-recursive-system
+    risk: critical
+    description: 递归删除关键系统目录
+    command: rm
+    flags_any: ["-rf", "-fr", "-r", "-R", "--recursive"]
+    # 注意：不要在这里放 "/"，由 dangerous-rm-pattern 单独覆盖根删除；
+    # /tmp 等临时目录刻意排除在外，避免误伤合理清理任务。
+    target_in:
+      - "/etc"
+      - "/usr"
+      - "/var"
+      - "/boot"
+      - "/lib"
+      - "/lib64"
+      - "/bin"
+      - "/sbin"
+      - "/opt"
+      - "/home"
+      - "/root"
+      - "/sys"
+      - "/proc"
+      - "/dev"
+      - "/srv"
+
+  - id: rm-no-preserve-root
+    risk: critical
+    description: 显式禁用 --preserve-root 保护以删除 /
+    command: rm
+    flags_all: ["--no-preserve-root"]
+
+  - id: dangerous-rm-pattern
+    risk: critical
+    description: 经典 rm -rf / 写法或其变体（含 \\, 空格混淆）
+    pattern: '(?i)\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(?:\s|$|\\)'
+
+  - id: rm-wildcard-root
+    risk: high
+    description: rm -rf /* 通配符删除
+    pattern: '(?i)\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/\*'
+
+  # ---- 写入块设备 -----------------------------------------------------
+  - id: dd-of-blockdev
+    risk: critical
+    description: dd 写入物理/虚拟块设备
+    pattern: '\bdd\b[^|;]*\bof=/dev/(sd[a-z]\d*|nvme\d|hd[a-z]\d*|vda\d*|xvd[a-z]\d*|mapper/)'
+
+  - id: mkfs-on-disk
+    risk: critical
+    description: 在磁盘上重建文件系统
+    pattern: '\bmkfs(\.[a-z0-9]+)?\b\s+(/dev/sd|/dev/nvme|/dev/vd|/dev/xvd|/dev/mapper)'
+
+  - id: write-to-blockdev
+    risk: critical
+    description: 重定向输出到块设备
+    pattern: '>\s*/dev/(sd[a-z]\d*|nvme\d|hd[a-z]\d*|vd[a-z]\d*)'
+
+  # ---- 权限破坏 -------------------------------------------------------
+  - id: chmod-777-system
+    risk: high
+    description: 对系统目录开放 777 权限
+    command: chmod
+    flags_any: ["-R", "--recursive"]
+    target_in: ["/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/"]
+
+  - id: chmod-777-pattern
+    risk: high
+    description: chmod 7?7 通配性赋权（包含 world-writable）
+    pattern: '\bchmod\s+[-R]*\s*[0-7]?7[0-7]7\b'
+
+  - id: chown-recursive-system
+    risk: high
+    description: 递归修改系统目录所有者
+    command: chown
+    flags_any: ["-R", "--recursive"]
+    target_in: ["/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/boot", "/"]
+
+  # ---- 账户/认证 ------------------------------------------------------
+  - id: shadow-write
+    risk: critical
+    description: 直接修改 /etc/shadow 或 /etc/passwd
+    pattern: '>\s*/etc/(shadow|passwd|sudoers)\b'
+
+  - id: userdel-system
+    risk: high
+    description: 删除系统默认账户
+    pattern: '\buserdel\b\s+(root|bin|daemon|sys|adm|nobody|systemd-\w+)'
+
+  - id: passwd-non-interactive
+    risk: high
+    description: 非交互式批量改密
+    pattern: '\bchpasswd\b|\bpasswd\s+--stdin\b'
+
+  # ---- 网络远程脚本 ---------------------------------------------------
+  - id: pipe-to-shell
+    risk: high
+    description: 从网络下载脚本并直接管道到 shell
+    pattern: '(curl|wget|fetch)\b[^|;]*\|\s*(bash|sh|zsh|ksh|dash)\b'
+
+  - id: reverse-shell
+    risk: critical
+    description: 经典反弹 shell 写法
+    pattern: '(?:bash\s+-i\s+>&?\s*/dev/tcp/|nc\b[^;|]*\s-e\b\s*/bin/(?:bash|sh)|mkfifo\b[^;|]*\s*\|\s*(?:bash|sh)\s+-i)'
+
+  # ---- 防火墙/SELinux 关闭 ---------------------------------------------
+  - id: iptables-flush
+    risk: high
+    description: 清空 iptables 规则
+    pattern: '\biptables\b[^|;]*\s(-F|--flush)\b'
+
+  - id: ufw-disable
+    risk: medium
+    description: 关闭 UFW 防火墙
+    pattern: '\bufw\b\s+disable\b'
+
+  - id: setenforce-permissive
+    risk: high
+    description: 关闭 SELinux 强制模式
+    pattern: '\bsetenforce\s+0\b|\bSELINUX=disabled\b'
+
+  # ---- 关键进程 -------------------------------------------------------
+  - id: kill-init
+    risk: critical
+    description: 杀掉 init/systemd
+    pattern: '\bkill\b\s+-9\s+1\b|\bkillall\s+(systemd|init)\b'
+
+  - id: fork-bomb
+    risk: critical
+    description: fork bomb
+    pattern: ':\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:'
+
+  - id: systemctl-mask-critical
+    risk: high
+    description: mask 关键服务（ssh / network / login）
+    pattern: '\bsystemctl\s+(?:mask|disable)\b\s+(sshd?|networkd?|NetworkManager|systemd-logind)\b'
+
+  # ---- 内核模块/虚拟文件系统 ------------------------------------------
+  - id: insmod-modprobe
+    risk: high
+    description: 装载/卸载内核模块
+    pattern: '\b(insmod|rmmod|modprobe)\b'
+
+  - id: sysctl-rewrite
+    risk: medium
+    description: 改写 /proc/sys 内核参数
+    pattern: '>\s*/proc/sys/'
+
+  # ---- 注入/混淆 ------------------------------------------------------
+  - id: ld-preload-injection
+    risk: high
+    description: LD_PRELOAD 注入运行
+    pattern: '\bLD_PRELOAD\s*='
+
+  - id: history-cover
+    risk: medium
+    description: 清空历史 / 关 HISTFILE，疑似掩盖痕迹
+    pattern: '\bhistory\s+-c\b|\bunset\s+HISTFILE\b|HISTFILE\s*=\s*/dev/null'
+
+  - id: base64-pipe-shell
+    risk: high
+    description: base64 解码后直接执行
+    pattern: '\bbase64\b[^|;]*-d[^|;]*\|\s*(bash|sh)\b|\becho\s+[A-Za-z0-9+/=]{40,}\s*\|\s*base64\s+-d\s*\|\s*(bash|sh)'
+
+  - id: eval-from-env
+    risk: high
+    description: 从环境变量 eval 任意代码
+    pattern: '\beval\s+["'']?\$\{?[A-Z_]+'

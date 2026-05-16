@@ -1,0 +1,71 @@
+# /etc/sudoers.d/kyagent
+#
+# 安装：
+#   sudo install -m 0440 configs/sudoers.kyagent /etc/sudoers.d/kyagent
+#   sudo visudo -cf /etc/sudoers.d/kyagent      # 校验语法
+#
+# 设计原则（与赛题"最小权限代理执行"对应）：
+#   1) 所有可被 kyagent 触发的命令都列在这里，绝对路径，绝不出现 ALL
+#   2) NOPASSWD 仅给"只读 / 已被白名单参数化"的命令
+#   3) 任何写操作（systemctl restart 等）单独列出，并且不带通配
+#   4) 不允许 sh / bash / python / perl / awk / sed / find -exec 等"shell-equivalent"
+#
+# 用户 kyagent 必须存在。建议：
+#   sudo useradd -r -s /usr/sbin/nologin kyagent
+#   sudo usermod -aG systemd-journal kyagent
+
+# ---- 只读感知 ----------------------------------------------------------
+Cmnd_Alias KY_READONLY = \
+    /usr/bin/ps, /bin/ps, \
+    /usr/bin/ss, /usr/sbin/ss, \
+    /bin/netstat, /usr/bin/netstat, \
+    /usr/bin/lsof, /usr/sbin/lsof, \
+    /usr/bin/journalctl, /bin/journalctl, \
+    /usr/bin/df, /bin/df, \
+    /usr/bin/du, /bin/du, \
+    /usr/bin/free, /bin/free, \
+    /usr/bin/uptime, /bin/uptime, \
+    /usr/bin/who, /bin/who, \
+    /usr/bin/dmesg, /bin/dmesg, \
+    /usr/bin/uname, /bin/uname, \
+    /usr/bin/cat /proc/cpuinfo, \
+    /usr/bin/cat /proc/meminfo, \
+    /usr/bin/cat /etc/os-release
+
+# ---- 服务查询 ----------------------------------------------------------
+Cmnd_Alias KY_SVC_QUERY = \
+    /usr/bin/systemctl status *, \
+    /usr/bin/systemctl is-active *, \
+    /usr/bin/systemctl is-enabled *, \
+    /usr/bin/systemctl list-units *, \
+    /usr/bin/systemctl list-unit-files *, \
+    /usr/bin/systemctl show *
+
+# ---- 服务变更（高风险，需要 confirm，由 Guardrail 拦） ------------------
+Cmnd_Alias KY_SVC_MUTATE = \
+    /usr/bin/systemctl restart *, \
+    /usr/bin/systemctl reload *, \
+    /usr/bin/systemctl start *, \
+    /usr/bin/systemctl stop *
+
+# ---- 软件包（麒麟以 dnf/yum 为主，兼容 apt） ---------------------------
+Cmnd_Alias KY_PKG_QUERY = \
+    /usr/bin/dnf list *, /usr/bin/dnf info *, /usr/bin/dnf repoquery *, \
+    /usr/bin/yum list *, /usr/bin/yum info *, \
+    /usr/bin/apt list *, /usr/bin/apt-cache *, \
+    /usr/bin/dpkg -l, /usr/bin/rpm -qa, /usr/bin/rpm -qi *
+
+# ---- 文件元信息（不开放 cat 任意文件，避免 /etc/shadow 之类） ----------
+Cmnd_Alias KY_FILE_META = \
+    /usr/bin/ls -l*, /usr/bin/ls -la*, /bin/ls -l*, /bin/ls -la*, \
+    /usr/bin/stat *, /usr/bin/file *
+
+# ---- 授权 --------------------------------------------------------------
+# kyagent 账户：所有 KY_* 命令 NOPASSWD；显式拒绝 shell / 文本编辑器
+kyagent  ALL=(root)  NOPASSWD: KY_READONLY, KY_SVC_QUERY, KY_PKG_QUERY, KY_FILE_META
+kyagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE
+kyagent  ALL=(ALL)   !/bin/sh, !/bin/bash, !/usr/bin/zsh, !/usr/bin/perl, !/usr/bin/python*, \
+                     !/usr/bin/vi, !/usr/bin/vim, !/usr/bin/nano, !/usr/bin/awk, !/usr/bin/sed
+
+Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
+                  log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}

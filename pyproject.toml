@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kyagent"
+version = "0.1.0"
+description = "面向麒麟操作系统的安全智能运维 Agent (A2 赛题作品)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Team A2" }]
+keywords = ["mcp", "agent", "kylin", "ops", "security", "llm"]
+
+dependencies = [
+    "pydantic>=2.5",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+    "rich>=13.7",
+    "anthropic>=0.39",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+kyagent = "kyagent.cli:app"
+kyagent-mcp = "kyagent.mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["kyagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

@@ -1,0 +1,54 @@
+# kyagent 默认配置。可通过环境变量 KYAGENT_CONFIG 指向其他文件。
+agent:
+  name: kyagent
+  # 后端：anthropic / mock
+  # mock 模式不调用任何外部 LLM，用规则路由演示完整闭环
+  llm_backend: ${KYAGENT_LLM_BACKEND:-mock}
+  anthropic:
+    model: claude-opus-4-7
+    max_tokens: 4096
+    api_key_env: ANTHROPIC_API_KEY
+  max_iterations: 8
+
+executor:
+  # 受限运行账户。若不存在则降级为当前用户但限制 sudoers 白名单
+  account: kyagent
+  # 全局命令超时（秒）
+  timeout: 30
+  # 单次输出截断字节
+  output_cap: 65536
+  # 是否禁止任何 root 权限提升（除显式白名单 sudo 命令外）
+  forbid_root: true
+  # PATH 白名单（防注入）
+  path:
+    - /usr/local/bin
+    - /usr/bin
+    - /bin
+    - /usr/sbin
+    - /sbin
+
+safety:
+  rules_file: configs/safety-rules.yaml
+  # 全局策略：deny > confirm > allow
+  policy:
+    critical: deny
+    high: confirm
+    medium: confirm
+    low: allow
+  # 启用 LLM 二级审查器（需要 LLM 后端可用）
+  llm_review: false
+
+audit:
+  # SQLite 审计数据库路径
+  database: ./var/audit.db
+  # 是否同时输出 JSONL 日志（便于外部 SIEM 抽取）
+  jsonl_file: ./var/audit.jsonl
+  # 保留事件天数
+  retain_days: 90
+
+mcp:
+  # 暴露的工具白名单（空则全部启用）
+  enable_tools: []
+  # stdio 协议握手 banner
+  server_name: kyagent
+  server_version: 0.1.0

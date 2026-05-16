@@ -1,0 +1,7 @@
+pydantic>=2.5
+PyYAML>=6.0
+typer>=0.12
+rich>=13.7
+anthropic>=0.39
+# 可选：官方 MCP SDK（在需要把 kyagent-mcp 接到 Claude Desktop / Cursor 时安装）
+# mcp>=1.0
