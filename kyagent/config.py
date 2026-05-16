@@ -33,10 +33,25 @@ class AnthropicConfig(BaseModel):
     api_key_env: str = "ANTHROPIC_API_KEY"
 
 
+class OpenAIConfig(BaseModel):
+    """OpenAI Python SDK 适配后端配置。
+
+    base_url 留空则走 https://api.openai.com/v1；填上即可对接任何 OpenAI 协议兼容服务
+    （Azure OpenAI 用其专用端点、vLLM/Ollama/DeepSeek/通义/智谱等国产模型走 /v1 路径）。
+    """
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 4096
+    temperature: float = 0.2
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url: str | None = None
+    organization: str | None = None
+
+
 class AgentConfig(BaseModel):
     name: str = "kyagent"
     llm_backend: str = "mock"
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
+    openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     max_iterations: int = 8
 
 

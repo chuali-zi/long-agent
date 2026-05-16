@@ -1,10 +1,13 @@
 """LLM 后端抽象。
 
-提供两种后端：
+提供三种后端：
   - AnthropicBackend：调用真实 Claude API（需 ANTHROPIC_API_KEY）
+  - OpenAIBackend：调用 OpenAI Chat Completions（需 OPENAI_API_KEY），同时兼容
+                   任何 OpenAI 协议（Azure OpenAI / vLLM / DeepSeek / 智谱 / Ollama …）
   - MockBackend：纯规则路由，不需要任何外部依赖；可用于离线 demo / CI
 
 每个后端实现统一的 chat(messages, tools) -> AssistantMessage。
+Agent.core 始终以 Anthropic 风格组装 messages/tools；OpenAIBackend 内部完成双向翻译。
 """
 from __future__ import annotations
 
@@ -101,6 +104,216 @@ class AnthropicBackend(LlmBackend):
             elif blk.type == "tool_use":
                 blocks.append(ToolUseBlock(id=blk.id, name=blk.name, input=dict(blk.input)))
         return AssistantMessage(blocks=blocks, stop_reason=resp.stop_reason or "end_turn", raw=resp)
+
+
+# ---- OpenAI 实现 ----------------------------------------------------------
+
+
+class OpenAIBackend(LlmBackend):
+    """OpenAI Python SDK 适配后端。
+
+    对外仍按 Anthropic 风格交互（system + messages with tool_use/tool_result blocks，
+    tools 用 input_schema 字段），内部把它转换成 OpenAI chat.completions 的
+    tool_calls / role=tool 形式，调用完毕再翻译回 AssistantMessage(TextBlock/ToolUseBlock)。
+    这样 Agent.core 不必感知后端差异。
+    """
+
+    name = "openai"
+
+    # OpenAI 的 finish_reason 与本项目内统一的 stop_reason 映射
+    _STOP_MAP = {
+        "tool_calls": "tool_use",
+        "function_call": "tool_use",
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "content_filter": "content_filter",
+    }
+
+    def __init__(
+        self,
+        model: str,
+        max_tokens: int,
+        temperature: float = 0.2,
+        api_key_env: str = "OPENAI_API_KEY",
+        base_url: str | None = None,
+        organization: str | None = None,
+    ):
+        try:
+            import openai  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError("缺少依赖：pip install openai") from e
+        from openai import OpenAI
+
+        key = os.environ.get(api_key_env)
+        if not key:
+            raise RuntimeError(f"环境变量 {api_key_env} 未设置")
+        client_kwargs: dict[str, Any] = {"api_key": key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        if organization:
+            client_kwargs["organization"] = organization
+        self._client = OpenAI(**client_kwargs)
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+
+    # ---- 公共入口 ------------------------------------------------------
+
+    def chat(self, system, messages, tools):
+        oai_messages = self._to_openai_messages(system, messages)
+        oai_tools = self._to_openai_tools(tools) if tools else None
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": oai_messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+        }
+        if oai_tools:
+            kwargs["tools"] = oai_tools
+            kwargs["tool_choice"] = "auto"
+
+        resp = self._client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        return self._from_openai_choice(choice, raw=resp)
+
+    # ---- Anthropic → OpenAI 翻译 ---------------------------------------
+
+    @staticmethod
+    def _to_openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for t in tools:
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            })
+        return out
+
+    @classmethod
+    def _to_openai_messages(
+        cls,
+        system: str,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if system:
+            out.append({"role": "system", "content": system})
+
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content")
+            if role == "user":
+                # 形态 1：纯字符串 user
+                if isinstance(content, str):
+                    out.append({"role": "user", "content": content})
+                    continue
+                # 形态 2：含 tool_result 块的 user（Anthropic 用 user 角色回传工具结果）
+                if isinstance(content, list):
+                    text_buf: list[str] = []
+                    tool_msgs: list[dict[str, Any]] = []
+                    for c in content:
+                        if not isinstance(c, dict):
+                            continue
+                        ctype = c.get("type")
+                        if ctype == "text":
+                            text_buf.append(c.get("text", ""))
+                        elif ctype == "tool_result":
+                            tool_msgs.append({
+                                "role": "tool",
+                                "tool_call_id": c.get("tool_use_id", ""),
+                                "content": cls._flatten_tool_result(c.get("content")),
+                            })
+                    if text_buf:
+                        out.append({"role": "user", "content": "\n".join(text_buf)})
+                    out.extend(tool_msgs)
+                    continue
+                # 兜底
+                out.append({"role": "user", "content": str(content) if content is not None else ""})
+
+            elif role == "assistant":
+                # assistant content 在 Agent.core 里始终是 list[block dict]
+                text_parts: list[str] = []
+                tool_calls: list[dict[str, Any]] = []
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for c in content:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "text":
+                            text_parts.append(c.get("text", ""))
+                        elif c.get("type") == "tool_use":
+                            tool_calls.append({
+                                "id": c.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": c.get("name", ""),
+                                    "arguments": json.dumps(c.get("input") or {}, ensure_ascii=False),
+                                },
+                            })
+                msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "\n".join(p for p in text_parts if p) or None,
+                }
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                out.append(msg)
+
+            elif role == "system":
+                # 极少见，但允许显式 system 消息混入
+                out.append({"role": "system", "content": content if isinstance(content, str) else str(content)})
+        return out
+
+    @staticmethod
+    def _flatten_tool_result(content: Any) -> str:
+        """tool_result.content 在 Anthropic 里可能是 str 或 [{type:text,text}]。"""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    parts.append(c.get("text", ""))
+                elif isinstance(c, str):
+                    parts.append(c)
+            return "".join(parts)
+        return str(content)
+
+    # ---- OpenAI → 内部统一表示 -----------------------------------------
+
+    @classmethod
+    def _from_openai_choice(cls, choice: Any, raw: Any) -> AssistantMessage:
+        msg = choice.message
+        blocks: list[TextBlock | ToolUseBlock] = []
+
+        text = getattr(msg, "content", None)
+        if text:
+            blocks.append(TextBlock(text=text))
+
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        for tc in tool_calls:
+            fn = getattr(tc, "function", None)
+            if fn is None:
+                continue
+            name = getattr(fn, "name", "") or ""
+            args_raw = getattr(fn, "arguments", "") or ""
+            try:
+                parsed = json.loads(args_raw) if args_raw else {}
+                if not isinstance(parsed, dict):
+                    parsed = {"_raw": parsed}
+            except json.JSONDecodeError:
+                parsed = {"_raw": args_raw}
+            blocks.append(ToolUseBlock(id=getattr(tc, "id", "") or "", name=name, input=parsed))
+
+        finish_reason = getattr(choice, "finish_reason", None) or "stop"
+        stop_reason = cls._STOP_MAP.get(finish_reason, finish_reason)
+        return AssistantMessage(blocks=blocks, stop_reason=stop_reason, raw=raw)
 
 
 # ---- Mock 实现 ------------------------------------------------------------
@@ -259,5 +472,14 @@ def build_backend(cfg) -> LlmBackend:
             model=cfg.agent.anthropic.model,
             max_tokens=cfg.agent.anthropic.max_tokens,
             api_key_env=cfg.agent.anthropic.api_key_env,
+        )
+    if name == "openai":
+        return OpenAIBackend(
+            model=cfg.agent.openai.model,
+            max_tokens=cfg.agent.openai.max_tokens,
+            temperature=cfg.agent.openai.temperature,
+            api_key_env=cfg.agent.openai.api_key_env,
+            base_url=cfg.agent.openai.base_url,
+            organization=cfg.agent.openai.organization,
         )
     raise ValueError(f"未知 LLM 后端：{name}")

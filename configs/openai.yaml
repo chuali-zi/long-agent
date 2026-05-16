@@ -1,0 +1,59 @@
+# kyagent —— OpenAI / OpenAI 协议兼容 后端配置示例
+#
+# 用法：
+#   export OPENAI_API_KEY=sk-...
+#   export KYAGENT_CONFIG=$(pwd)/configs/openai.yaml
+#   kyagent ask "哪个进程 CPU 占用最高？"
+#
+# 兼容范围：任何遵循 OpenAI Chat Completions 协议的服务都能直接对接
+#   - OpenAI 官方：留空 base_url 即可
+#   - DeepSeek    base_url=https://api.deepseek.com/v1                model=deepseek-chat
+#   - 智谱 GLM    base_url=https://open.bigmodel.cn/api/paas/v4       model=glm-4-plus
+#   - 通义千问    base_url=https://dashscope.aliyuncs.com/compatible-mode/v1  model=qwen-plus
+#   - vLLM/Ollama base_url=http://127.0.0.1:11434/v1                  model=qwen2.5:14b
+#   - Azure OpenAI 见专用 SDK，可改用 OPENAI_API_KEY + 自定义 base_url
+agent:
+  name: kyagent
+  llm_backend: openai
+  openai:
+    # 默认走 gpt-4o-mini；通过环境变量覆盖以便快速切换
+    model: ${KYAGENT_OPENAI_MODEL:-gpt-4o-mini}
+    max_tokens: 4096
+    temperature: 0.2
+    api_key_env: OPENAI_API_KEY
+    # 留空 → 走官方 https://api.openai.com/v1
+    base_url: ${KYAGENT_OPENAI_BASE_URL:-}
+    # 仅 OpenAI 官方多组织账户需要
+    organization: ${KYAGENT_OPENAI_ORG:-}
+  max_iterations: 8
+
+executor:
+  account: kyagent
+  timeout: 30
+  output_cap: 65536
+  forbid_root: true
+  path:
+    - /usr/local/bin
+    - /usr/bin
+    - /bin
+    - /usr/sbin
+    - /sbin
+
+safety:
+  rules_file: configs/safety-rules.yaml
+  policy:
+    critical: deny
+    high: confirm
+    medium: confirm
+    low: allow
+  llm_review: false
+
+audit:
+  database: ./var/audit.db
+  jsonl_file: ./var/audit.jsonl
+  retain_days: 90
+
+mcp:
+  enable_tools: []
+  server_name: kyagent
+  server_version: 0.1.0

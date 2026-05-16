@@ -3,5 +3,7 @@ PyYAML>=6.0
 typer>=0.12
 rich>=13.7
 anthropic>=0.39
+# 可选：OpenAI SDK（用 configs/openai.yaml 接 OpenAI / DeepSeek / 智谱 / vLLM 等兼容服务）
+# openai>=1.30
 # 可选：官方 MCP SDK（在需要把 kyagent-mcp 接到 Claude Desktop / Cursor 时安装）
 # mcp>=1.0
