@@ -1,6 +1,8 @@
 """审计链路完整性测试。"""
 from __future__ import annotations
 
+import json
+import threading
 import tempfile
 from pathlib import Path
 
@@ -80,3 +82,59 @@ def test_filter_events_by_kind(tmp_path):
     hits = list(store.find_events_by_kind(EventKind.SAFETY_CHECK))
     assert len(hits) == 1
     assert hits[0]["payload"]["decision"] == "deny"
+
+
+class _BlockingStore:
+    """Store test double that exposes event interleaving deterministically."""
+
+    def __init__(self):
+        self.seqs: list[int] = []
+        self.first_entered = threading.Event()
+        self.second_appended = threading.Event()
+        self.release_first = threading.Event()
+
+    def open_trace(self, trace):  # noqa: ANN001, ARG002
+        return None
+
+    def append_event(self, trace_id, event):  # noqa: ANN001, ARG002
+        if event.seq == 1:
+            self.first_entered.set()
+            assert self.release_first.wait(timeout=2)
+        self.seqs.append(event.seq)
+        if event.seq == 2:
+            self.second_appended.set()
+
+    def close_trace(self, trace):  # noqa: ANN001, ARG002
+        return None
+
+
+def test_audit_event_serializes_shared_trace_updates(tmp_path):
+    store = _BlockingStore()
+    logger = AuditLogger(store, jsonl_file=tmp_path / "audit.jsonl")
+    trace = Trace(user="tester")
+
+    def add_first():
+        logger.event(trace, EventKind.USER_INPUT, {"label": "first"})
+
+    def add_second():
+        assert store.first_entered.wait(timeout=1)
+        logger.event(trace, EventKind.LLM_THOUGHT, {"label": "second"})
+
+    first = threading.Thread(target=add_first, name="first-audit-thread")
+    second = threading.Thread(target=add_second, name="second-audit-thread")
+
+    first.start()
+    second.start()
+    interleaved_before_first_completed = store.second_appended.wait(timeout=0.2)
+    store.release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+    logger.close_file()
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not interleaved_before_first_completed
+    assert store.seqs == [1, 2]
+
+    lines = (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2]

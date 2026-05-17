@@ -4,6 +4,8 @@ build/
 .env
 .env.local
 *.log
+# 模块内的修改日志（review fix 记录）显式入库
+!kyagent/**/*.log
 .DS_Store
 .idea/
 .vscode/

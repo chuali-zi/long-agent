@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -47,32 +48,37 @@ class Trace:
     events: list[TraceEvent] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     _seq: int = 0
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def add(self, kind: EventKind, payload: dict[str, Any] | None = None) -> TraceEvent:
-        self._seq += 1
-        ev = TraceEvent(
-            seq=self._seq,
-            kind=kind,
-            ts=time.time(),
-            payload=payload or {},
-        )
-        self.events.append(ev)
-        return ev
+        with self._lock:
+            self._seq += 1
+            ev = TraceEvent(
+                seq=self._seq,
+                kind=kind,
+                ts=time.time(),
+                payload=payload or {},
+            )
+            self.events.append(ev)
+            return ev
 
     def duration(self) -> float:
-        if not self.events:
-            return 0.0
-        return self.events[-1].ts - self.started_at
+        with self._lock:
+            if not self.events:
+                return 0.0
+            return self.events[-1].ts - self.started_at
 
     def summary(self) -> dict[str, Any]:
-        counts: dict[str, int] = {}
-        for ev in self.events:
-            counts[ev.kind.value] = counts.get(ev.kind.value, 0) + 1
-        return {
-            "trace_id": self.trace_id,
-            "user": self.user,
-            "started_at": self.started_at,
-            "duration": round(self.duration(), 3),
-            "event_count": len(self.events),
-            "by_kind": counts,
-        }
+        with self._lock:
+            counts: dict[str, int] = {}
+            for ev in self.events:
+                counts[ev.kind.value] = counts.get(ev.kind.value, 0) + 1
+            duration = 0.0 if not self.events else self.events[-1].ts - self.started_at
+            return {
+                "trace_id": self.trace_id,
+                "user": self.user,
+                "started_at": self.started_at,
+                "duration": round(duration, 3),
+                "event_count": len(self.events),
+                "by_kind": counts,
+            }
