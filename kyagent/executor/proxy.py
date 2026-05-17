@@ -63,6 +63,29 @@ class ExecutionProxy:
         # preexec_fn 闭包工厂：闭包体本身无状态，可在所有 Popen 之间共享。
         self._shared_preexec = make_preexec_fn(self.cfg)
 
+    @property
+    def supports_parallel_tool_execution(self) -> bool:
+        """是否允许 Agent 在 ThreadPool 中并发调度本 executor 的 self.run()。
+
+        判据：仅当 preexec_fn 为 None 时为 True。
+
+        背景：标准 ExecutionProxy 在 POSIX 上始终通过 preexec_fn 设置 setpgid
+        与 RLIMIT。多线程父进程 fork() 后在子进程里执行任意 Python 回调
+        存在 glibc malloc 死锁、信号语义丢失等已知风险（async-signal-safety）。
+        在切换到 posix_spawn 或确认所有 preexec 操作 fork-safe 之前，本属性
+        在 Linux 上**永远返回 False** —— 即 Agent 的并行工具调度链路在生产
+        环境是 dormant 的（所有多工具回合都走串行）。
+
+        Windows mock 模式下没有 preexec_fn，属性为 True；但 Agent 主循环
+        另有 `sys.platform != "win32"` 一层 gate，所以 Windows 也不会走
+        并行（mock 执行器无真实 I/O，并发也无收益）。
+
+        这是 *未来扩展点*：换用 fork-safe 的子进程启动方式后，覆盖或撤掉
+        此判据即可激活并行路径，届时 _is_parallel_safe + audit per-trace
+        锁会真正发挥作用。
+        """
+        return self._shared_preexec is None
+
     def _resolve_command(self, cmd: str) -> str | None:
         cached = self._which_cache.get(cmd)
         if cached is not None or cmd in self._which_cache:

@@ -57,17 +57,23 @@ class AuditLogger:
         kind: EventKind,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        ev = trace.add(kind, payload)
-        self.store.append_event(trace.trace_id, ev)
-        if self._jsonl_fp is not None:
-            line = json.dumps(
-                {"trace_id": trace.trace_id, **ev.to_dict()},
-                ensure_ascii=False, default=str,
-            )
-            with self._jsonl_lock:
-                self._jsonl_fp.write(line + "\n")
-        if self.verbose:
-            _logger.info("[%s] %s payload=%s", trace.trace_id[:8], kind.value, payload)
+        with trace._lock:
+            ev = trace.add(kind, payload)
+            self.store.append_event(trace.trace_id, ev)
+            if self._jsonl_fp is not None:
+                # 仅作 fast-path 短路，避免 JSONL 关闭时仍构造 json.dumps。
+                # 真正的判空 + 写入在 _jsonl_lock 内统一完成，规避
+                # close_file() 把 _jsonl_fp 置 None 后第二次解引用炸 None 的 TOCTOU。
+                line = json.dumps(
+                    {"trace_id": trace.trace_id, **ev.to_dict()},
+                    ensure_ascii=False, default=str,
+                )
+                with self._jsonl_lock:
+                    fp = self._jsonl_fp
+                    if fp is not None:
+                        fp.write(line + "\n")
+            if self.verbose:
+                _logger.info("[%s] %s payload=%s", trace.trace_id[:8], kind.value, payload)
 
     def close(self, trace: Trace) -> None:
         self.store.close_trace(trace)

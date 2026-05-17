@@ -1,0 +1,42 @@
+# kyagent/agent/core.py 修改日志
+
+## 2026-05-17  并发审查修复 C2：预检 ≠ 内检导致 worker 线程读 stdin
+
+现象
+- _is_parallel_safe 在主线程跑一次 guardrail.check_argv，
+  _handle_tool_use 在 worker 线程再跑一次同样的 check。
+- guardrail 的 llm_reviewer 分支明确捕获异常并把结果置 None
+  （guardrail.py:117-131），等于自承认 reviewer 非确定性。
+- 两次结果可能不一致：预检 ALLOW → worker 内检 CONFIRM →
+  worker 线程进入 self.confirm() 读 stdin。
+- 多个 worker 同时抢 stdin，"谁授权了什么"在审计链上错位。
+
+触发条件
+- 需要三条同时成立：
+  1) C1 解除（POSIX 并行打开）
+  2) safety.llm_review = True
+  3) reviewer 跨两次调用结果不一致 / 中间抛异常被吞
+
+当前是否会触发
+- 不会。C1 在生产 POSIX 上把并行路径整体 gate 死。但代码层面
+  这条不变量没有保护，一旦 C1 改通就立刻活。
+
+修复（两道防线）
+- 1) _is_parallel_safe 在 self.guardrail.llm_reviewer is not None 时
+     直接返回 False。保证"主线程预检 verdict = 落地权威 verdict"。
+- 2) _handle_tool_use 兜底：threading.current_thread() is not
+     threading.main_thread() 且拿到 CONFIRM 时，绝不调用 self.confirm()，
+     直接按 deny 处理 + 写 EventKind.ERROR 留审计证据。
+
+不变量
+- self.confirm() 永远只在主线程执行。
+- 非主线程拿到 CONFIRM 的工具调用一律视为 denied，并产生
+  `reason=confirm_in_worker_denied` 的 ERROR 事件，留有审计回溯。
+
+风险评估
+- 低。
+  · llm_review 默认关闭，多数部署不开。
+  · 即便开启，并行路径目前也由 C1 整体锁死。
+  · 两道防线互为兜底，任一被绕过另一道还能拦。
+- 现有 test_confirm_required_tools_do_not_enter_parallel_path 继续通过，
+  说明 CONFIRM 工具仍然走主线程串行（行为未回归）。

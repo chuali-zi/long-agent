@@ -163,6 +163,14 @@ kyagent audit show trace-abc123
 # → 把这条 trace 的每个事件 panel 化打印出来，可直接做事故复盘
 ```
 
+## 6.5 并发与基线说明
+
+审计链对同一条 trace 的事件用 per-trace `RLock` 串起来：`Trace._lock` 同时覆盖 `seq` 分配、SQLite 写入和 JSONL 追加，保证落盘顺序与逻辑顺序一致；并发场景下不同 trace 之间互不阻塞。
+
+Agent 主循环里有一条 *并行多工具调度* 链路（`Agent._is_parallel_safe` + `ThreadPoolExecutor`），但**当前在生产 Linux 上是 dormant 的**：标准 `ExecutionProxy` 在 POSIX 上始终使用 `preexec_fn` 设置 `setpgid` / `RLIMIT`，`supports_parallel_tool_execution` 因此恒为 False，多工具回合一律走串行。这是有意的安全保守：fork() + 多线程父进程 + Python 回调有 glibc malloc 死锁等已知风险，等切换 `posix_spawn` 后再开。
+
+因此 `benchmarks/baseline.json` 里测出的 ask p50 改善（-34%）**不依赖并行**，全部来自串行路径上的优化（提示重排、工具描述精简、按需缓存等，见 `feature/auto-optimize-2026-05-17` 合入 main 的提交）。基线被冻结作为后续任何 perf 改动的 gate。
+
 ## 7. 工具清单
 
 | 工具 | risk | root | 用途 |

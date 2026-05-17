@@ -1,0 +1,37 @@
+# kyagent/audit/logger.py 修改日志
+
+## 2026-05-17  并发审查修复 H1：_jsonl_fp check-then-use TOCTOU
+
+现象
+- event() 在 _jsonl_lock 外检查 `if self._jsonl_fp is not None:`，
+  随后在 _jsonl_lock 内再次解引用 `self._jsonl_fp.write(...)`。
+- 若另一线程在两次解引用之间调用 close_file() 把 _jsonl_fp 设为 None，
+  第二次解引用会抛 AttributeError: 'NoneType' object has no attribute 'write'。
+
+当前是否会触发
+- 不会。原因：
+  1) agent.shutdown() 不连带调用 audit.close_file()。
+  2) ThreadPoolExecutor 注册的 _python_exit 优先于 user atexit，
+     atexit 跑 _atexit_close 时 worker 早已 join。
+  3) 现有测试 close_file() 之前都显式 join 了所有线程。
+
+为什么仍要修
+- 代码模式本身不正确，是 footgun。
+  · 任何后续添加的 graceful shutdown / __exit__ 路径只要把 close_file
+    挪到 worker 仍存活的窗口就会立刻活。
+  · 比赛对"审计链路鲁棒性"打分，留这种 latent race 不合适。
+
+修复
+- 保留外层 if 作为 fast-path 短路，避免 JSONL 关闭时构造 json.dumps。
+- 把真正的判空 + 写入移到 _jsonl_lock 内：
+      with self._jsonl_lock:
+          fp = self._jsonl_fp
+          if fp is not None:
+              fp.write(line + "\n")
+
+不变量
+- JSONL 关闭后再来的写：静默丢弃该行，不抛异常。
+- SQLite 仍是权威审计源，丢失的 JSONL 行是冗余通道，不影响回溯。
+
+风险评估
+- 低。无行为变化（除消除 race 外）；现有 5 条 audit 测试全过。

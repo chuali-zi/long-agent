@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
@@ -27,7 +28,6 @@ from kyagent.executor.sandbox import SandboxConfig
 from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
 from kyagent.safety.guardrail import Guardrail
-from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.policy import Decision
 
 
@@ -159,16 +159,14 @@ class Agent:
             self.messages.append({"role": "assistant",
                                   "content": self._blocks_to_dict(assistant)})
 
-            # 选择串行 / 并行：本轮内任一工具被声明为 HIGH/CRITICAL 时
-            # 全部回退到串行，便于审计顺序与 confirm 交互；否则并行执行。
-            # 注意：guardrail 校验仍在 _handle_tool_use 内部完成，并行只影响执行
-            # 阶段——任何 deny/confirm 决策不依赖兄弟工具的执行顺序。
-            #
-            # Windows mock 执行器无真实 I/O，线程化只会增加锁竞争，按平台旁路。
+            # 选择串行 / 并行：只有执行器明确声明线程安全，且所有工具预检均为
+            # allow-only 只读调用时才进入线程池。confirm/deny/未知/参数错误路径
+            # 保持串行，避免交互提示与审计流并发交错。
             tool_results: list[dict | None] = [None] * len(tool_uses)
             run_parallel = (
                 sys.platform != "win32"
                 and len(tool_uses) >= 2
+                and self._executor_supports_parallel_tools()
                 and all(self._is_parallel_safe(tu) for tu in tool_uses)
             )
 
@@ -213,8 +211,12 @@ class Agent:
 
     # ---- 工具调用处理 --------------------------------------------------
 
+    def _executor_supports_parallel_tools(self) -> bool:
+        """Whether this executor can safely run tool calls from worker threads."""
+        return bool(getattr(self.executor, "supports_parallel_tool_execution", False))
+
     def _is_parallel_safe(self, tu: ToolUseBlock) -> bool:
-        """声明 HIGH/CRITICAL 的工具走串行，便于审计 + confirm 交互。
+        """Return True only for preflighted allow-only read-only tool calls.
 
         未知工具也按"不可并行"处理；后续 _handle_tool_use 内会以 ERROR 兜底，
         保留原有错误信息。
@@ -222,7 +224,21 @@ class Agent:
         tool = self.registry.get(tu.name)
         if tool is None:
             return False
-        return tool.risk_level.order < RiskLevel.HIGH.order
+        if not tool.read_only:
+            return False
+        # 预检的唯一前提：guardrail 必须是确定性的。一旦 llm_reviewer 介入
+        # （guardrail.py 明确捕获 reviewer 异常并把结果置 None），主线程预检
+        # 拿到的 verdict 与 worker 线程内的 verdict 可能不一致，导致 worker
+        # 走到 CONFIRM 分支并触发 self.confirm() 读 stdin。直接拒绝并行。
+        if self.guardrail.llm_reviewer is not None:
+            return False
+        try:
+            cleaned = tool.validate(tu.input or {})
+            argv = tool.build_argv(cleaned)
+        except ToolError:
+            return False
+        verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
+        return verdict.decision is Decision.ALLOW
 
     def _handle_tool_use(self, trace: Trace, tu: ToolUseBlock,
                         notes: list[str]) -> ToolResultBlock:
@@ -262,6 +278,19 @@ class Agent:
             )
 
         if verdict.decision is Decision.CONFIRM:
+            # 兜底：confirm() 必然在主线程执行。_is_parallel_safe 已经在
+            # 主线程拦掉这条路径，这里防御非确定性 reviewer 让 worker 线程
+            # 意外拿到 CONFIRM 的极端情况——直接按 deny 处理，绝不让 stdin
+            # 被多个 worker 抢，确保审计链上"谁授权了什么"不会错位。
+            if threading.current_thread() is not threading.main_thread():
+                notes.append(f"非主线程下 CONFIRM 默认拒绝 {tu.name}")
+                self.audit.event(trace, EventKind.ERROR,
+                                 {"reason": "confirm_in_worker_denied", "tool": tu.name})
+                return ToolResultBlock(
+                    tool_use_id=tu.id, is_error=True,
+                    content=("[denied] 工具需要二次确认，但当前调度在非主线程，"
+                             f"已自动拒绝（risk={verdict.risk.value}）"),
+                )
             approved = False
             try:
                 approved = self.confirm(tu.name, argv, verdict.to_dict())
