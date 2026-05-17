@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -25,6 +27,7 @@ from kyagent.executor.sandbox import SandboxConfig
 from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
 from kyagent.safety.guardrail import Guardrail
+from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.policy import Decision
 
 
@@ -68,6 +71,21 @@ class Agent:
         self.confirm = confirm
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
+        # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
+        # 在 Windows mock 后端这一开销会盖过并行带来的收益。
+        self._tool_pool: ThreadPoolExecutor | None = None
+
+    def _ensure_pool(self) -> ThreadPoolExecutor:
+        if self._tool_pool is None:
+            self._tool_pool = ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="ky-tool"
+            )
+        return self._tool_pool
+
+    def shutdown(self) -> None:
+        if self._tool_pool is not None:
+            self._tool_pool.shutdown(wait=False)
+            self._tool_pool = None
 
     @classmethod
     def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny) -> "Agent":
@@ -141,20 +159,48 @@ class Agent:
             self.messages.append({"role": "assistant",
                                   "content": self._blocks_to_dict(assistant)})
 
-            # 依次处理每个 tool_use
-            tool_results: list[dict] = []
-            for tu in tool_uses:
-                result_block = self._handle_tool_use(trace, tu, notes)
-                if result_block.is_error and result_block.content.startswith("[denied]"):
-                    denied = True
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu.id,
-                    "content": result_block.content,
-                    "is_error": result_block.is_error,
-                })
+            # 选择串行 / 并行：本轮内任一工具被声明为 HIGH/CRITICAL 时
+            # 全部回退到串行，便于审计顺序与 confirm 交互；否则并行执行。
+            # 注意：guardrail 校验仍在 _handle_tool_use 内部完成，并行只影响执行
+            # 阶段——任何 deny/confirm 决策不依赖兄弟工具的执行顺序。
+            #
+            # Windows mock 执行器无真实 I/O，线程化只会增加锁竞争，按平台旁路。
+            tool_results: list[dict | None] = [None] * len(tool_uses)
+            run_parallel = (
+                sys.platform != "win32"
+                and len(tool_uses) >= 2
+                and all(self._is_parallel_safe(tu) for tu in tool_uses)
+            )
 
-            # 把 tool_result 作为下一轮 user 消息送回
+            if run_parallel:
+                pool = self._ensure_pool()
+                futures = [
+                    pool.submit(self._handle_tool_use, trace, tu, notes)
+                    for tu in tool_uses
+                ]
+                for idx, (tu, fut) in enumerate(zip(tool_uses, futures)):
+                    result_block = fut.result()
+                    if result_block.is_error and result_block.content.startswith("[denied]"):
+                        denied = True
+                    tool_results[idx] = {
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": result_block.content,
+                        "is_error": result_block.is_error,
+                    }
+            else:
+                for idx, tu in enumerate(tool_uses):
+                    result_block = self._handle_tool_use(trace, tu, notes)
+                    if result_block.is_error and result_block.content.startswith("[denied]"):
+                        denied = True
+                    tool_results[idx] = {
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": result_block.content,
+                        "is_error": result_block.is_error,
+                    }
+
+            # 把 tool_result 作为下一轮 user 消息送回（顺序与 tool_uses 一致）
             self.messages.append({"role": "user", "content": tool_results})
 
         # 超出最大迭代
@@ -166,6 +212,17 @@ class Agent:
                               tool_iterations=iterations, denied=denied, notes=notes)
 
     # ---- 工具调用处理 --------------------------------------------------
+
+    def _is_parallel_safe(self, tu: ToolUseBlock) -> bool:
+        """声明 HIGH/CRITICAL 的工具走串行，便于审计 + confirm 交互。
+
+        未知工具也按"不可并行"处理；后续 _handle_tool_use 内会以 ERROR 兜底，
+        保留原有错误信息。
+        """
+        tool = self.registry.get(tu.name)
+        if tool is None:
+            return False
+        return tool.risk_level.order < RiskLevel.HIGH.order
 
     def _handle_tool_use(self, trace: Trace, tu: ToolUseBlock,
                         notes: list[str]) -> ToolResultBlock:

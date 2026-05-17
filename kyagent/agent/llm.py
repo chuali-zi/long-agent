@@ -75,7 +75,13 @@ class LlmBackend:
 class AnthropicBackend(LlmBackend):
     name = "anthropic"
 
-    def __init__(self, model: str, max_tokens: int, api_key_env: str = "ANTHROPIC_API_KEY"):
+    def __init__(
+        self,
+        model: str,
+        max_tokens: int,
+        api_key_env: str = "ANTHROPIC_API_KEY",
+        prompt_cache: bool = True,
+    ):
         try:
             import anthropic  # noqa: F401
         except ImportError as e:
@@ -88,15 +94,38 @@ class AnthropicBackend(LlmBackend):
         self._client = Anthropic(api_key=key)
         self.model = model
         self.max_tokens = max_tokens
+        self.prompt_cache = prompt_cache
 
     def chat(self, system, messages, tools):
-        resp = self._client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=messages,
-            tools=tools or None,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+        }
+        # Anthropic 显式 prompt cache：在 system 与 tools 上挂 ephemeral 断点。
+        # 多轮对话共享同一前缀时直接复用，TTFT 与输入 token 成本都下降。
+        if self.prompt_cache and system:
+            kwargs["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            kwargs["system"] = system
+
+        if tools:
+            if self.prompt_cache:
+                tools_with_cache = [dict(t) for t in tools]
+                # 只给最后一个工具加 cache breakpoint，之前的工具自然被涵盖在
+                # 同一前缀里——Anthropic 的 ephemeral cache 是前缀缓存。
+                tools_with_cache[-1]["cache_control"] = {"type": "ephemeral"}
+                kwargs["tools"] = tools_with_cache
+            else:
+                kwargs["tools"] = tools
+
+        resp = self._client.messages.create(**kwargs)
         blocks: list[TextBlock | ToolUseBlock] = []
         for blk in resp.content:
             if blk.type == "text":
