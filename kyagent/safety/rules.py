@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import posixpath
 import shlex
@@ -57,19 +58,59 @@ def _path_under(path: str, prefixes: list[str]) -> bool:
 
 
 class RuleEngine:
-    """无状态匹配器，可被多个组件共享。"""
+    """无状态匹配器，可被多个组件共享。
+
+    内置一个按 (cmdline, rules_version) 缓存的小型 LRU。
+    rules_version 是规则集的稳定指纹（id + risk + pattern），任何规则集变更都会
+    自然失效旧条目；同一个进程内重复出现的同一条 cmdline 直接命中缓存。
+    """
+
+    _CACHE_MAX = 1024
 
     def __init__(self, rules: list[Rule]):
         self.rules = rules
+        self._version = self._fingerprint(rules)
 
     @classmethod
     def from_yaml(cls, path: str) -> "RuleEngine":
         return cls(load_rules(path))
 
+    @staticmethod
+    def _fingerprint(rules: list[Rule]) -> str:
+        h = hashlib.sha256()
+        for r in rules:
+            h.update(r.id.encode("utf-8"))
+            h.update(b"\x1f")
+            h.update(r.risk.value.encode("utf-8"))
+            h.update(b"\x1f")
+            h.update((r.pattern.pattern if r.pattern else "").encode("utf-8"))
+            h.update(b"\x1f")
+            h.update((r.command or "").encode("utf-8"))
+            h.update(b"\x1f")
+            h.update(",".join(r.flags_any).encode("utf-8"))
+            h.update(b"\x1f")
+            h.update(",".join(r.flags_all).encode("utf-8"))
+            h.update(b"\x1f")
+            h.update(",".join(r.target_in).encode("utf-8"))
+            h.update(b"\x1e")
+        return h.hexdigest()[:12]
+
     # ---- 匹配 ----------------------------------------------------------
 
     def scan_cmdline(self, cmdline: str) -> list[Hit]:
-        """对原始 shell 字符串做扫描；先 pattern，再切词后 argv 维度。"""
+        """对原始 shell 字符串做扫描；先 pattern，再切词后 argv 维度。
+
+        热路径走进程级 LRU；rules_version 进入 key，规则集变化时旧条目失效。
+        """
+        cached = _scan_cached(cmdline, self._version, id(self))
+        if cached is not None:
+            return list(cached)
+
+        hits = self._scan_uncached(cmdline)
+        _scan_store(cmdline, self._version, id(self), tuple(hits))
+        return hits
+
+    def _scan_uncached(self, cmdline: str) -> list[Hit]:
         hits: list[Hit] = []
         try:
             argv = shlex.split(cmdline, posix=True)
@@ -85,6 +126,10 @@ class RuleEngine:
     def scan_argv(self, argv: list[str]) -> list[Hit]:
         cmdline = " ".join(shlex.quote(a) for a in argv)
         return self.scan_cmdline(cmdline) if cmdline else []
+
+    def cache_clear(self) -> None:
+        """显式清空缓存。通常仅在测试或热重载时调用。"""
+        _scan_cached.cache_clear()
 
     # ---- 单条规则匹配 --------------------------------------------------
 
@@ -148,3 +193,35 @@ class RuleEngine:
             description=rule.description,
             matched=matched_repr,
         )
+
+
+# ---- 进程级 LRU 缓存 ------------------------------------------------------
+# Key 三元组：(cmdline, rules_version, engine_id)
+#   - cmdline      : 直接查表
+#   - rules_version: 规则集指纹，规则变更后旧条目自动失效
+#   - engine_id    : 多实例不互相串味（测试场景常见）
+# 使用插入有序 dict + 手动 pop 实现简单 LRU；写入是 dict[key]=value 单步原子，
+# 不需要 GIL 之外的额外同步。
+
+_MANUAL_CACHE: dict[tuple[str, str, int], tuple[Hit, ...]] = {}
+
+
+def _scan_cached(cmdline: str, version: str, engine_id: int) -> tuple[Hit, ...] | None:
+    return _MANUAL_CACHE.get((cmdline, version, engine_id))
+
+
+def _scan_store(cmdline: str, version: str, engine_id: int, hits: tuple[Hit, ...]) -> None:
+    _MANUAL_CACHE[(cmdline, version, engine_id)] = hits
+    if len(_MANUAL_CACHE) > RuleEngine._CACHE_MAX:
+        # 插入有序 dict：最早进入的就是 LRU 头
+        oldest_key = next(iter(_MANUAL_CACHE))
+        _MANUAL_CACHE.pop(oldest_key, None)
+
+
+class _CacheHandle:
+    @staticmethod
+    def cache_clear() -> None:
+        _MANUAL_CACHE.clear()
+
+
+_scan_cached.cache_clear = _CacheHandle.cache_clear  # type: ignore[attr-defined]

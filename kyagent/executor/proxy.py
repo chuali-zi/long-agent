@@ -56,6 +56,20 @@ class ExecutionProxy:
     def __init__(self, cfg: SandboxConfig):
         self.cfg = cfg
         self._current_user = getpass.getuser()
+        # 工具命令 → 绝对路径，进程级稳定（PATH 白名单不变）。
+        self._which_cache: dict[str, str | None] = {}
+        # 干净 env 的不可变模板：每次执行 dict-copy 而不是重新构造。
+        self._env_template: dict[str, str] = build_clean_env(self.cfg)
+        # preexec_fn 闭包工厂：闭包体本身无状态，可在所有 Popen 之间共享。
+        self._shared_preexec = make_preexec_fn(self.cfg)
+
+    def _resolve_command(self, cmd: str) -> str | None:
+        cached = self._which_cache.get(cmd)
+        if cached is not None or cmd in self._which_cache:
+            return cached
+        located = shutil.which(cmd, path=os.pathsep.join(self.cfg.path_whitelist))
+        self._which_cache[cmd] = located
+        return located
 
     # ---- 公共入口 ------------------------------------------------------
 
@@ -98,7 +112,7 @@ class ExecutionProxy:
         # 2. 命令必须能在 PATH 中找到（防注入）
         cmd = final_argv[0]
         if not os.path.isabs(cmd):
-            located = shutil.which(cmd, path=os.pathsep.join(self.cfg.path_whitelist))
+            located = self._resolve_command(cmd)
             if located is None:
                 return ExecutionResult(
                     argv=final_argv, returncode=127, stdout="",
@@ -108,8 +122,13 @@ class ExecutionProxy:
                 )
             final_argv[0] = located
 
-        clean_env = build_clean_env(self.cfg, extra=env)
-        preexec = make_preexec_fn(self.cfg)
+        # 干净 env：模板 + 调用方覆盖；高危变量在合并阶段被过滤。
+        if env:
+            clean_env = build_clean_env(self.cfg, extra=env)
+        else:
+            clean_env = dict(self._env_template)
+        # preexec_fn 是无状态闭包，复用同一份。
+        preexec = self._shared_preexec
 
         start = time.monotonic()
         try:
