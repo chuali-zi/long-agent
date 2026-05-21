@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · CLI 入口 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html" class="active">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 10 · CLI ENTRY</div>
+  <h1>CLI 入口<br><span class="sub">typer + Rich 子命令树</span></h1>
+  <p class="lead">
+    对应文件 <code>kyagent/cli.py</code> + <code>kyagent/__main__.py</code>。
+    六个子命令把所有组件串起来，<strong>Rich Panel</strong> 给运维人看的视觉化反馈。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 子命令树</h2>
+
+  <pre class="diagram">
+<span class="hi">kyagent</span>
+├── <span class="hi3">chat</span>                   <span class="cmt"># 进入交互式对话（默认子命令）</span>
+├── <span class="hi3">ask &lt;text&gt;</span>             <span class="cmt"># 单轮提问</span>
+├── tools list             <span class="cmt"># 列出所有工具</span>
+├── safety test &lt;cmd&gt;      <span class="cmt"># 让护栏单独裁决一条命令（不执行）</span>
+├── audit list             <span class="cmt"># 最近 N 条 trace 概览</span>
+├── audit show &lt;id&gt;        <span class="cmt"># 打印某条 trace 的完整事件流</span>
+└── mcp serve              <span class="cmt"># 以 stdio 启动 MCP 服务器</span></pre>
+
+  <div class="code-annot">
+    <div class="file">kyagent/__main__.py</div>
+<pre><code>from kyagent.cli import app
+
+if __name__ == "__main__":
+    app()</code></pre>
+  </div>
+  <p><code>python -m kyagent</code> = <code>kyagent/__main__.py</code> 被执行 → <code>cli.app()</code>。</p>
+</section>
+
+<section>
+  <h2><span class="num">2</span> typer 应用树</h2>
+<pre><code>app = typer.Typer(no_args_is_help=False, add_completion=False, help="kyagent — 麒麟安全运维 Agent CLI")
+tools_app = typer.Typer(help="工具相关")
+safety_app = typer.Typer(help="安全护栏调试")
+audit_app = typer.Typer(help="审计日志")
+mcp_app = typer.Typer(help="MCP 协议")
+
+app.add_typer(tools_app, name="tools")
+app.add_typer(safety_app, name="safety")
+app.add_typer(audit_app, name="audit")
+app.add_typer(mcp_app, name="mcp")</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">3</span> Windows UTF-8 强制</h2>
+
+  <div class="code-annot">
+    <div class="file">cli.py:21 · import 时执行</div>
+<pre><code>if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, io.UnsupportedOperation):
+        pass</code></pre>
+  </div>
+
+  <p>Windows 控制台默认 GBK 编码，输出中文 / emoji 会 <code>UnicodeEncodeError</code>。这段在 import 时强行切到 utf-8。</p>
+</section>
+
+<section>
+  <h2><span class="num">4</span> _cli_confirm · 交互式确认</h2>
+
+  <p>把 verdict 用 Rich Panel 渲染（黄框），列出风险等级 + 完整 argv + 命中规则。<code>Prompt.ask</code> 限制只能输 y/n，<strong>默认 n</strong>（即用户回车 = 拒绝）。</p>
+
+  <pre class="diagram">
+<span class="hi2">───────────  需要用户确认 — svc_restart  ───────────</span>
+
+╭─ <span class="hi2">安全审查</span> ─────────────────────────────────────────╮
+│ 风险等级: high                                       │
+│ 待执行 argv: systemctl restart nginx                 │
+│ 命中规则:                                            │
+│                                                      │
+│ （declared_risk 抬升）                               │
+╰──────────────────────────────────────────────────────╯
+是否放行？ [y/n] (n):</pre>
+</section>
+
+<section>
+  <h2><span class="num">5</span> chat 命令 · 交互模式</h2>
+
+  <h3>5.1 内置斜杠命令</h3>
+  <div class="cards">
+    <div class="card"><div class="label">/exit · /quit</div><div class="title">退出 chat</div><div class="body">EOF / Ctrl+C 也会退出</div></div>
+    <div class="card"><div class="label">/audit</div><div class="title">打印上一条 trace</div><div class="body">无需手动记 trace_id</div></div>
+    <div class="card"><div class="label">/reset</div><div class="title">清空 messages 列表</div><div class="body">开始新的对话上下文</div></div>
+  </div>
+
+  <h3>5.2 渲染</h3>
+  <pre class="diagram">
+你: 查 22 端口
+╭─ <span class="hi">kyagent · trace=trace-1f2e3d · iter=2</span> ──────────────╮
+│ 22 端口由 sshd 占用（PID 1234，启动 ...）            │
+│                                                      │
+│ <span class="hi3">已检测到 ssh 服务运行正常。</span>                     │
+╰──────────────────────────────────────────────────────╯
+<span class="cmt">已拦截 X | 用户拒绝 Y</span> &lt;-- notes</pre>
+</section>
+
+<section>
+  <h2><span class="num">6</span> ask 命令 · 单轮模式</h2>
+
+  <div class="code-annot">
+    <div class="file">cli.py:127</div>
+<pre><code>@app.command()
+def ask(text, config=None, user="oneshot", json_out=False):
+    cfg = load_config(config)
+    agent = Agent.from_config(cfg, confirm=lambda *a, **k: False)  # 一律拒绝
+    result = agent.ask(text, user=user)
+    if json_out:
+        sys.stdout.write(json.dumps({
+            "trace_id": result.trace.trace_id,
+            "text": result.final_text,
+            "iterations": result.tool_iterations,
+            "denied": result.denied,
+            "notes": result.notes,
+        }, ensure_ascii=False, indent=2) + "\n")
+        return
+    console.print(result.final_text)</code></pre>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="label">FEATURE</div><div class="title">confirm = always False</div><div class="body">单轮没有人交互，凡 CONFIRM 一律 deny</div></div>
+    <div class="card"><div class="label">FEATURE</div><div class="title">--json 输出</div><div class="body">machine-readable，方便管道接入其它工具</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7</span> tools list · 18 个工具一览</h2>
+
+  <pre class="diagram">
+┌─ kyagent 工具清单 ──────────────────────────────────────────────────────────┐
+│ name              risk     root?  read-only?  description                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ process_list      <span class="hi3">low</span>      no     yes         查看占用 CPU/内存最高的进程 │
+│ lsof_port         <span class="hi3">low</span>      no     yes         查看占用某端口的进程         │
+│ lsof_pid          <span class="hi3">low</span>      no     yes         查看某 PID 的打开文件        │
+│ net_listen        <span class="hi3">low</span>      no     yes         查看监听端口                 │
+│ net_connections   <span class="hi3">low</span>      no     yes         查看活跃 TCP 连接            │
+│ net_ping          <span class="hi3">low</span>      no     yes         ping 主机                    │
+│ log_journal       <span class="hi3">low</span>      no     yes         journalctl 日志              │
+│ log_dmesg         <span class="hi3">low</span>      no     yes         内核环缓冲日志               │
+│ svc_status        <span class="hi3">low</span>      no     yes         systemctl status             │
+│ svc_list          <span class="hi3">low</span>      no     yes         列出 systemd 服务            │
+│ svc_restart       <span class="hi">high</span>     <span class="hi">yes</span>    no          重启服务                     │
+│ svc_reload        <span class="hi2">medium</span>   <span class="hi">yes</span>    no          reload 服务配置              │
+│ fs_df             <span class="hi3">low</span>      no     yes         磁盘空间                     │
+│ fs_du             <span class="hi3">low</span>      no     yes         目录大小                     │
+│ fs_ls             <span class="hi3">low</span>      no     yes         目录列表                     │
+│ fs_find           <span class="hi3">low</span>      no     yes         find 搜文件                  │
+│ pkg_info          <span class="hi3">low</span>      no     yes         软件包详情                   │
+│ pkg_installed     <span class="hi3">low</span>      no     yes         已安装软件包                 │
+└─────────────────────────────────────────────────────────────────────────────┘</pre>
+
+  <p>会过 <code>cfg.mcp.enable_tools</code> 白名单（如果非空只显示白名单内的）。</p>
+</section>
+
+<section>
+  <h2><span class="num">8</span> safety test · 离线测一条命令</h2>
+
+  <p>非常适合演示：</p>
+  <pre><code>kyagent safety test "rm -rf /etc"</code></pre>
+
+  <pre class="diagram">
+╭─ <span style="color:#FF3D6E">safety verdict</span> ───────────────────────────────────────╮
+│ cmdline: rm -rf /etc                                  │
+│ risk:    <span style="color:#FF3D6E">critical</span>                                     │
+│ decision:<span style="color:#FF3D6E">deny</span>                                         │
+│                                                       │
+│ hits:                                                 │
+│   - <span class="hi2">rm-recursive-system (critical)</span>: 递归删除关键系统目录│
+│       matched: target=/etc                            │
+│   - <span class="hi2">dangerous-rm-pattern (critical)</span>: 经典写法 rm -rf /  │
+│       matched: rm -rf /                               │
+│                                                       │
+│ rationale:                                            │
+│   · 命中 2 条规则，最高 risk=critical                 │
+│   · 策略映射: critical -> deny                        │
+╰───────────────────────────────────────────────────────╯</pre>
+
+  <div class="callout ok">
+    <span class="icon">SAFE</span>
+    <div class="body">
+      <strong>完全离线，不会真正执行</strong>。比赛演示利器。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9</span> audit list / show · 推理链回看</h2>
+
+  <h3>9.1 audit list</h3>
+  <pre class="diagram">
+┌─ 最近 trace ────────────────────────────────────────────────────────────────┐
+│ trace_id          user          started_at           channel                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ trace-9a8b7c6d5e  interactive   2026-05-20 14:33:21  mock                   │
+│ trace-1f2e3d4567  oneshot       2026-05-20 14:30:11  anthropic              │
+│ trace-aabbccddee  mcp-client    2026-05-20 14:28:45  <span class="hi">mcp</span>                    │
+└─────────────────────────────────────────────────────────────────────────────┘</pre>
+
+  <h3>9.2 audit show &lt;trace-id&gt;</h3>
+  <p>按 seq 顺序打印每个事件，每条事件一个 Panel，颜色按 kind 区分：</p>
+
+  <div class="cards">
+    <div class="card" style="border-left:3px solid var(--evt-user);"><div class="title">USER_INPUT</div><div class="body">bold green</div></div>
+    <div class="card" style="border-left:3px solid var(--evt-llm);"><div class="title">LLM_THOUGHT</div><div class="body">magenta</div></div>
+    <div class="card" style="border-left:3px solid var(--evt-tool);"><div class="title">TOOL_REQUEST</div><div class="body">blue</div></div>
+    <div class="card" style="border-left:3px solid var(--evt-safety);"><div class="title">SAFETY_CHECK</div><div class="body">yellow</div></div>
+    <div class="card" style="border-left:3px solid var(--evt-exec);"><div class="title">EXECUTION / EXEC_RESULT</div><div class="body">blue / cyan</div></div>
+    <div class="card" style="border-left:3px solid var(--evt-reply);"><div class="title">AGENT_REPLY</div><div class="body">bold blue</div></div>
+    <div class="card" style="border-left:3px solid var(--evt-error);"><div class="title">ERROR</div><div class="body">red</div></div>
+  </div>
+
+  <p>Payload 超过 1500 字截断（防止单条事件占满屏幕）。</p>
+</section>
+
+<section>
+  <h2><span class="num">10</span> mcp serve · 启动 MCP 服务器</h2>
+  <pre><code>@mcp_app.command("serve")
+def mcp_serve(config=None):
+    from kyagent.mcp.server import main as serve_main
+    if config:
+        os.environ["KYAGENT_CONFIG"] = config
+    serve_main()</code></pre>
+  <p>把 <code>--config</code> 选项通过环境变量传给 MCP server（因为 server.main 也走 <code>load_config()</code>）。</p>
+</section>
+
+<section>
+  <h2><span class="num">11</span> 默认子命令</h2>
+<pre><code>@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context):
+    if ctx.invoked_subcommand is None:
+        chat()</code></pre>
+
+  <p><code>kyagent</code>（不带任何参数）= <code>kyagent chat</code>。这是 typer 的 <code>invoke_without_command=True</code> 模式。</p>
+</section>
+
+<section>
+  <h2><span class="num">12</span> Rich 渲染元素</h2>
+
+  <table>
+    <thead><tr><th>元素</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>Console</code></td><td>全局打印对象</td></tr>
+      <tr><td><code>Panel.fit</code></td><td>自适应宽度的带边框面板</td></tr>
+      <tr><td><code>Table</code></td><td>表格（tools list / audit list）</td></tr>
+      <tr><td><code>Prompt.ask</code></td><td>交互输入</td></tr>
+      <tr><td><code>Text</code></td><td>带样式的字符串（risk 颜色）</td></tr>
+      <tr><td><code>console.rule</code></td><td>水平分隔线</td></tr>
+      <tr><td><code>[color]text[/]</code></td><td>行内样式（fg color）</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">13</span> 端到端命令速查</h2>
+<pre><code># 进入聊天
+kyagent chat
+
+# 单轮 + JSON 输出
+kyagent ask "查 80 端口" --json
+
+# 查看所有工具
+kyagent tools list
+
+# 测试某条命令的护栏裁决
+kyagent safety test "rm -rf /etc"
+
+# 查看最近 10 条 trace
+kyagent audit list -n 10
+
+# 回看某条 trace
+kyagent audit show trace-1f2e3d4567
+
+# 启动 MCP server（被 Claude Desktop 调用）
+kyagent mcp serve
+
+# 显式指定配置
+kyagent ask "查 80 端口" --config configs/openai.yaml</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">14</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong><code>kyagent</code>（无参数）= <code>kyagent chat</code></strong>：默认子命令</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>CLI confirm 只在 chat 子命令注入</strong>：ask 子命令一律拒绝</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong><code>safety test</code> 是纯离线的</strong>：不会真的执行任何东西</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong><code>audit list/show</code> 不需要 Agent 实例</strong>：直接读 SQLite</div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="09-config.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">09 · 配置系统</div>
+  </a>
+  <a href="11-security-model.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">11 · 安全模型总览</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

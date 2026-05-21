@@ -17,3 +17,5 @@ var/
 logs/
 benchmarks/results.json
 benchmarks/comparison.json
+.claude/
+.tmp/

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>00 · START HERE · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html" class="active">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 00 · START HERE</div>
+  <h1>从这里开始<br><span class="sub">kyagent 源码精读路线图</span></h1>
+  <p class="lead">
+    你正在读的是 <code>D:\race\long</code> 仓库（A2 赛题：面向麒麟操作系统的安全智能运维 Agent）的
+    <strong>逐文档源码精读</strong>。
+    目标：读完之后，你能闭着眼睛画出每条数据流、解释任何一行代码为什么这样写、
+    以及它在比赛评分维度上对应哪一条要求。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">0</span> 仓库一句话定位</h2>
+  <div class="callout">
+    <span class="icon">CORE</span>
+    <div class="body">
+      <strong>kyagent = 「自然语言 ↔ 麒麟 OS 实时状态」的可控闭环。</strong>
+      用户用中文说一句话，Agent 调系统工具拿到真状态，安全护栏二次过滤，最小权限账户落地执行，全过程留审计。
+    </div>
+  </div>
+
+  <h3>赛题 5 条功能要求 → 5 个模块</h3>
+  <table>
+    <thead>
+      <tr><th>赛题要求</th><th>模块</th><th>单点入口</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>① OS 环境深度感知</td><td><code>kyagent/mcp/tools/</code></td><td><code>default_registry()</code></td></tr>
+      <tr><td>② MCP 运维插件化</td><td><code>kyagent/mcp/</code></td><td><code>Tool + ToolRegistry + McpServer</code></td></tr>
+      <tr><td>③ 安全意图校验器</td><td><code>kyagent/safety/</code></td><td><code>Guardrail.check_argv()</code></td></tr>
+      <tr><td>④ 最小权限代理执行</td><td><code>kyagent/executor/</code></td><td><code>ExecutionProxy.run()</code></td></tr>
+      <tr><td>⑤ 推理链路溯源</td><td><code>kyagent/audit/</code></td><td><code>AuditLogger.event()</code></td></tr>
+    </tbody>
+  </table>
+  <p>把这五个模块用 <code>kyagent/agent/core.py</code> 的主循环串起来，就是 <code>Agent.ask()</code>。</p>
+</section>
+
+<section>
+  <h2><span class="num">1</span> 推荐阅读路线</h2>
+  <div class="cards">
+    <div class="card accent">
+      <div class="label">QUICK · 约 1 小时</div>
+      <div class="title">新手快速过</div>
+      <div class="body">
+        ① <code>00-START-HERE</code><br>
+        ② <code>01-architecture-overview</code> 顶层架构图<br>
+        ③ <code>02-data-flow</code> ★ 钥匙<br>
+        ④ <code>03-agent-core</code> 主循环
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">FULL · 约半天</div>
+      <div class="title">全面理解</div>
+      <div class="body">
+        按 <code>00 → 13</code> 顺序通读，每读完一份，对应在源码里跳一遍，把 file:line 锚点都点开看一次。
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">DEEP DIVE</div>
+      <div class="title">专项精读</div>
+      <div class="body">
+        危险命令拦截 → <code>05</code> + <code>11</code><br>
+        并发安全 → <code>12</code><br>
+        评测 baseline → <code>13</code>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> 完整文档清单</h2>
+  <table>
+    <thead><tr><th>#</th><th>标题</th><th>主要回答的问题</th></tr></thead>
+    <tbody>
+      <tr><td>00</td><td><a href="00-START-HERE.html">START-HERE</a></td><td>路线图（你在这里）</td></tr>
+      <tr><td>01</td><td><a href="01-architecture-overview.html">architecture-overview</a></td><td>这些模块怎么拼在一起？谁依赖谁？</td></tr>
+      <tr><td>02</td><td><a href="02-data-flow.html">data-flow</a></td><td>一句「查 80 端口」从输入到回复经过多少层？</td></tr>
+      <tr><td>03</td><td><a href="03-agent-core.html">agent-core</a></td><td>Agent.ask() 主循环的每个分支都干嘛？</td></tr>
+      <tr><td>04</td><td><a href="04-llm-backends.html">llm-backends</a></td><td>Anthropic / OpenAI / Mock 三套后端怎么统一？</td></tr>
+      <tr><td>05</td><td><a href="05-safety-layer.html">safety-layer</a></td><td>规则引擎 + 策略映射 + 可选 LLM 复审？</td></tr>
+      <tr><td>06</td><td><a href="06-executor-sandbox.html">executor-sandbox</a></td><td>sudo 怎么包？preexec_fn 设了哪些 rlimit？env 怎么洗？</td></tr>
+      <tr><td>07</td><td><a href="07-mcp-tools.html">mcp-tools</a></td><td>六大工具家族每一个 argv 长什么样？</td></tr>
+      <tr><td>08</td><td><a href="08-audit-chain.html">audit-chain</a></td><td>Trace / TraceEvent / SQLite / JSONL 四件套？</td></tr>
+      <tr><td>09</td><td><a href="09-config.html">config</a></td><td>YAML + 环境变量 + Pydantic 怎么组合？</td></tr>
+      <tr><td>10</td><td><a href="10-cli-entry.html">cli-entry</a></td><td>typer 子命令树 + Rich 渲染怎么工作？</td></tr>
+      <tr><td>11</td><td><a href="11-security-model.html">security-model</a></td><td>全部防御层叠在一起的威胁模型</td></tr>
+      <tr><td>12</td><td><a href="12-concurrency.html">concurrency</a></td><td>并发模型 + 三处 review 修复（H1/C2/C1）</td></tr>
+      <tr><td>13</td><td><a href="13-testing-bench.html">testing-bench</a></td><td>7 个测试文件 + 冻结基线测什么？</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">3</span> 看代码时怎么定位</h2>
+  <p>仓库根目录 <code>D:\race\long</code>，所有源码在 <code>kyagent/</code>，配置在 <code>configs/</code>，测试在 <code>tests/</code>。</p>
+
+  <div class="filetree">
+<span class="dir">D:\race\long\</span>
+├── <span class="dir">kyagent/</span>                <span class="cmt"># 主包</span>
+│   ├── <span class="file">__init__.py</span>         <span class="cmt"># 暴露 __version__</span>
+│   ├── <span class="file">__main__.py</span>         <span class="cmt"># python -m kyagent → cli.app()</span>
+│   ├── <span class="file">cli.py</span>              <span class="cmt"># typer + rich 的 CLI 子命令树</span>
+│   ├── <span class="file">config.py</span>           <span class="cmt"># Pydantic 配置 schema + YAML 加载器</span>
+│   ├── <span class="dir">agent/</span>
+│   │   ├── <span class="file">core.py</span>         <span class="star">★</span> <span class="cmt">Agent.ask() 主循环（最重要）</span>
+│   │   ├── <span class="file">llm.py</span>          <span class="star">★</span> <span class="cmt">LLM 后端抽象：Anthropic/OpenAI/Mock</span>
+│   │   └── <span class="file">prompt.py</span>       <span class="cmt"># SYSTEM_PROMPT 文本</span>
+│   ├── <span class="dir">safety/</span>
+│   │   ├── <span class="file">patterns.py</span>     <span class="cmt"># RiskLevel + Rule dataclass + load_rules()</span>
+│   │   ├── <span class="file">rules.py</span>        <span class="star">★</span> <span class="cmt">RuleEngine 匹配引擎 + 进程级 LRU</span>
+│   │   ├── <span class="file">policy.py</span>       <span class="cmt"># Decision enum + Policy.decide()</span>
+│   │   └── <span class="file">guardrail.py</span>    <span class="star">★</span> <span class="cmt">多级护栏主流水线</span>
+│   ├── <span class="dir">executor/</span>
+│   │   ├── <span class="file">sandbox.py</span>      <span class="cmt"># SandboxConfig + preexec_fn + 干净 env</span>
+│   │   └── <span class="file">proxy.py</span>        <span class="star">★</span> <span class="cmt">ExecutionProxy.run() POSIX 落地</span>
+│   ├── <span class="dir">audit/</span>
+│   │   ├── <span class="file">trace.py</span>        <span class="cmt"># Trace + TraceEvent + EventKind + RLock</span>
+│   │   ├── <span class="file">logger.py</span>       <span class="star">★</span> <span class="cmt">AuditLogger.event() 双通道写入</span>
+│   │   └── <span class="file">store.py</span>        <span class="cmt"># SQLite 持久化（WAL）</span>
+│   └── <span class="dir">mcp/</span>
+│       ├── <span class="file">server.py</span>       <span class="cmt"># MCP stdio JSON-RPC 服务器</span>
+│       └── <span class="dir">tools/</span>
+│           ├── <span class="file">base.py</span>     <span class="star">★</span> <span class="cmt">Tool 抽象基类 + ToolRegistry</span>
+│           ├── <span class="file">process.py</span>  <span class="cmt"># process_list / lsof_port / lsof_pid</span>
+│           ├── <span class="file">network.py</span>  <span class="cmt"># net_listen / net_connections / net_ping</span>
+│           ├── <span class="file">logs.py</span>     <span class="cmt"># log_journal / log_dmesg</span>
+│           ├── <span class="file">service.py</span>  <span class="cmt"># svc_status / svc_list / svc_restart / svc_reload</span>
+│           ├── <span class="file">filesystem.py</span> <span class="cmt"># fs_df / fs_du / fs_ls / fs_find</span>
+│           └── <span class="file">package.py</span> <span class="cmt"># pkg_info / pkg_installed</span>
+├── <span class="dir">configs/</span>
+│   ├── <span class="file">default.yaml</span>        <span class="cmt"># 默认配置（mock 后端）</span>
+│   ├── <span class="file">openai.yaml</span>         <span class="cmt"># OpenAI 协议兼容（DeepSeek/智谱/Ollama）</span>
+│   ├── <span class="file">safety-rules.yaml</span>   <span class="cmt"># 27 条危险命令规则</span>
+│   └── <span class="file">sudoers.kyagent</span>     <span class="cmt"># /etc/sudoers.d 白名单</span>
+├── <span class="dir">tests/</span>                   <span class="cmt"># 99 个测试用例</span>
+├── <span class="dir">benchmarks/</span>
+│   ├── <span class="file">bench_ask.py</span>        <span class="cmt"># 冻结的性能基线脚本</span>
+│   └── <span class="file">baseline.json</span>       <span class="cmt"># 冻结的基线数字</span>
+├── <span class="file">README.md / README.kyagent.md</span>
+└── <span class="file">pyproject.toml</span>
+  </div>
+
+  <div class="callout">
+    <span class="icon">★</span>
+    <div class="body">带 <span style="color:var(--risk-medium);font-weight:700">★</span> 标记的是关键文件，研究路径时优先点开。</div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4</span> 在仓库里跑代码（快速冒烟）</h2>
+<pre><code># 装包
+python -m pip install -e .
+
+# 跑全部测试（99 通过，POSIX-only 用例在 Windows 上 2 个 skip）
+python -m pytest -q
+
+# mock 后端：不需要任何 API key，规则路由演示完整闭环
+python -m kyagent ask "查下 CPU 占用最高的进程" --json
+
+# 列工具 + 风险等级
+python -m kyagent tools list
+
+# 让护栏单独评估一条命令，不真正执行
+python -m kyagent safety test "rm -rf /etc"
+
+# 查看上一轮 trace
+python -m kyagent audit list -n 5
+python -m kyagent audit show &lt;trace-id&gt;
+
+# 作为 MCP server 挂到 Claude Desktop
+python -m kyagent mcp serve</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">5</span> 接下来读哪一份？</h2>
+  <div class="callout ok">
+    <span class="icon">NEXT</span>
+    <div class="body">
+      <strong>最关键的一份是 <a href="02-data-flow.html">02 · data-flow</a></strong> ——
+      它把所有模块用一条时序串起来，看完之后你心里就有「代码运行起来到底在干嘛」的清晰画面，
+      再去读各个模块就不会迷路。
+    </div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="index.html">
+    <div class="dir">← 返回</div>
+    <div class="ttl">导航首页</div>
+  </a>
+  <a href="01-architecture-overview.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">01 · 架构总览</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

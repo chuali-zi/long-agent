@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>06 · 执行代理 + 沙箱 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html" class="active">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 06 · EXECUTOR + SANDBOX · 赛题 ④</div>
+  <h1>执行代理 + 沙箱<br><span class="sub">最小权限落地</span></h1>
+  <p class="lead">
+    对应文件 <code>kyagent/executor/{sandbox,proxy}.py</code> + <code>configs/sudoers.kyagent</code>。
+    这是赛题<strong>第 ④ 条「最小权限代理执行」</strong>的落地。
+    每一条设计都直接对应一种攻击。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 设计原则 ↔ 攻击映射</h2>
+  <table>
+    <thead><tr><th>设计</th><th>防的是什么</th></tr></thead>
+    <tbody>
+      <tr><td>永远只接 <code>argv: list[str]</code>，绝不调 shell</td><td>shell 注入</td></tr>
+      <tr><td>默认以非 root 受限账户运行</td><td>提权风险</td></tr>
+      <tr><td><code>requires_root</code> 走 <code>sudo -n -u root</code>，依赖 sudoers 白名单</td><td>不可控提权</td></tr>
+      <tr><td><code>forbid_root=True</code> 时拒绝所有 root 提权</td><td>防误启用</td></tr>
+      <tr><td>PATH 白名单 + 显式 <code>which()</code></td><td>命令路径污染</td></tr>
+      <tr><td>干净 env（过滤 LD_PRELOAD 等）</td><td>共享库注入</td></tr>
+      <tr><td><code>preexec_fn</code>：setpgid + RLIMIT_*</td><td>失控进程 / 资源耗尽</td></tr>
+      <tr><td>communicate 带 timeout，超时杀整组</td><td>超时挂死</td></tr>
+      <tr><td>stdout/stderr 截断到 output_cap</td><td>输出炸内存</td></tr>
+      <tr><td>Windows 上 mock，永远不执行 Linux 工具</td><td>开发态误操作本机</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">2</span> SandboxConfig — 所有沙箱参数集中一处</h2>
+  <div class="kv">
+    <div class="k">account</div><div class="v">"kyagent" · 受限运行账户名（建议 useradd -r -s /usr/sbin/nologin）</div>
+    <div class="k">timeout</div><div class="v">30.0 · 单命令超时秒</div>
+    <div class="k">output_cap</div><div class="v">65536 · stdout / stderr 各自字节上限</div>
+    <div class="k">restrict_path</div><div class="v">True · 是否强制 PATH 白名单</div>
+    <div class="k">path_whitelist</div><div class="v">("/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")</div>
+    <div class="k">rlimit_cpu_seconds</div><div class="v">60 · 单 CPU 秒</div>
+    <div class="k">rlimit_address_mb</div><div class="v">1024 · 虚拟地址 1G</div>
+    <div class="k">rlimit_fsize_mb</div><div class="v">32 · 单文件最大写入 32M</div>
+    <div class="k">rlimit_nofile</div><div class="v">256 · 句柄数</div>
+    <div class="k">forbid_root</div><div class="v">True · 全局禁用任何 root 提权</div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3</span> preexec_fn 工厂</h2>
+
+  <p><code>preexec_fn</code> 在 <code>fork()</code> 之后、<code>exec()</code> 之前在子进程里运行。这是设置 rlimit / 改进程组的关键时机。</p>
+
+  <div class="code-annot">
+    <div class="file">★ executor/sandbox.py:33</div>
+<pre><code>def _preexec():
+    # 独立进程组，便于整组超时 kill
+    try: os.setpgrp()
+    except OSError: pass
+
+    # CPU 时间 / 地址空间 / 单文件大小 / 句柄数
+    try: resource.setrlimit(resource.RLIMIT_CPU,
+                            (cfg.rlimit_cpu_seconds, cfg.rlimit_cpu_seconds))
+    except (OSError, ValueError): pass
+    try: resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+    except (OSError, ValueError): pass
+    try: resource.setrlimit(resource.RLIMIT_FSIZE, (f_bytes, f_bytes))
+    except (OSError, ValueError): pass
+    try: resource.setrlimit(resource.RLIMIT_NOFILE,
+                            (cfg.rlimit_nofile, cfg.rlimit_nofile))
+    except (OSError, ValueError): pass</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><strong>每个 setrlimit 都 try/except</strong>：某个 rlimit 在容器里可能不允许，单条失败不应阻止其它生效</div></div>
+    <div class="bul"><span class="b-num">2</span><div><strong>setpgrp()</strong>：让子进程成为新进程组组长。超时 kill 时 <code>killpg(pgid, SIGTERM)</code> 一次性杀整棵子树</div></div>
+    <div class="bul"><span class="b-num">3</span><div><strong>Windows 返回 None</strong>：subprocess.Popen 在 win32 上不接受 preexec_fn</div></div>
+  </div>
+
+  <div class="callout warn">
+    <span class="icon">C1</span>
+    <div class="body">
+      <strong>安全代价</strong>：这个 preexec_fn 在多线程父进程下与 fork() 组合是不安全的（glibc malloc 死锁、async-signal-safety）。
+      这就是为什么 <code>supports_parallel_tool_execution</code> 在 POSIX 上 gated off——详见
+      <a href="12-concurrency.html">12-concurrency</a> 的 C1。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4</span> build_clean_env · 双重 PATH 防御</h2>
+
+  <div class="code-annot">
+    <div class="file">executor/sandbox.py:75</div>
+<pre><code>base = {
+    "LANG": os.environ.get("LANG", "C.UTF-8"),
+    "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+    "HOME": os.environ.get("HOME", "/tmp"),
+    "USER": cfg.account,
+    "LOGNAME": cfg.account,
+    "SHELL": "/bin/sh",
+    "TERM": os.environ.get("TERM", "dumb"),
+}
+if cfg.restrict_path:
+    base["PATH"] = os.pathsep.join(cfg.path_whitelist)
+
+# extra 黑名单过滤
+forbidden = {"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+             "PYTHONPATH", "BASH_ENV"}
+for k, v in (extra or {}).items():
+    if k in forbidden: continue
+    base[k] = v</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>只放白名单变量</strong>：父进程的 env 没继承，<code>KYAGENT_API_KEY</code> 之类密钥不会泄漏给子命令</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>PATH 强制白名单</strong>：哪怕 restrict_path=False，默认值也是白名单</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>forbidden 黑名单</strong>：调用方传 <code>extra={"LD_PRELOAD":"..."}</code> 也会被静默过滤</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>TERM=dumb</strong>：避免 dmesg / journalctl 输出 ANSI 颜色码污染 stdout</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> ExecutionProxy 缓存三件套</h2>
+
+  <p>commit e276c77 的优化点 — 把 executor 每次调用开销从「重新构造」降到「复用 + 偶尔 dict 拷贝」。</p>
+
+  <div class="cards">
+    <div class="card accent">
+      <div class="label">CACHE 1</div>
+      <div class="title">_which_cache</div>
+      <div class="body">命令 → 绝对路径，避免重复 <code>shutil.which</code>。即便缓存 None 也算命中（避免重复查找不存在的命令）。</div>
+    </div>
+    <div class="card accent">
+      <div class="label">CACHE 2</div>
+      <div class="title">_env_template</div>
+      <div class="body">干净 env 的不可变模板，每次执行只 <code>dict(...)</code> 浅拷贝</div>
+    </div>
+    <div class="card accent">
+      <div class="label">CACHE 3</div>
+      <div class="title">_shared_preexec</div>
+      <div class="body">preexec_fn 闭包，每个 Popen 复用同一份</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> run() POSIX 完整生命周期</h2>
+
+  <svg viewBox="0 0 1100 480" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:var(--bg-code);border:1px solid var(--border);border-radius:12px;padding:14px;">
+    <defs>
+      <marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#FF7E45"/>
+      </marker>
+    </defs>
+
+    <rect x="40" y="20" width="240" height="60" rx="8" fill="#0E1424" stroke="#41E5FF"/>
+    <text x="160" y="44" text-anchor="middle" fill="#F5F7FA" font-size="13" font-weight="700">argv (来自 Tool.build_argv)</text>
+    <text x="160" y="64" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">requires_root: bool</text>
+
+    <line x1="160" y1="82" x2="160" y2="115" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="40" y="120" width="240" height="60" rx="8" fill="#121624" stroke="#FF7E45"/>
+    <text x="160" y="144" text-anchor="middle" fill="#FF7E45" font-size="12" font-weight="700">_wrap_privilege</text>
+    <text x="160" y="164" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">sudo / forbid_root / direct</text>
+
+    <line x1="280" y1="150" x2="318" y2="150" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="320" y="120" width="240" height="60" rx="8" fill="#121624" stroke="#41E5FF"/>
+    <text x="440" y="144" text-anchor="middle" fill="#41E5FF" font-size="12" font-weight="700">_resolve_command</text>
+    <text x="440" y="164" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">PATH 白名单查找</text>
+
+    <line x1="560" y1="150" x2="598" y2="150" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="600" y="120" width="220" height="60" rx="8" fill="#121624" stroke="#36E08A"/>
+    <text x="710" y="144" text-anchor="middle" fill="#36E08A" font-size="12" font-weight="700">build_clean_env</text>
+    <text x="710" y="164" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">env_template 浅拷贝</text>
+
+    <line x1="820" y1="150" x2="858" y2="150" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="860" y="120" width="200" height="60" rx="8" fill="#121624" stroke="#B584FF"/>
+    <text x="960" y="144" text-anchor="middle" fill="#B584FF" font-size="12" font-weight="700">Popen</text>
+    <text x="960" y="164" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">preexec_fn · close_fds</text>
+
+    <line x1="960" y1="180" x2="960" y2="218" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="860" y="220" width="200" height="60" rx="8" fill="#121624" stroke="#FFC857"/>
+    <text x="960" y="244" text-anchor="middle" fill="#FFC857" font-size="12" font-weight="700">communicate(timeout)</text>
+    <text x="960" y="264" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">30s 默认</text>
+
+    <line x1="860" y1="250" x2="822" y2="250" stroke="#FF3D6E" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="600" y="220" width="220" height="60" rx="8" fill="#121624" stroke="#FF3D6E"/>
+    <text x="710" y="244" text-anchor="middle" fill="#FF3D6E" font-size="12" font-weight="700">超时 → _terminate_group</text>
+    <text x="710" y="264" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">killpg(SIGTERM) → SIGKILL</text>
+
+    <line x1="600" y1="250" x2="562" y2="250" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="320" y="220" width="240" height="60" rx="8" fill="#121624" stroke="#41E5FF"/>
+    <text x="440" y="244" text-anchor="middle" fill="#41E5FF" font-size="12" font-weight="700">_truncate stdout/stderr</text>
+    <text x="440" y="264" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">64KB 上限 · utf-8 replace</text>
+
+    <line x1="320" y1="250" x2="282" y2="250" stroke="#FF7E45" stroke-width="1.5" marker-end="url(#ar6)"/>
+
+    <rect x="40" y="220" width="240" height="60" rx="8" fill="#0E1424" stroke="#41E5FF" stroke-width="2"/>
+    <text x="160" y="244" text-anchor="middle" fill="#41E5FF" font-size="13" font-weight="700">ExecutionResult</text>
+    <text x="160" y="264" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">rc, stdout, stderr, duration</text>
+
+    <!-- forbid_root branch -->
+    <text x="60" y="330" font-family="JetBrains Mono" font-size="11" fill="#41E5FF" letter-spacing="2">SPECIAL BRANCHES</text>
+
+    <g>
+      <rect x="40" y="350" width="320" height="60" rx="8" fill="#1A1F30" stroke="#FF3D6E"/>
+      <text x="200" y="374" text-anchor="middle" fill="#FF3D6E" font-size="12" font-weight="700">forbid_root=True + requires_root=True</text>
+      <text x="200" y="394" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">→ ["/bin/false"] 占位失败</text>
+    </g>
+    <g>
+      <rect x="380" y="350" width="320" height="60" rx="8" fill="#1A1F30" stroke="#FFC857"/>
+      <text x="540" y="374" text-anchor="middle" fill="#FFC857" font-size="12" font-weight="700">命令不在白名单 PATH</text>
+      <text x="540" y="394" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">→ rc=127 · skipped_reason="not_in_path"</text>
+    </g>
+    <g>
+      <rect x="720" y="350" width="340" height="60" rx="8" fill="#1A1F30" stroke="#41E5FF"/>
+      <text x="890" y="374" text-anchor="middle" fill="#41E5FF" font-size="12" font-weight="700">Windows 平台</text>
+      <text x="890" y="394" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">→ _run_windows_mock(返回 mock stdout)</text>
+    </g>
+  </svg>
+</section>
+
+<section>
+  <h2><span class="num">7</span> _wrap_privilege · sudo 决策表</h2>
+  <table>
+    <thead><tr><th>当前用户</th><th>requires_root</th><th>forbid_root</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td>kyagent（= target）</td><td>False</td><td>*</td><td>直接跑，不 sudo</td></tr>
+      <tr><td>其他用户（≠ target）</td><td>False</td><td>*</td><td><code>sudo -n -u kyagent -- &lt;argv&gt;</code></td></tr>
+      <tr><td>任意</td><td>True</td><td>True</td><td><code>["/bin/false"]</code> 占位失败</td></tr>
+      <tr><td>任意</td><td>True</td><td>False</td><td><code>sudo -n -u root -- &lt;argv&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="icon">FLAGS</span>
+    <div class="body">
+      <strong><code>sudo -n</code></strong>：非交互模式（绝不弹密码 prompt）；密码缺失 sudo 直接报错。<br>
+      <strong><code>--</code></strong>：分隔 sudo 选项和实际 argv，防止 argv 里的 -X 被 sudo 当成自己的选项。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8</span> Popen 关键参数</h2>
+<pre><code>proc = subprocess.Popen(
+    final_argv,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+    env=clean_env,
+    cwd=cwd,
+    preexec_fn=preexec,
+    close_fds=True,
+)</code></pre>
+
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>没有 <code>shell=True</code></strong>：永远不调 shell，argv 直接 execve</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong><code>stdin=DEVNULL</code></strong>：工具无法从 stdin 读到内容</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong><code>close_fds=True</code></strong>：关闭所有非标准 fd，防止泄漏父进程文件描述符</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong><code>preexec_fn</code></strong>：在 fork 后子进程里跑 setpgid + RLIMIT_*</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9</span> _terminate_group · 杀整个进程组</h2>
+
+  <pre class="diagram">
+1. <span class="hi">os.killpg(os.getpgid(proc.pid), signal.SIGTERM)</span>
+   ↓ wait 300ms 优雅退出
+2. if proc.poll() is None:
+       <span class="hi2">os.killpg(os.getpgid(proc.pid), signal.SIGKILL)</span>
+
+→ killpg 而不是 kill：杀整个进程组
+→ 子进程 fork 出来的孙子也跑不掉
+→ 异常兜底：ProcessLookupError / PermissionError → proc.kill()</pre>
+</section>
+
+<section>
+  <h2><span class="num">10</span> sudoers.kyagent · 系统侧最小权限</h2>
+
+  <p>这是<strong>系统管理员的纵深防御</strong>：即便 kyagent 进程被劫持，攻击者也只能跑 sudoers 白名单里的命令；想拿 root shell 直接被 sudo 拒绝。</p>
+
+  <div class="code-annot">
+    <div class="file">configs/sudoers.kyagent</div>
+<pre><code>Cmnd_Alias KY_READONLY = \
+    /usr/bin/ps, /bin/ps, \
+    /usr/bin/ss, /usr/sbin/ss, \
+    ...
+
+Cmnd_Alias KY_SVC_MUTATE = \
+    /usr/bin/systemctl restart *, \
+    /usr/bin/systemctl reload *, \
+    /usr/bin/systemctl start *, \
+    /usr/bin/systemctl stop *
+
+kyagent  ALL=(root)  NOPASSWD: KY_READONLY, KY_SVC_QUERY, KY_PKG_QUERY, KY_FILE_META
+kyagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE
+kyagent  ALL=(ALL)   !/bin/sh, !/bin/bash, !/usr/bin/zsh, !/usr/bin/perl, \
+                     !/usr/bin/python*, !/usr/bin/vi, !/usr/bin/vim, \
+                     !/usr/bin/nano, !/usr/bin/awk, !/usr/bin/sed
+
+Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
+                  log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>绝不出现 ALL</strong>：每条命令都列绝对路径</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>NOPASSWD 仅给只读 / 受控写</strong>：危险解释器（sh/python/awk）显式黑名单</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>!env_keep</strong>：sudo 跨权限边界时不保留任何环境变量（双保险）</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>log_input / log_output</strong>：sudo 自己也记审计（/var/log/sudo-io/），与 kyagent audit 互为对照</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>requiretty=false</strong>：因为 kyagent 作为 daemon 跑时没有 tty</div></div>
+  </div>
+
+  <h3>安装步骤</h3>
+<pre><code>sudo install -m 0440 configs/sudoers.kyagent /etc/sudoers.d/kyagent
+sudo visudo -cf /etc/sudoers.d/kyagent
+sudo useradd -r -s /usr/sbin/nologin kyagent
+sudo usermod -aG systemd-journal kyagent</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">11</span> Windows mock 模式</h2>
+
+  <div class="code-annot">
+    <div class="file">executor/proxy.py:194</div>
+<pre><code>def _run_windows_mock(self, argv, requires_root):
+    return ExecutionResult(
+        argv=argv,
+        returncode=0,
+        stdout=f"[mock][win32] would execute: {' '.join(argv)}\n"
+               f"[mock][win32] requires_root={requires_root}\n"
+               f"[mock][win32] real execution requires Kylin / Linux host.\n",
+        ...
+        skipped_reason="windows_mock",
+        sudo_used=False,
+        run_as="mock",
+    )</code></pre>
+  </div>
+
+  <p>Windows 上不真正跑命令，返回带 mock 标记的「假成功」。开发态 demo 可以走完整闭环：</p>
+
+  <pre class="diagram">
+（Windows）kyagent ask "查 80 端口"
+  → MockBackend 路由到 lsof_port
+  → ExecutionProxy._run_windows_mock 返回 mock stdout
+  → MockBackend._summarize 把 mock stdout 当结果展示
+  → 用户看到<span class="hi">完整闭环</span>（虽然结果是假的）</pre>
+</section>
+
+<section>
+  <h2><span class="num">12</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>永远不调 shell</strong>：subprocess.Popen 永远不传 shell=True，argv 总是 list</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>PATH 总是白名单</strong>：哪怕调用方关 restrict_path，cfg 默认值仍然是白名单</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>forbid_root=True 时绝不 sudo root</strong>：会被 /bin/false 兜底</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>超时一定杀整组</strong>：killpg 杀进程组，防止 daemon 逃逸</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>stdout/stderr 一定截断</strong>：哪怕子进程吐 1GB，最终也只 64KB</div></div>
+    <div class="bul ok"><span class="b-num">6</span><div><strong>任何异常都包成 ExecutionResult</strong>：上层永远不需要 try/except executor.run</div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="05-safety-layer.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">05 · 安全护栏</div>
+  </a>
+  <a href="07-mcp-tools.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">07 · MCP 工具集</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

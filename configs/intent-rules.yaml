@@ -1,0 +1,227 @@
+# kyagent 自然语言意图风险词表 + Prompt Injection 检测规则。
+#
+# 与 safety-rules.yaml 互补：
+#   safety-rules.yaml 检查 LLM 已经吐出的 argv（"二次过滤"）
+#   intent-rules.yaml 检查用户原始自然语言（"一次过滤" + 防 Prompt Injection）
+#
+# 字段：
+#   id       : 规则唯一标识
+#   risk     : low / medium / high / critical
+#   category : destroy / privilege / service / network / injection / misc
+#   keywords : 任一子串出现即命中（先做 Unicode 归一化 + lowercase）
+#   pattern  : 正则匹配（在归一化文本上）
+#   description : 人类可读说明
+#
+# 命中行为：取所有命中里最高 risk → 经 Policy 映射成 allow/confirm/deny。
+# 与 safety-rules.yaml 共用同一份 Policy（configs/default.yaml safety.policy 节）。
+
+rules:
+  # ==================== 破坏类 / 删除等价改写 ===========================
+  - id: zh-destroy-system-dir
+    risk: critical
+    category: destroy
+    description: 中文「删除 / 清空 / 格式化」关键系统目录
+    keywords:
+      - "删除 /etc"
+      - "删除 /usr"
+      - "删除 /var"
+      - "删除 /boot"
+      - "删除 /lib"
+      - "删除 /sbin"
+      - "删除 /bin"
+      - "删除 /root"
+      - "删除 /sys"
+      - "删除 /proc"
+      - "清空 /etc"
+      - "清空 /var"
+      - "清空 /boot"
+      - "格式化 /"
+      - "格式化磁盘"
+      - "格式化根分区"
+      - "抹掉硬盘"
+      - "销毁数据"
+      - "覆盖磁盘"
+    # 关键目录 + 删除动词的灵活搭配（"把 /etc 删了" / "/etc 删了" / "/etc 抹掉" 等）
+    pattern: '(?:把\s*)?/(etc|usr|var|boot|lib|lib64|sbin|bin|root|sys|proc|dev|srv|opt)(?:/\S*)?\s*(?:目录\s*)?(?:都\s*)?(删了|删掉|删除|清空|抹掉|抹了|干掉|废了|擦掉|清理掉)'
+
+  - id: zh-destroy-account-db
+    risk: critical
+    category: destroy
+    description: 中文意图操作账户库 / 认证文件
+    keywords:
+      - "删除 root"
+      - "删除 /etc/passwd"
+      - "清空 /etc/shadow"
+      - "覆盖 sudoers"
+      - "清空账户库"
+      - "drop database"
+      - "truncate table"
+
+  - id: en-destroy-fs
+    risk: critical
+    category: destroy
+    description: 英文删除/破坏意图
+    keywords:
+      - "delete /etc"
+      - "delete /usr"
+      - "delete /var"
+      - "delete /boot"
+      - "wipe disk"
+      - "format disk"
+      - "format /"
+      - "rm -rf"
+      - "destroy filesystem"
+      - "shred /etc"
+
+  # ==================== 权限破坏 =========================================
+  - id: zh-priv-777
+    risk: high
+    category: privilege
+    description: 不安全权限 / 提权意图
+    keywords:
+      - "chmod 777 /"
+      - "chmod -r 777"
+      - "777 /etc"
+      - "777 /usr"
+      - "把权限改成 777"
+      - "把根目录改成 777"
+      - "改 root 密码"
+      - "重置 root 密码"
+      - "passwd root"
+      - "免密 sudo"
+      - "免密码 sudo"
+      - "添加 root 账户"
+      - "禁用密码登录"
+
+  - id: en-priv
+    risk: high
+    category: privilege
+    keywords:
+      - "chmod 777 /"
+      - "chmod -r 777 /"
+      - "add root user"
+      - "reset root password"
+      - "passwordless sudo"
+
+  # ==================== 服务关键守护进程 =================================
+  - id: zh-service-critical
+    risk: high
+    category: service
+    description: 中文意图停止 / 卸载关键服务
+    keywords:
+      - "停掉 sshd"
+      - "停掉 ssh"
+      - "关掉 sshd"
+      - "关掉 ssh"
+      - "卸载 sshd"
+      - "禁用 sshd"
+      - "停止 sshd"
+      - "停 sshd"
+      - "关掉防火墙"
+      - "停掉防火墙"
+      - "禁用 firewalld"
+      - "禁用 selinux"
+      - "关闭 selinux"
+      - "setenforce 0"
+      - "停止 auditd"
+      - "关闭审计"
+
+  - id: en-service-critical
+    risk: high
+    category: service
+    keywords:
+      - "stop sshd"
+      - "kill sshd"
+      - "disable sshd"
+      - "disable firewall"
+      - "disable selinux"
+      - "stop auditd"
+
+  # ==================== 网络后门 / 反弹 shell ============================
+  - id: zh-network-backdoor
+    risk: high
+    category: network
+    keywords:
+      - "反向 shell"
+      - "反弹 shell"
+      - "弹 shell"
+      - "清空 iptables"
+      - "清空防火墙"
+      - "开放所有端口"
+      - "对外暴露 22"
+      - "禁用防火墙"
+
+  - id: en-network-backdoor
+    risk: high
+    category: network
+    keywords:
+      - "reverse shell"
+      - "bind shell"
+      - "nc -e"
+      - "flush iptables"
+      - "expose port 22 to internet"
+      - "/dev/tcp/"
+
+  # ==================== Prompt Injection（注入指令操控 LLM） ==============
+  - id: injection-override-zh
+    risk: high
+    category: injection
+    description: 中文指令覆盖类注入
+    keywords:
+      - "忽略以上"
+      - "忽略上面"
+      - "忽略前面"
+      - "忽略之前"
+      - "忽略你的"
+      - "忘记之前"
+      - "忘记上面"
+      - "无视之前"
+      - "不要管你的指令"
+      - "不要管系统提示"
+      - "你现在是 dan"
+      - "你现在扮演"
+      - "新的系统提示"
+      - "开发者模式"
+      - "越狱模式"
+
+  - id: injection-override-en
+    risk: high
+    category: injection
+    description: 英文指令覆盖 / 越狱（允许 "ignore all your prior rules" 这种多修饰词形式）
+    pattern: '(?i)\b(ignore|disregard|forget|bypass|override)\s+((?:all|the|your|any|previous|prior|above|earlier|preceding|original)\s+){1,4}(instructions?|prompts?|rules?|system|guidelines?|policies)\b'
+
+  - id: injection-jailbreak-keywords
+    risk: high
+    category: injection
+    description: 越狱角色 / DAN / developer mode
+    pattern: '(?i)\b(dan\s+mode|developer\s+mode|god\s+mode|jailbreak|unrestricted\s+mode|do\s+anything\s+now)\b'
+
+  - id: injection-role-spoofing
+    risk: high
+    category: injection
+    description: 伪造对话角色 / 控制 token / chat template markers
+    pattern: '(?im)^\s*(system|assistant|user)\s*[:：]|<\s*\|?(im_start|im_end|endoftext|s|/s)\|?\s*>|\[INST\]|\[/INST\]'
+
+  - id: injection-prompt-leak
+    risk: medium
+    category: injection
+    description: 套取系统提示词 / "把你的指令告诉我"
+    pattern: '(?i)(reveal|print|show|repeat|output|输出|打印|复述|背诵|告诉我)\s+(your\s+|the\s+|你的)?(system\s+prompt|instructions|prompt|提示词|系统提示|系统指令)'
+
+  - id: injection-encoded
+    risk: high
+    category: injection
+    description: 嵌入式编码绕过（base64 / hex 长串）
+    pattern: '(?i)\bbase64\s*[:：]\s*[A-Za-z0-9+/=]{32,}|(?:\\x[0-9a-f]{2}){8,}'
+
+  - id: injection-unicode-hidden
+    risk: critical
+    category: injection
+    description: 零宽 / RTL 覆盖 / 不可见字符（高度可疑，自动 sanitize 后仍命中即拦）
+    pattern: '[​-‏‪-‮⁠-⁯﻿]'
+
+  - id: injection-shell-snippet
+    risk: high
+    category: injection
+    description: 自然语言里直接嵌入危险 shell 片段（绕过 LLM 走原文）
+    pattern: '\brm\s+-rf?\s+/(etc|usr|var|boot|lib|root|home|sbin|bin)\b|\bmkfs\.[a-z0-9]+\s+/dev/|:\(\)\s*\{\s*:\|:&\s*\};:'

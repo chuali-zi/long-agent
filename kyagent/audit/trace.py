@@ -11,7 +11,8 @@ from typing import Any
 
 class EventKind(str, Enum):
     USER_INPUT = "user_input"          # 1. 接收指令
-    PERCEPTION = "perception"          # 2. 感知环境（工具被动收集的上下文）
+    INTENT_CHECK = "intent_check"      # 1b. 自然语言意图风险预过滤 + 注入检测（赛题第 3 条）
+    PERCEPTION = "perception"          # 2. 感知环境（只读工具被动收集的上下文）
     LLM_THOUGHT = "llm_thought"        # 3. 推理决策（LLM 思维链 / 文本输出）
     TOOL_REQUEST = "tool_request"      # 3b. LLM 提议调用工具（含原始参数）
     SAFETY_CHECK = "safety_check"      # 4. 安全校验（命中规则 + verdict）

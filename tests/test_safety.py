@@ -158,3 +158,77 @@ def test_declared_risk_does_not_downgrade(guardrail: Guardrail):
     v = guardrail.check_cmdline("rm -rf /etc", declared_risk=RiskLevel.LOW)
     assert v.decision is Decision.DENY
     assert v.risk is RiskLevel.CRITICAL
+
+
+# ---- 等价改写覆盖（codex 报告的全部 5 个绕过） ----------------------
+
+@pytest.mark.parametrize("cmd,want_decision", [
+    ("truncate -s 0 /etc/passwd", Decision.DENY),       # 截断账户库
+    ("truncate -s 0 /etc/shadow", Decision.DENY),
+    ("truncate -s 0 /boot/grub/grub.cfg", Decision.DENY),
+    ("find /etc -type f -delete", Decision.DENY),       # find -delete
+    ("find /var -delete", Decision.DENY),
+    ("find /etc -exec rm {} \\;", Decision.DENY),       # find -exec rm 绕过
+    ("find /usr -execdir rm -f {} \\;", Decision.DENY),
+    ("systemctl stop sshd", Decision.CONFIRM),          # 不是 mask/disable，但同样致命
+    ("systemctl kill firewalld", Decision.CONFIRM),
+    ("systemctl stop networkd", Decision.CONFIRM),
+    ("service sshd stop", Decision.CONFIRM),
+    ("nft flush ruleset", Decision.CONFIRM),            # 防火墙
+    ("nft delete table inet filter", Decision.CONFIRM),
+    ("firewall-cmd --reset-to-defaults", Decision.CONFIRM),
+    ("ufw reset", Decision.CONFIRM),
+    ("ufw --force reset", Decision.CONFIRM),
+    ("mv /etc /tmp/backup", Decision.DENY),             # 等价删除关键目录
+    ("mv /boot /mnt/sd", Decision.DENY),
+    ("shred -uvz /etc/passwd", Decision.DENY),          # shred 销毁
+    ("cp /dev/null /etc/passwd", Decision.DENY),        # cp 空源覆盖
+    ("cp /dev/zero /etc/shadow", Decision.DENY),
+    ("echo bad | tee /etc/shadow", Decision.DENY),      # tee 绕过 >
+    ("echo bad | sudo tee /etc/sudoers", Decision.DENY),
+    ("crontab -r", Decision.CONFIRM),                   # 清空计划任务
+    ("crontab -u root -r", Decision.CONFIRM),
+    ("lvremove -f /dev/vg0/lv0", Decision.DENY),        # LVM 销毁
+    ("vgremove -f vg0", Decision.DENY),
+    ("pvremove --force /dev/sdb", Decision.DENY),
+    ("parted /dev/sda mkpart primary ext4 0% 100%", Decision.DENY),
+    ("sgdisk -Z /dev/sda", Decision.DENY),
+    ("dnf remove openssh-server", Decision.DENY),       # 卸载关键包
+    ("apt-get purge systemd", Decision.DENY),
+    ("rpm -e --nodeps glibc", Decision.DENY),
+    ("sed -i 's/PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config", Decision.DENY),  # critical sink
+    ("awk -i inplace '/root/d' /etc/sudoers", Decision.DENY),
+])
+def test_equivalent_rewrite_blocked(guardrail: Guardrail, cmd: str, want_decision: Decision):
+    """codex 报告的全部 5 个绕过 + 额外发现的等价改写姿势 — 必须被拦。"""
+    v = guardrail.check_cmdline(cmd)
+    assert v.decision is want_decision, (
+        f"{cmd!r} 期望 {want_decision} 实际 {v.decision} hits={[h.rule_id for h in v.hits]}"
+    )
+    assert v.hits, f"{cmd!r} 应至少命中一条规则"
+
+
+# ---- 不应误伤的边界用例 -------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /tmp/build-cache",            # /tmp 下临时文件
+    "find /tmp -type f -delete",          # /tmp 下 find -delete
+    "mv /tmp/a /tmp/b",                   # /tmp 互相 mv
+    "cp /etc/passwd.bak /tmp/backup",     # 读 etc 备份到 tmp（不是写 etc）
+    "echo ok > /tmp/out.log",             # /tmp 重定向
+    "tee /tmp/x.log",
+    "systemctl stop my-app",              # 非关键服务的 stop 允许
+    "systemctl restart my-batch",
+    "service my-app stop",
+])
+def test_equivalent_rewrite_does_not_overshoot(guardrail: Guardrail, cmd: str):
+    """新规则不应把 /tmp / 非关键服务的合法操作误判为高风险。
+
+    注意：触及 /home /var /etc 子路径的 rm/find 即便看似合法（如清缓存、清旧日志），
+    规则会保守地 DENY/CONFIRM —— 这与赛题"非必要不变更系统关键目录"一致，
+    用户可改更具体路径或解 confirm 推进。
+    """
+    v = guardrail.check_cmdline(cmd)
+    assert v.decision is Decision.ALLOW, (
+        f"{cmd!r} 应放行，得到 {v.decision} hits={[h.rule_id for h in v.hits]}"
+    )

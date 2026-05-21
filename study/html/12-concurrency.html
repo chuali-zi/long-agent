@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · 并发模型 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html" class="active">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 12 · CONCURRENCY · REVIEW FIXES</div>
+  <h1>并发模型<br><span class="sub">三处 review 修复 · H1 + C2 + C1</span></h1>
+  <p class="lead">
+    串起：<strong>并行多工具调度</strong> + <strong>per-trace 审计锁</strong> + <strong>三处安全 review 修复</strong>。
+    配套日志 <code>kyagent/agent/core.log</code>、<code>kyagent/audit/logger.log</code>、<code>kyagent/executor/proxy.log</code>。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 为什么需要并发</h2>
+
+  <p>LLM 一轮可能同时发起多个 tool_use（"先查进程，再看端口，再看磁盘"）。无依赖的只读感知工具：</p>
+
+  <div class="cards">
+    <div class="card" style="border-left:3px solid var(--risk-critical);">
+      <div class="label">SERIAL</div>
+      <div class="title">总耗时 = ps + ss + df</div>
+      <div class="body">完全串行：三次 syscall 顺序等</div>
+    </div>
+    <div class="card accent" style="border-left:3px solid var(--risk-low);">
+      <div class="label">PARALLEL</div>
+      <div class="title">总耗时 ≈ max(ps, ss, df)</div>
+      <div class="body">理论上能省 60-70% 的尾延迟</div>
+    </div>
+  </div>
+
+  <p>前提：<strong>确保并发不引入安全或正确性问题</strong>。</p>
+</section>
+
+<section>
+  <h2><span class="num">2</span> 四道并行 gate</h2>
+
+  <div class="code-annot">
+    <div class="file">agent/core.py:165</div>
+<pre><code>run_parallel = (
+    sys.platform != "win32"
+    and len(tool_uses) &gt;= 2
+    and self._executor_supports_parallel_tools()
+    and all(self._is_parallel_safe(tu) for tu in tool_uses)
+)</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">G1</span><div><strong>sys.platform != "win32"</strong> — Windows 上 ExecutionProxy 走 mock，没有真实 I/O 可重叠</div></div>
+    <div class="bul"><span class="b-num">G2</span><div><strong>len(tool_uses) &gt;= 2</strong> — 1 个工具时并行没意义</div></div>
+    <div class="bul"><span class="b-num">G3</span><div><strong>executor.supports_parallel_tool_execution</strong> — 执行器自己声明（详见 C1）</div></div>
+    <div class="bul"><span class="b-num">G4</span><div><strong>all _is_parallel_safe</strong> — 整组共进退，不会拆成一部分并行一部分串行</div></div>
+  </div>
+
+  <div class="callout warn">
+    <span class="icon">AND</span>
+    <div class="body">
+      <strong>四道 AND 全过才并行</strong>。任何一个不安全（高风险 / 需 confirm / reviewer 启用）就<strong>全部串行</strong>——避免审计顺序歧义。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3</span> _is_parallel_safe — C2 修复后的五重判定</h2>
+
+  <div class="code-annot">
+    <div class="file">agent/core.py:217</div>
+<pre><code>def _is_parallel_safe(self, tu):
+    tool = self.registry.get(tu.name)
+    if tool is None:                                # 1. 工具必须存在
+        return False
+    if not tool.read_only:                          # 2. 必须只读
+        return False
+    if self.guardrail.llm_reviewer is not None:     # 3. ★ C2 第一道防线
+        return False
+    try:
+        cleaned = tool.validate(tu.input or {})
+        argv = tool.build_argv(cleaned)
+    except ToolError:                               # 4. 参数必须能过
+        return False
+    verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
+    return verdict.decision is Decision.ALLOW       # 5. 预检必须 ALLOW</code></pre>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4</span> 锁层级图</h2>
+
+  <svg viewBox="0 0 1100 460" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:var(--bg-code);border:1px solid var(--border);border-radius:12px;padding:14px;">
+    <defs>
+      <marker id="ar12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#41E5FF"/>
+      </marker>
+    </defs>
+
+    <text x="60" y="30" font-family="JetBrains Mono" font-size="11" fill="#41E5FF" letter-spacing="2">LOCK HIERARCHY · 严格 trace → store → jsonl 顺序</text>
+
+    <!-- Lock 1 -->
+    <rect x="40" y="60" width="320" height="100" rx="10" fill="#0E1424" stroke="#FF3D6E" stroke-width="2"/>
+    <text x="200" y="88" text-anchor="middle" fill="#FF3D6E" font-size="14" font-weight="700">trace._lock (RLock)</text>
+    <text x="200" y="110" text-anchor="middle" fill="#C8CDD8" font-size="12" font-family="JetBrains Mono">per-Trace instance</text>
+    <text x="200" y="128" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">单 trace 内事件序列化</text>
+    <text x="200" y="146" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">audit.logger.event 持有</text>
+
+    <line x1="200" y1="170" x2="200" y2="208" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar12)"/>
+    <text x="220" y="195" fill="#7C8499" font-size="10" font-family="JetBrains Mono">嵌套</text>
+
+    <!-- Lock 2 -->
+    <rect x="40" y="220" width="320" height="100" rx="10" fill="#0E1424" stroke="#FFC857" stroke-width="2"/>
+    <text x="200" y="248" text-anchor="middle" fill="#FFC857" font-size="14" font-weight="700">store._lock (Lock)</text>
+    <text x="200" y="270" text-anchor="middle" fill="#C8CDD8" font-size="12" font-family="JetBrains Mono">per-AuditStore instance</text>
+    <text x="200" y="288" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">SQLite connection 互斥</text>
+    <text x="200" y="306" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">audit.store.* 持有</text>
+
+    <line x1="200" y1="330" x2="200" y2="368" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar12)"/>
+    <text x="220" y="355" fill="#7C8499" font-size="10" font-family="JetBrains Mono">兄弟</text>
+
+    <!-- Lock 3 -->
+    <rect x="40" y="380" width="320" height="60" rx="10" fill="#0E1424" stroke="#41E5FF" stroke-width="2"/>
+    <text x="200" y="408" text-anchor="middle" fill="#41E5FF" font-size="14" font-weight="700">_jsonl_lock (Lock)</text>
+    <text x="200" y="428" text-anchor="middle" fill="#C8CDD8" font-size="11" font-family="JetBrains Mono">per-AuditLogger · JSONL 文件互斥</text>
+
+    <!-- Right side annotations -->
+    <text x="440" y="80" fill="#36E08A" font-size="12" font-family="JetBrains Mono" font-weight="700">无 AB-BA 风险</text>
+    <text x="440" y="110" fill="#C8CDD8" font-size="12">• trace._lock 只在 audit.logger.event 内 acquire</text>
+    <text x="440" y="132" fill="#C8CDD8" font-size="12">• store._lock 只在 audit.store.* 方法内 acquire</text>
+    <text x="440" y="154" fill="#C8CDD8" font-size="12">• _jsonl_lock 只在 audit.logger.{event,close_file} 内</text>
+    <text x="440" y="176" fill="#C8CDD8" font-size="12">• 谁也不会反向调用</text>
+
+    <text x="440" y="220" fill="#FFC857" font-size="12" font-family="JetBrains Mono" font-weight="700">为什么 RLock 不是 Lock</text>
+    <text x="440" y="248" fill="#C8CDD8" font-size="12">audit.logger.event() with trace._lock 后</text>
+    <text x="440" y="270" fill="#C8CDD8" font-size="12">内部又调 trace.add()，trace.add() 也 with self._lock</text>
+    <text x="440" y="292" fill="#C8CDD8" font-size="12">→ 同一线程重入 → 必须 RLock</text>
+
+    <text x="440" y="338" fill="#FF3D6E" font-size="12" font-family="JetBrains Mono" font-weight="700">为什么 store._lock 加锁所有 execute</text>
+    <text x="440" y="366" fill="#C8CDD8" font-size="12">check_same_thread=False · SQLite connection</text>
+    <text x="440" y="388" fill="#C8CDD8" font-size="12">同一时刻只能跑一条语句</text>
+    <text x="440" y="410" fill="#C8CDD8" font-size="12">外层 Lock 防止 connection 上的并发使用</text>
+  </svg>
+</section>
+
+<section>
+  <h2><span class="num">5</span> H1 修复 · _jsonl_fp TOCTOU 防御</h2>
+
+  <h3>5.1 风险（修复前的错误模式）</h3>
+  <div class="code-annot">
+    <div class="file" style="color:var(--risk-critical);">❌ 错误模式</div>
+<pre><code>if self._jsonl_fp is not None:            # 第一次解引用
+    line = json.dumps(...)
+    with self._jsonl_lock:
+        self._jsonl_fp.write(...)         # 第二次解引用 ← BOOM</code></pre>
+  </div>
+
+  <p><code>close_file()</code> 同时持 <code>_jsonl_lock</code> 把 <code>_jsonl_fp</code> 置 None。<strong>TOCTOU 窗口</strong>：</p>
+  <pre class="diagram">
+1. event() 拿到 _jsonl_lock（即将写）
+2. close_file 等 _jsonl_lock
+3. event() 写完释放锁
+4. close_file 拿锁，置 None，释放锁，flush+close
+5. event() 第二次进锁里 self._jsonl_fp.write(...) → <span class="hi2">NoneType.write 报错</span></pre>
+
+  <h3>5.2 修复</h3>
+  <div class="code-annot">
+    <div class="file" style="color:var(--risk-low);">✓ 正确模式</div>
+<pre><code>if self._jsonl_fp is not None:            # 仅作 fast-path 短路
+    line = json.dumps(...)
+    with self._jsonl_lock:
+        fp = self._jsonl_fp                # 锁内 capture 到 local
+        if fp is not None:                  # 锁内二次判空
+            fp.write(line + "\n")           # 用 local 引用写</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div>外层 if 仅作 <strong>fast-path 短路</strong>：跳过 json.dumps 这种比较贵的操作</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div>真正解引用 + 写入移进 <code>_jsonl_lock</code> 内，<strong>先 capture 到 local fp 再判空</strong></div></div>
+    <div class="bul ok"><span class="b-num">3</span><div>JSONL 关闭后再来的 event <strong>静默丢弃</strong>该行，不抛异常</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div>SQLite 仍是权威审计源，丢失的 JSONL 行是冗余通道，不影响回溯</div></div>
+  </div>
+
+  <div class="callout">
+    <span class="icon">NOTE</span>
+    <div class="body">
+      <strong>当前是否会触发？</strong> 不会 —— agent.shutdown 不连带调 audit.close_file，ThreadPoolExecutor 的 _python_exit 优先于 user atexit，atexit 跑时 worker 早已 join。
+      但代码模式本身错误，是 <strong>footgun</strong>。任何后续添加的 graceful shutdown 把 close_file 挪到 worker 仍存活的窗口就会立刻活。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> C2 修复 · 预检 ≠ 内检的 worker stdin 抢占</h2>
+
+  <h3>6.1 风险</h3>
+
+  <p>主线程预检（<code>_is_parallel_safe</code>）跑一次 <code>guardrail.check_argv</code>。worker 线程（<code>_handle_tool_use</code>）<strong>再跑一次</strong>同样的 check。</p>
+
+  <p><code>guardrail.check_argv</code> 是确定性的吗？取决于 <code>llm_reviewer</code>：</p>
+
+  <pre class="diagram">
+# safety/guardrail.py:117
+if self.llm_reviewer is not None:
+    try:
+        reviewed = self.llm_reviewer(cmdline)   # <span class="hi2">调外部 LLM · 非确定性</span>
+    except Exception as e:
+        reviewed = None
+        rationale.append(f"LLM 复审异常: {e!r}")  # <span class="hi2">异常被吞</span></pre>
+
+  <div class="callout danger">
+    <span class="icon">!</span>
+    <div class="body">
+      主线程预检 ALLOW，worker 线程内检可能 CONFIRM → worker 调 <code>self.confirm(...)</code> → CLI 的 stdin 被多 worker 抢 → <strong>"谁授权了什么"在审计链上错位</strong>。
+    </div>
+  </div>
+
+  <h3>6.2 两道防线</h3>
+
+  <div class="cards">
+    <div class="card">
+      <div class="label">DEFENSE · 1</div>
+      <div class="title">_is_parallel_safe 直接拒绝</div>
+      <div class="body">
+        <code>if self.guardrail.llm_reviewer is not None: return False</code><br><br>
+        <strong>只要 reviewer 启用，所有工具都不进并行路径</strong>。把「主线程预检 vs worker 内检」的不一致风险从源头切断。
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">DEFENSE · 2</div>
+      <div class="title">_handle_tool_use worker 兜底</div>
+      <div class="body">
+        <code>if threading.current_thread() is not threading.main_thread(): return [denied]</code><br><br>
+        兜底：即便第一道因为某种原因失守，worker 拿到 CONFIRM 时<strong>立即 deny + 写 ERROR</strong>。
+      </div>
+    </div>
+  </div>
+
+  <h3>6.3 测试覆盖</h3>
+  <pre class="diagram">
+test_is_parallel_safe_rejects_when_llm_reviewer_enabled
+  agent.guardrail.llm_reviewer = lambda cmdline: None
+  assert agent._is_parallel_safe(tool_use) is False    <span class="hi3"># ★ 启用 reviewer 后变 False</span>
+
+test_handle_tool_use_denies_confirm_off_main_thread
+  with ThreadPoolExecutor(max_workers=1) as pool:
+      result_block = pool.submit(agent._handle_tool_use, ...).result()
+
+  assert confirm_called == []                          <span class="hi3"># ★ confirm 没被调用</span>
+  assert result_block.is_error
+  assert result_block.content.startswith("[denied]")
+  assert any("非主线程" in n for n in notes)
+  assert any(e.payload.get("reason") == "confirm_in_worker_denied" for e in errors)</pre>
+</section>
+
+<section>
+  <h2><span class="num">7</span> C1 · supports_parallel_tool_execution 真值表</h2>
+
+  <h3>7.1 现象</h3>
+  <div class="code-annot">
+    <div class="file">executor/proxy.py:66</div>
+<pre><code>@property
+def supports_parallel_tool_execution(self) -> bool:
+    return self._shared_preexec is None</code></pre>
+  </div>
+
+  <table>
+    <thead><tr><th>平台</th><th>_shared_preexec</th><th>property 值</th><th>Agent gate</th><th>实际并行？</th></tr></thead>
+    <tbody>
+      <tr><td>Linux 生产</td><td>非 None 闭包</td><td><span class="decision deny">False</span></td><td>True</td><td><strong>否</strong></td></tr>
+      <tr><td>Windows 开发</td><td>None</td><td><span class="decision allow">True</span></td><td>False (G1)</td><td><strong>否</strong></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn">
+    <span class="icon">DORMANT</span>
+    <div class="body">
+      生产环境的<strong>并行路径完全 dormant</strong>。
+    </div>
+  </div>
+
+  <h3>7.2 为什么这样保守</h3>
+
+  <div class="bullets">
+    <div class="bul danger"><span class="b-num">1</span><div>preexec_fn 在 fork() 后子进程里执行任意 Python 回调</div></div>
+    <div class="bul danger"><span class="b-num">2</span><div>多线程父进程里 fork：<strong>glibc malloc</strong> 的内部锁可能被其它线程持有，子进程拿不到 → 死锁</div></div>
+    <div class="bul danger"><span class="b-num">3</span><div>信号处理器状态、TLS 状态可能不一致</div></div>
+    <div class="bul danger"><span class="b-num">4</span><div><code>resource.setrlimit</code> 不是 async-signal-safe，理论上违规</div></div>
+  </div>
+
+  <p>这是 CPython 已知雷区（<a href="https://bugs.python.org/issue34037">bpo-34037</a>）。Python 3.12 起 subprocess 模块自身已优先用 <code>posix_spawn</code> 替代 fork（如果不需要 preexec_fn）；但只要传 preexec_fn，仍然走 fork。</p>
+
+  <h3>7.3 设计意图</h3>
+  <div class="cards">
+    <div class="card"><div class="label">保留</div><div class="title">并行路径代码 + 测试</div><div class="body">gate 留在 supports_parallel_tool_execution 上</div></div>
+    <div class="card"><div class="label">未来</div><div class="title">切换到 posix_spawn</div><div class="body">把 property 改成 True 就能开启</div></div>
+    <div class="card accent"><div class="label">当前</div><div class="title">baseline -34% 不依赖并行</div><div class="body">暂时关掉并行不影响性能基线</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8</span> 审计层并发安全 · 序列化测试</h2>
+
+  <div class="code-annot">
+    <div class="file">tests/test_audit.py:111 · H2 锚点</div>
+<pre><code>def test_audit_event_serializes_shared_trace_updates(tmp_path):
+    store = _BlockingStore()  # 第一次 append 时阻塞
+    logger = AuditLogger(store, jsonl_file=...)
+    trace = Trace(user="tester")
+
+    def add_first():
+        logger.event(trace, EventKind.USER_INPUT, {"label":"first"})
+    def add_second():
+        assert store.first_entered.wait(timeout=1)
+        logger.event(trace, EventKind.LLM_THOUGHT, {"label":"second"})
+
+    # ... 并发跑 first + second
+    assert not interleaved_before_first_completed   # 没有交错
+    assert store.seqs == [1, 2]                     # SQLite 顺序正确
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2]  # JSONL 顺序正确</code></pre>
+  </div>
+
+  <p>用 <code>_BlockingStore</code> 故意让第一个 event 卡住，验证<strong>第二个 event 必须等第一个完成才能 append</strong>。这是 trace lock 的关键回归测试。</p>
+</section>
+
+<section>
+  <h2><span class="num">9</span> ThreadPool 生命周期</h2>
+
+  <div class="code-annot">
+    <div class="file">agent/core.py:77</div>
+<pre><code>def _ensure_pool(self):
+    if self._tool_pool is None:
+        self._tool_pool = ThreadPoolExecutor(max_workers=4,
+                                             thread_name_prefix="ky-tool")
+    return self._tool_pool
+
+def shutdown(self):
+    if self._tool_pool is not None:
+        self._tool_pool.shutdown(wait=False)
+        self._tool_pool = None</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><strong>懒创建</strong>：只在第一次走并行路径时才 new 一个 pool</div></div>
+    <div class="bul"><span class="b-num">2</span><div><strong>max_workers=4</strong>：保守上限</div></div>
+    <div class="bul"><span class="b-num">3</span><div><strong>thread_name_prefix</strong>：方便 trace 里看 "ky-tool-0" / "ky-tool-1"</div></div>
+    <div class="bul"><span class="b-num">4</span><div><strong>shutdown(wait=False)</strong>：不等 worker 完成（调用方主动释放才该调）</div></div>
+  </div>
+
+  <p><strong>正常路径下，ask() 返回时所有 worker 都已经收工</strong>，因为 fut.result() 会阻塞到 worker 完成。</p>
+</section>
+
+<section>
+  <h2><span class="num">10</span> 当前并发路径的实际行为</h2>
+
+  <pre class="diagram">
+ask("查 CPU 和磁盘")
+  ↓
+LLM 发起 2 个 tool_use: process_list + fs_df
+  ↓
+run_parallel = (
+  True (Linux)
+  and True (len &gt;= 2)
+  and <span class="hi2">False ← supports_parallel_tool_execution</span>
+  ...
+) = <span class="hi2">False</span>
+  ↓
+走串行 for 循环：
+  _handle_tool_use(process_list) → done
+  _handle_tool_use(fs_df) → done
+  ↓
+tool_results 顺序填好 → 灌回 LLM</pre>
+
+  <div class="callout">
+    <span class="icon">FUTURE</span>
+    <div class="body">
+      所有并发安全机制（RLock、SQLite WAL 锁、JSONL 互斥、_is_parallel_safe、worker 兜底）<strong>当前都是为未来准备的</strong>。
+      测试用例通过 <code>RecordingExecutor(supports_parallel_tool_execution=True)</code> 绕过 C1 来覆盖并行路径——保证当未来切换到 posix_spawn 把 gate 打开时，<strong>并发不变量已经过测试</strong>。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">11</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>self.confirm() 永远只在主线程调用</strong>：C2 两道防线 + tests/test_agent_parallel.py 验证</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>同一 trace 内事件落盘顺序 = seq 顺序</strong>：trace._lock + tests/test_audit.py 验证</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>不同 trace 之间事件可以并行写</strong>：每条 trace 独立锁</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>JSONL 关闭后 event() 不抛异常</strong>：H1 修复（fast-path + 锁内二次判空）</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>并行路径整体共进退</strong>：4 道 gate AND 关系，绝不"半并行"</div></div>
+    <div class="bul ok"><span class="b-num">6</span><div><strong>生产环境当前不走并行</strong>：C1 gate 死，留作未来扩展</div></div>
+    <div class="bul ok"><span class="b-num">7</span><div><strong>tool_results[idx] 顺序 = tool_uses[idx] 顺序</strong>：哪怕走并行也按 submit 顺序填</div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="11-security-model.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">11 · 安全模型总览</div>
+  </a>
+  <a href="13-testing-bench.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">13 · 测试 + 性能基线</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

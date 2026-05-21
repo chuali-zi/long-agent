@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · Agent 主循环 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html" class="active">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 03 · AGENT CORE</div>
+  <h1>Agent 主循环<br><span class="sub">ask() 318 行逐行解读</span></h1>
+  <p class="lead">
+    对应文件 <code>kyagent/agent/core.py</code> · 配套 <code>kyagent/agent/prompt.py</code>。
+    主循环把 LLM、工具、护栏、执行器、审计五个组件用一条<strong>同步阻塞的 while</strong>串起来。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 文件结构</h2>
+  <div class="filetree">
+<span class="dir">agent/core.py</span>
+├── <span class="file">ConfirmFn</span>      <span class="cmt"># 类型别名：CLI 注入的回调</span>
+├── <span class="file">_auto_deny()</span>   <span class="cmt"># 默认 confirm = 拒绝</span>
+├── <span class="file">AgentRunResult</span> <span class="cmt"># dataclass · ask() 返回值</span>
+├── <span class="dir">Agent class</span>
+│   ├── <span class="file">__init__</span>                <span class="cmt"># 注入依赖</span>
+│   ├── <span class="file">_ensure_pool / shutdown</span> <span class="cmt"># ThreadPool 生命周期</span>
+│   ├── <span class="file">from_config</span>             <span class="cmt"># 工厂方法</span>
+│   ├── <span class="file">ask</span>                     <span class="star">★</span> <span class="cmt">主入口</span>
+│   ├── <span class="file">_executor_supports_parallel_tools</span>  <span class="cmt"># 并行 gate-1</span>
+│   ├── <span class="file">_is_parallel_safe</span>       <span class="cmt"># 并行 gate-2</span>
+│   ├── <span class="file">_handle_tool_use</span>        <span class="star">★</span> <span class="cmt">单个工具调用的处理</span>
+│   └── <span class="file">_blocks_to_dict</span>         <span class="cmt"># 序列化 LLM 输出</span>
+└── <span class="file">build_agent()</span>  <span class="cmt"># load_config + Agent.from_config</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> ConfirmFn 与依赖注入</h2>
+
+  <div class="code-annot">
+    <div class="file"><span class="star">★</span> agent/core.py:34</div>
+<pre><code>ConfirmFn = Callable[[str, list[str], dict], bool]
+
+def _auto_deny(name: str, argv: list[str], verdict: dict) -> bool:
+    return False</code></pre>
+  </div>
+
+  <p>Agent 不知道 CLI 长什么样，也不知道 stdin 是什么。它只接收一个回调：给定 <strong>tool name + argv + verdict</strong>，返回是否放行。具体怎么问用户（弹 Rich Panel？发邮件？）是上层的事。这就是经典的 <strong>依赖反转</strong>。</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="label">CLI · chat</div>
+      <div class="title">_cli_confirm</div>
+      <div class="body">Rich Panel 渲染 verdict → Prompt.ask y/n</div>
+    </div>
+    <div class="card">
+      <div class="label">CLI · ask</div>
+      <div class="title">lambda *a: False</div>
+      <div class="body">单轮无交互，一律拒绝</div>
+    </div>
+    <div class="card">
+      <div class="label">MCP server</div>
+      <div class="title">直接 deny</div>
+      <div class="body">stdio 无交互通道，CONFIRM 默认拒绝</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3</span> AgentRunResult</h2>
+<pre><code>@dataclass
+class AgentRunResult:
+    trace: Trace              # 完整审计链
+    final_text: str           # LLM 最终回答
+    tool_iterations: int = 0  # 主循环轮次数
+    denied: bool = False      # 任何 [denied] 都置 True
+    notes: list[str] = field(default_factory=list)  # 软提示</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">4</span> from_config 工厂</h2>
+
+  <div class="pipeline">
+    <div class="step"><div class="stepnum">PARSE</div><div class="stepname">Config</div><div class="stepdesc">load_config 返回</div></div>
+    <div class="step"><div class="stepnum">BUILD</div><div class="stepname">Sandbox + Proxy</div><div class="stepdesc">executor</div></div>
+    <div class="step"><div class="stepnum">BUILD</div><div class="stepname">Guardrail</div><div class="stepdesc">from_config</div></div>
+    <div class="step"><div class="stepnum">BUILD</div><div class="stepname">Audit</div><div class="stepdesc">Store + Logger</div></div>
+  </div>
+  <div class="pipeline">
+    <div class="step"><div class="stepnum">BUILD</div><div class="stepname">Registry</div><div class="stepdesc">default_registry · 工具白名单过滤</div></div>
+    <div class="step"><div class="stepnum">BUILD</div><div class="stepname">LLM Backend</div><div class="stepdesc">build_backend(cfg)</div></div>
+    <div class="step"><div class="stepnum">RETURN</div><div class="stepname">Agent</div><div class="stepdesc">注入所有依赖</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> ThreadPool 生命周期</h2>
+
+  <div class="code-annot">
+    <div class="file">agent/core.py:77 · 懒创建</div>
+<pre><code>def _ensure_pool(self):
+    if self._tool_pool is None:
+        self._tool_pool = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="ky-tool"
+        )
+    return self._tool_pool
+
+def shutdown(self):
+    if self._tool_pool is not None:
+        self._tool_pool.shutdown(wait=False)
+        self._tool_pool = None</code></pre>
+  </div>
+
+  <div class="callout">
+    <span class="icon">NOTE</span>
+    <div class="body">
+      <strong>max_workers=4</strong> 是保守上限——多了 GIL 抢锁，少了无法吃满 IO。
+      正常路径下 ask() 结束所有 worker 已 join，shutdown 是给「主动释放 Agent」用的。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> ask() 主循环 — 逐段解读</h2>
+
+  <h3>6.1 起手三连</h3>
+<pre><code>trace = Trace(user=user)
+self.audit.open(trace)
+trace.metadata.update({"backend": self.llm.name})
+
+self.audit.event(trace, EventKind.USER_INPUT, {"text": user_input})
+self.messages.append({"role": "user", "content": user_input})</code></pre>
+
+  <h3>6.2 主循环 while iterations &lt; max_iterations</h3>
+
+  <svg viewBox="0 0 1100 460" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:var(--bg-code);border:1px solid var(--border);border-radius:12px;padding:14px;">
+    <defs>
+      <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#41E5FF"/>
+      </marker>
+      <marker id="ar2r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#FF3D6E"/>
+      </marker>
+    </defs>
+
+    <!-- start -->
+    <rect x="40" y="20" width="180" height="50" rx="8" fill="#121624" stroke="#36E08A"/>
+    <text x="130" y="50" text-anchor="middle" fill="#F5F7FA" font-size="13" font-weight="700">enter ask()</text>
+
+    <!-- LLM call -->
+    <rect x="40" y="100" width="180" height="60" rx="8" fill="#121624" stroke="#B584FF"/>
+    <text x="130" y="125" text-anchor="middle" fill="#F5F7FA" font-size="12" font-weight="700">llm.chat()</text>
+    <text x="130" y="145" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">→ AssistantMessage</text>
+
+    <line x1="130" y1="70" x2="130" y2="98" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <!-- audit thought -->
+    <rect x="260" y="100" width="180" height="60" rx="8" fill="#121624" stroke="#36E08A"/>
+    <text x="350" y="125" text-anchor="middle" fill="#F5F7FA" font-size="12" font-weight="700">audit LLM_THOUGHT</text>
+    <text x="350" y="145" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">text + tool_calls</text>
+    <line x1="220" y1="130" x2="258" y2="130" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <!-- has tool_use? -->
+    <polygon points="470,130 540,100 610,130 540,160" fill="#121624" stroke="#FFC857"/>
+    <text x="540" y="135" text-anchor="middle" fill="#F5F7FA" font-size="11" font-weight="700">tool_uses?</text>
+    <line x1="440" y1="130" x2="468" y2="130" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <!-- no path -->
+    <text x="620" y="125" fill="#36E08A" font-size="11" font-family="JetBrains Mono">no</text>
+    <rect x="640" y="100" width="200" height="60" rx="8" fill="#121624" stroke="#1F8FFF"/>
+    <text x="740" y="125" text-anchor="middle" fill="#F5F7FA" font-size="12" font-weight="700">audit AGENT_REPLY</text>
+    <text x="740" y="145" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">return AgentRunResult</text>
+    <line x1="610" y1="130" x2="638" y2="130" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <rect x="860" y="100" width="180" height="60" rx="8" fill="#121624" stroke="#36E08A"/>
+    <text x="950" y="125" text-anchor="middle" fill="#F5F7FA" font-size="13" font-weight="700">EXIT</text>
+    <line x1="840" y1="130" x2="858" y2="130" stroke="#36E08A" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <!-- yes path -->
+    <text x="525" y="180" fill="#FFC857" font-size="11" font-family="JetBrains Mono">yes</text>
+    <line x1="540" y1="160" x2="540" y2="190" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <!-- parallel gate -->
+    <polygon points="430,210 540,190 650,210 540,250" fill="#121624" stroke="#41E5FF"/>
+    <text x="540" y="218" text-anchor="middle" fill="#F5F7FA" font-size="11" font-weight="700">4-gate AND check</text>
+    <text x="540" y="234" text-anchor="middle" fill="#7C8499" font-size="10" font-family="JetBrains Mono">platform · len &gt;= 2 · executor · all_safe</text>
+
+    <!-- serial branch -->
+    <text x="350" y="265" fill="#36E08A" font-size="11" font-family="JetBrains Mono">不全过 → 串行</text>
+    <line x1="430" y1="225" x2="270" y2="270" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <rect x="80" y="280" width="240" height="60" rx="8" fill="#121624" stroke="#FFC857"/>
+    <text x="200" y="305" text-anchor="middle" fill="#F5F7FA" font-size="12" font-weight="700">for tu: _handle_tool_use</text>
+    <text x="200" y="325" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">串行调用</text>
+
+    <!-- parallel branch -->
+    <text x="700" y="265" fill="#36E08A" font-size="11" font-family="JetBrains Mono">全过 → 并行（dormant）</text>
+    <line x1="650" y1="225" x2="850" y2="270" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <rect x="760" y="280" width="240" height="60" rx="8" fill="#121624" stroke="#B584FF"/>
+    <text x="880" y="305" text-anchor="middle" fill="#F5F7FA" font-size="12" font-weight="700">pool.submit(_handle_tool_use)</text>
+    <text x="880" y="325" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">fut.result() 等齐</text>
+
+    <!-- merge -->
+    <rect x="380" y="360" width="320" height="60" rx="8" fill="#121624" stroke="#41E5FF"/>
+    <text x="540" y="385" text-anchor="middle" fill="#F5F7FA" font-size="12" font-weight="700">tool_results[idx] = ... (顺序保留)</text>
+    <text x="540" y="405" text-anchor="middle" fill="#7C8499" font-size="11" font-family="JetBrains Mono">messages.append(role=user, content=tool_results)</text>
+    <line x1="200" y1="340" x2="380" y2="385" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <line x1="880" y1="340" x2="700" y2="385" stroke="#41E5FF" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+    <!-- loop back -->
+    <path d="M 380 390 Q 30 390 30 130 Q 30 50 130 70" stroke="#FFC857" stroke-width="1.5" fill="none" marker-end="url(#ar2)"/>
+    <text x="14" y="240" fill="#FFC857" font-size="10" font-family="JetBrains Mono" transform="rotate(-90 14 240)">loop next iteration</text>
+  </svg>
+</section>
+
+<section>
+  <h2><span class="num">7</span> _is_parallel_safe — 五重 AND</h2>
+
+  <p>C2 修复后的版本，<strong>五重 AND 全过才允许并行</strong>。</p>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div>工具必须已注册（registry.get 不为 None）</div></div>
+    <div class="bul"><span class="b-num">2</span><div>工具必须是 <code>read_only = True</code>（写操作不并行）</div></div>
+    <div class="bul danger"><span class="b-num">3</span><div><strong>C2 第一道防线</strong>：<code>guardrail.llm_reviewer</code> 必须为 None（避免预检 vs 内检不一致）</div></div>
+    <div class="bul"><span class="b-num">4</span><div>参数能过 <code>validate + build_argv</code></div></div>
+    <div class="bul"><span class="b-num">5</span><div>Guardrail 预检 verdict 是 <span class="decision allow">ALLOW</span>（CONFIRM/DENY 都走串行）</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8</span> _handle_tool_use — 一个工具调用的全生命周期</h2>
+
+  <p>ask() 主循环里调用最多的方法，也是审计链事件的真正生产者。</p>
+
+  <div class="timeline">
+    <div class="event evt-error">
+      <div class="seq">FAILSAFE 8.1</div>
+      <div class="kind">工具不存在 → ERROR 兜底</div>
+      <div class="payload">audit.event(ERROR, {reason:"unknown_tool"}) · 返回 ToolResultBlock(is_error=True)</div>
+    </div>
+    <div class="event evt-tool">
+      <div class="seq">VALIDATE 8.2</div>
+      <div class="kind">参数校验</div>
+      <div class="payload">tool.validate(input) → cleaned · tool.build_argv(cleaned) → argv · ToolError 兜底为 ERROR 事件</div>
+    </div>
+    <div class="event evt-tool">
+      <div class="seq">EVENT 8.3</div>
+      <div class="kind">TOOL_REQUEST</div>
+      <div class="payload">{tool, argv, args, risk, requires_root} — 最详细的一条事件</div>
+    </div>
+    <div class="event evt-safety">
+      <div class="seq">CHECK 8.4</div>
+      <div class="kind">SAFETY_CHECK</div>
+      <div class="payload">verdict = guardrail.check_argv(argv, declared_risk=tool.risk_level)</div>
+    </div>
+    <div class="event evt-error">
+      <div class="seq">BRANCH 8.5</div>
+      <div class="kind">DENY 分支</div>
+      <div class="payload">直接返回 [denied] 错误结果，让 LLM 看到并改方案</div>
+    </div>
+    <div class="event evt-safety">
+      <div class="seq">BRANCH 8.6 · C2 第二道防线</div>
+      <div class="kind">CONFIRM 分支</div>
+      <div class="payload">if current_thread is not main_thread → 自动 deny + ERROR · 否则调 self.confirm(...) → True 才放行</div>
+    </div>
+    <div class="event evt-exec">
+      <div class="seq">EXEC 8.7</div>
+      <div class="kind">EXECUTION + EXECUTION_RESULT</div>
+      <div class="payload">先写 EXECUTION 事件 → executor.run(argv) → 写完整结果</div>
+    </div>
+    <div class="event evt-result">
+      <div class="seq">FORMAT 8.8</div>
+      <div class="kind">格式化返回</div>
+      <div class="payload">tool.format_result(exec_result) · 截 6000 字防 LLM 输入炸</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9</span> SYSTEM_PROMPT 行为规范</h2>
+
+  <p>写给 LLM 的指导，但<strong>不是安全机制</strong>——LLM 偏离指令时仍然受 Guardrail / sandbox 兜底。</p>
+
+  <div class="cards">
+    <div class="card"><div class="title">禁止假装已执行</div><div class="body">所有动作必须 tool_use，不能在文本里假装执行命令</div></div>
+    <div class="card"><div class="title">小步推进</div><div class="body">每次只调 1-3 个工具，鼓励链式而不是 fanout</div></div>
+    <div class="card"><div class="title">变更前先查状态</div><div class="body">调 svc_restart 前先 svc_status</div></div>
+    <div class="card"><div class="title">回复先结论后证据</div><div class="body">给运维人看的，不要客套</div></div>
+    <div class="card"><div class="title">明确禁止</div><div class="body">拼 shell 字符串、幻觉命令输出、建议绕过安全的命令</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">10</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>每一次 ask() 都开一条 Trace 并 close</strong>（无论 LLM 报错还是超 max_iterations）</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>每一次 tool_use 都至少有 4 条审计事件</strong>：TOOL_REQUEST → SAFETY_CHECK → EXECUTION → EXECUTION_RESULT</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong><code>self.confirm()</code> 只在主线程调用</strong>（C2 第二道防线兜底）</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong><code>tool_results[idx]</code> 与 <code>tool_uses[idx]</code> 顺序对齐</strong></div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>DENY 路径不会创建子进程</strong>（短路返回，executor.run 没被调用）</div></div>
+    <div class="bul ok"><span class="b-num">6</span><div><strong>CONFIRM 路径在 ask 单次模式下等价于 DENY</strong></div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="02-data-flow.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">02 · 数据流时序</div>
+  </a>
+  <a href="04-llm-backends.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">04 · LLM 后端层</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

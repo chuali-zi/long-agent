@@ -8,7 +8,6 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable
 
 from kyagent.agent.llm import (
     AssistantMessage,
@@ -27,17 +26,36 @@ from kyagent.executor.proxy import ExecutionProxy
 from kyagent.executor.sandbox import SandboxConfig
 from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
+from kyagent.safety.confirm import ConfirmFn, auto_deny
 from kyagent.safety.guardrail import Guardrail
+from kyagent.safety.intent import IntentGuard, IntentVerdict
+from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.policy import Decision
 
 
-# Confirm 回调：tool name + argv + verdict → True 表示用户同意继续
-ConfirmFn = Callable[[str, list[str], dict], bool]
+# 把工具名映射成"感知类别"，便于审计 timeline 一眼看出感知的是什么
+_SNAPSHOT_PREFIXES = {
+    "process_": "进程",
+    "lsof_":    "进程/句柄",
+    "net_":     "网络",
+    "log_":     "日志",
+    "svc_":     "服务",
+    "fs_":      "文件系统",
+    "pkg_":     "软件包",
+}
 
 
-def _auto_deny(name: str, argv: list[str], verdict: dict) -> bool:
-    """默认 confirm 回调：直接拒绝。CLI 会注入交互式回调覆盖它。"""
-    return False
+def _snapshot_kind(tool_name: str) -> str:
+    for prefix, kind in _SNAPSHOT_PREFIXES.items():
+        if tool_name.startswith(prefix):
+            return kind
+    return "其它"
+
+
+# Confirm 回调：单参 ConfirmRequest → True 表示用户同意继续。
+# 具体的 verdict → ConfirmRequest 翻译由各 Verdict 自己负责（to_confirm_request），
+# Agent 与 UI 都不依赖具体 verdict 类型。
+_auto_deny = auto_deny  # backward-compat 别名，旧引用不破
 
 
 @dataclass
@@ -61,11 +79,13 @@ class Agent:
         executor: ExecutionProxy,
         audit: AuditLogger,
         confirm: ConfirmFn = _auto_deny,
+        intent_guard: IntentGuard | None = None,
     ):
         self.cfg = cfg
         self.llm = llm
         self.registry = registry
         self.guardrail = guardrail
+        self.intent_guard = intent_guard  # 赛题第 3 条：NL 意图层（None 则跳过）
         self.executor = executor
         self.audit = audit
         self.confirm = confirm
@@ -97,6 +117,7 @@ class Agent:
                 "/usr/local/bin", "/usr/bin", "/bin",
             ),
             forbid_root=cfg.executor.forbid_root,
+            forbid_root_strict=cfg.executor.forbid_root_strict,
         )
         executor = ExecutionProxy(sandbox)
         guardrail = Guardrail.from_config(cfg)
@@ -108,7 +129,9 @@ class Agent:
             keep = set(cfg.mcp.enable_tools)
             registry._tools = {n: t for n, t in registry._tools.items() if n in keep}
         llm = build_backend(cfg)
-        return cls(cfg, llm, registry, guardrail, executor, audit, confirm)
+        intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
+        return cls(cfg, llm, registry, guardrail, executor, audit, confirm,
+                   intent_guard=intent_guard)
 
     # ---- 主入口 --------------------------------------------------------
 
@@ -118,11 +141,63 @@ class Agent:
         trace.metadata.update({"backend": self.llm.name})
 
         self.audit.event(trace, EventKind.USER_INPUT, {"text": user_input})
-        self.messages.append({"role": "user", "content": user_input})
 
         notes: list[str] = []
         iterations = 0
         denied = False
+
+        # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
+        # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
+        # 之后的"二次过滤"，两者互补缺一不可。
+        effective_input = user_input
+        if self.intent_guard is not None:
+            intent_verdict: IntentVerdict = self.intent_guard.evaluate(
+                user_input, context={"user": user}
+            )
+            self.audit.event(trace, EventKind.INTENT_CHECK, intent_verdict.to_dict())
+
+            if intent_verdict.decision is Decision.DENY:
+                denied = True
+                notes.append(
+                    f"已在意图层拦截（risk={intent_verdict.risk.value}）：" +
+                    ",".join(h.rule_id for h in intent_verdict.hits[:3])
+                )
+                reply = (
+                    f"[blocked] 你的请求被自然语言意图风险过滤器拦截。\n"
+                    f"风险等级：{intent_verdict.risk.value}\n"
+                    + "\n".join(intent_verdict.rationale)
+                )
+                self.audit.event(trace, EventKind.AGENT_REPLY,
+                                 {"text": reply, "blocked_at": "intent"})
+                self.audit.close(trace)
+                return AgentRunResult(trace=trace, final_text=reply,
+                                      tool_iterations=0, denied=True, notes=notes)
+
+            if intent_verdict.decision is Decision.CONFIRM:
+                approved = False
+                try:
+                    approved = self.confirm(intent_verdict.to_confirm_request())
+                except Exception:
+                    approved = False
+                if not approved:
+                    denied = True
+                    notes.append(f"用户拒绝意图层 confirm（risk={intent_verdict.risk.value}）")
+                    reply = (
+                        f"[denied] 用户拒绝高风险意图请求（risk={intent_verdict.risk.value}）"
+                    )
+                    self.audit.event(trace, EventKind.AGENT_REPLY,
+                                     {"text": reply, "blocked_at": "intent_confirm"})
+                    self.audit.close(trace)
+                    return AgentRunResult(trace=trace, final_text=reply,
+                                          tool_iterations=0, denied=True, notes=notes)
+
+            # 净化 stealth injection（零宽字符）：把净化后的文本送进 LLM，
+            # 保留原文在 USER_INPUT 事件里以便审计追溯
+            if intent_verdict.sanitized_text is not None:
+                effective_input = intent_verdict.sanitized_text
+                notes.append("已剥离零宽字符送入 LLM")
+
+        self.messages.append({"role": "user", "content": effective_input})
 
         tools_for_llm = self.registry.to_anthropic_tools()
 
@@ -264,6 +339,18 @@ class Agent:
             "risk": tool.risk_level.value, "requires_root": tool.requires_root,
         })
 
+        # 赛题第 1/5 条：5 段闭环里的"感知环境"段。
+        # 当 LLM 调用的是只读 + 低风险工具时，落一条 PERCEPTION 事件，
+        # 明确标注本次 tool_use 的目的是"为决策收集系统真实状态"，区别于变更类操作。
+        # 这让审计 timeline 与赛题"接收指令→感知环境→推理决策→安全校验→执行结果"对齐。
+        if tool.read_only and tool.risk_level is RiskLevel.LOW:
+            self.audit.event(trace, EventKind.PERCEPTION, {
+                "tool": tu.name,
+                "purpose": "环境感知",
+                "snapshot_kind": _snapshot_kind(tu.name),
+                "argv_preview": " ".join(argv[:4]),
+            })
+
         # 2. 安全护栏（即便是 read_only 工具也过一遍，防止参数注入）
         verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
         self.audit.event(trace, EventKind.SAFETY_CHECK, verdict.to_dict())
@@ -293,7 +380,7 @@ class Agent:
                 )
             approved = False
             try:
-                approved = self.confirm(tu.name, argv, verdict.to_dict())
+                approved = self.confirm(verdict.to_confirm_request(tu.name, argv))
             except Exception:
                 approved = False
             if not approved:

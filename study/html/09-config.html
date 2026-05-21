@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>09 · 配置系统 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html" class="active">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 09 · CONFIGURATION</div>
+  <h1>配置系统<br><span class="sub">Pydantic + YAML + 环境变量</span></h1>
+  <p class="lead">
+    对应文件 <code>kyagent/config.py</code> + <code>configs/{default,openai}.yaml</code>。
+    <strong>强类型校验</strong>、<strong>环境变量友好</strong>、<strong>零配置兜底</strong>。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 设计目标</h2>
+  <div class="cards">
+    <div class="card"><div class="label">1</div><div class="title">强类型</div><div class="body">Pydantic 加载时把所有字段校验到对应类型</div></div>
+    <div class="card"><div class="label">2</div><div class="title">环境变量友好</div><div class="body">YAML 里写 <code>${VAR:-default}</code> 自动展开</div></div>
+    <div class="card"><div class="label">3</div><div class="title">可发现</div><div class="body">没有配置文件时也能跑（全默认）</div></div>
+    <div class="card"><div class="label">4</div><div class="title">可覆盖</div><div class="body">配置文件 &gt; 环境变量 &gt; Pydantic 默认</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> Pydantic schema 树</h2>
+
+  <div class="filetree">
+<span class="dir">Config</span>
+├── <span class="file">agent: AgentConfig</span>
+│   ├── name: str = <span class="cmt">"kyagent"</span>
+│   ├── llm_backend: str = <span class="cmt">"mock"</span>   <span class="star">★</span> <span class="cmt">"anthropic" / "openai" / "mock"</span>
+│   ├── anthropic: AnthropicConfig
+│   │   ├── model: str = <span class="cmt">"claude-opus-4-7"</span>
+│   │   ├── max_tokens: int = 4096
+│   │   └── api_key_env: str = <span class="cmt">"ANTHROPIC_API_KEY"</span>
+│   ├── openai: OpenAIConfig
+│   │   ├── model · max_tokens · temperature
+│   │   ├── api_key_env · base_url · organization
+│   └── max_iterations: int = 8
+├── <span class="file">executor: ExecutorConfig</span>
+│   ├── account: str = <span class="cmt">"kyagent"</span>
+│   ├── timeout: int = 30
+│   ├── output_cap: int = 65536
+│   ├── forbid_root: bool = True
+│   └── path: list[str] = <span class="cmt">["/usr/local/bin","/usr/bin","/bin"]</span>
+├── <span class="file">safety: SafetyConfig</span>
+│   ├── rules_file: str = <span class="cmt">"configs/safety-rules.yaml"</span>
+│   ├── policy: SafetyPolicy
+│   │   ├── critical: str = <span class="cmt">"deny"</span>
+│   │   ├── high · medium: str = <span class="cmt">"confirm"</span>
+│   │   └── low: str = <span class="cmt">"allow"</span>
+│   └── llm_review: bool = False
+├── <span class="file">audit: AuditConfig</span>
+│   ├── database: str = <span class="cmt">"./var/audit.db"</span>
+│   ├── jsonl_file: str | None = <span class="cmt">"./var/audit.jsonl"</span>
+│   └── retain_days: int = 90
+├── <span class="file">mcp: McpConfig</span>
+│   ├── enable_tools: list[str] = []     <span class="cmt"># 工具白名单</span>
+│   ├── server_name · server_version
+└── <span class="file">base_dir: Path = Path.cwd()</span>
+  </div>
+
+  <p>每一个 <code>*Config</code> 都是一个 <code>pydantic.BaseModel</code>，字段都带默认值，<strong>所以即便整段配置缺失也能正常构造</strong>。</p>
+</section>
+
+<section>
+  <h2><span class="num">3</span> 环境变量展开</h2>
+
+  <div class="code-annot">
+    <div class="file">config.py:13 · _expand_env 正则</div>
+<pre><code>_ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-(.*?))?\}")
+
+# 支持两种语法：
+${KYAGENT_LLM_BACKEND}           # → 取环境变量，无值时变空字符串
+${KYAGENT_LLM_BACKEND:-mock}     # → 取环境变量，无值时回退 mock</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><strong>递归处理 dict 和 list</strong>，所以 <code>path: ["${A:-/usr/bin}"]</code> 这种也能展开</div></div>
+    <div class="bul"><span class="b-num">2</span><div><strong>变量名必须以字母或下划线开头</strong>，后续只允许大写字母 / 数字 / 下划线 — 保守命名避免误把 <code>${something}</code> 当变量</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4</span> 配置加载流程</h2>
+
+  <div class="pipeline">
+    <div class="step"><div class="stepnum">1</div><div class="stepname">find_default_config</div><div class="stepdesc">KYAGENT_CONFIG env / cwd / pkg dir</div></div>
+    <div class="step"><div class="stepnum">2</div><div class="stepname">yaml.safe_load</div><div class="stepdesc">读 YAML · 杜绝反序列化攻击</div></div>
+    <div class="step"><div class="stepnum">3</div><div class="stepname">_expand_env</div><div class="stepdesc">递归展开 ${VAR}</div></div>
+    <div class="step"><div class="stepnum">4</div><div class="stepname">Config.model_validate</div><div class="stepdesc">Pydantic 类型校验</div></div>
+    <div class="step"><div class="stepnum">5</div><div class="stepname">base_dir</div><div class="stepdesc">configs/ 的父目录 = 项目根</div></div>
+  </div>
+
+  <div class="code-annot">
+    <div class="file">config.py:108 · find_default_config 优先级</div>
+<pre><code>1. os.environ.get("KYAGENT_CONFIG")       # 环境变量指向的文件
+2. Path.cwd() / "configs" / "default.yaml" # 当前工作目录
+3. Path(__file__).parent.parent / "configs" / "default.yaml"  # 包安装目录
+4. None  →  Config(base_dir=Path.cwd())   # 全默认兜底</code></pre>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> Config.resolve · 相对路径锚点</h2>
+<pre><code>def resolve(self, p: str | Path) -> Path:
+    path = Path(p)
+    if path.is_absolute():
+        return path
+    return (self.base_dir / path).resolve()</code></pre>
+
+  <p>把相对路径解析成绝对路径，参照 <code>base_dir</code>：</p>
+  <ul>
+    <li><code>audit.database: ./var/audit.db</code> + base_dir=<code>D:\race\long\</code> → <code>D:\race\long\var\audit.db</code></li>
+  </ul>
+  <p><strong>所有需要落地的路径都过 <code>cfg.resolve()</code></strong>，避免相对路径在 CWD 改变时出错。</p>
+</section>
+
+<section>
+  <h2><span class="num">6</span> default.yaml · mock 后端</h2>
+  <div class="code-annot">
+    <div class="file">configs/default.yaml</div>
+<pre><code>agent:
+  name: kyagent
+  llm_backend: ${KYAGENT_LLM_BACKEND:-mock}
+  anthropic:
+    model: claude-opus-4-7
+    max_tokens: 4096
+    api_key_env: ANTHROPIC_API_KEY
+  max_iterations: 8
+
+executor:
+  account: kyagent
+  timeout: 30
+  output_cap: 65536
+  forbid_root: true
+  path:
+    - /usr/local/bin
+    - /usr/bin
+    - /bin
+    - /usr/sbin
+    - /sbin
+
+safety:
+  rules_file: configs/safety-rules.yaml
+  policy:
+    critical: deny
+    high: confirm
+    medium: confirm
+    low: allow
+  llm_review: false
+
+audit:
+  database: ./var/audit.db
+  jsonl_file: ./var/audit.jsonl
+  retain_days: 90
+
+mcp:
+  enable_tools: []
+  server_name: kyagent
+  server_version: 0.1.0</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><strong>默认 llm_backend: mock</strong>，离线可跑</div></div>
+    <div class="bul"><span class="b-num">2</span><div>用 <code>KYAGENT_LLM_BACKEND</code> 覆盖（<code>KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."</code>）</div></div>
+    <div class="bul"><span class="b-num">3</span><div><strong>forbid_root: true</strong> 默认禁用 root 提权</div></div>
+    <div class="bul"><span class="b-num">4</span><div><strong>enable_tools: []</strong> 空白名单 = 全部启用</div></div>
+    <div class="bul"><span class="b-num">5</span><div><strong>llm_review: false</strong> 默认关闭 LLM 复审</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7</span> openai.yaml · 协议兼容</h2>
+
+  <div class="code-annot">
+    <div class="file">configs/openai.yaml · 关键字段</div>
+<pre><code>agent:
+  llm_backend: openai
+  openai:
+    model: ${KYAGENT_OPENAI_MODEL:-gpt-4o-mini}
+    max_tokens: 4096
+    temperature: 0.2
+    api_key_env: OPENAI_API_KEY
+    base_url: ${KYAGENT_OPENAI_BASE_URL:-}
+    organization: ${KYAGENT_OPENAI_ORG:-}</code></pre>
+  </div>
+
+  <h3>用法示例</h3>
+  <div class="cards">
+    <div class="card">
+      <div class="label">OpenAI 官方</div>
+      <div class="title">openai.com/v1</div>
+      <div class="body"><code>export OPENAI_API_KEY=sk-...</code><br><code>export KYAGENT_CONFIG=$(pwd)/configs/openai.yaml</code><br><code>kyagent ask "..."</code></div>
+    </div>
+    <div class="card">
+      <div class="label">DeepSeek</div>
+      <div class="title">deepseek.com/v1</div>
+      <div class="body"><code>export OPENAI_API_KEY=sk-deepseek-...</code><br><code>export KYAGENT_OPENAI_BASE_URL=https://api.deepseek.com/v1</code><br><code>export KYAGENT_OPENAI_MODEL=deepseek-chat</code></div>
+    </div>
+    <div class="card">
+      <div class="label">vLLM / Ollama</div>
+      <div class="title">127.0.0.1:11434/v1</div>
+      <div class="body"><code>export OPENAI_API_KEY=local</code><br><code>export KYAGENT_OPENAI_BASE_URL=http://127.0.0.1:11434/v1</code><br><code>export KYAGENT_OPENAI_MODEL=qwen2.5:14b</code></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8</span> safety-rules.yaml 结构</h2>
+<pre><code>rules:
+  - id: &lt;唯一 id&gt;
+    risk: &lt;low|medium|high|critical&gt;
+    description: &lt;人话&gt;
+    pattern: &lt;可选 regex on cmdline&gt;
+    command: &lt;可选 argv[0] basename&gt;
+    flags_any: [&lt;flags&gt;]      # 任一出现即匹配
+    flags_all: [&lt;flags&gt;]      # 全部出现才匹配
+    target_in: [&lt;paths&gt;]      # 任一位置参数在这些前缀下</code></pre>
+  <p>详见 <a href="05-safety-layer.html">05 · 安全护栏</a>。</p>
+</section>
+
+<section>
+  <h2><span class="num">9</span> 扩展配置的流程</h2>
+
+  <div class="pipeline">
+    <div class="step">
+      <div class="stepnum">1</div>
+      <div class="stepname">添加 Pydantic 字段</div>
+      <div class="stepdesc">kyagent/config.py · *Config 类加字段并给默认值</div>
+    </div>
+    <div class="step">
+      <div class="stepnum">2</div>
+      <div class="stepname">YAML 写入</div>
+      <div class="stepdesc">configs/default.yaml 加同名 key（可选）</div>
+    </div>
+    <div class="step">
+      <div class="stepnum">3</div>
+      <div class="stepname">代码引用</div>
+      <div class="stepdesc">cfg.executor.my_new_field</div>
+    </div>
+  </div>
+
+  <p>Pydantic 会自动校验类型 / 必填。</p>
+</section>
+
+<section>
+  <h2><span class="num">10</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>配置加载是同步、惰性的</strong>：第一次 <code>load_config()</code> 才读 YAML</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>cfg.base_dir 是相对路径的锚点</strong>：永远是 <code>configs/</code> 的父目录（项目根）</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>yaml.safe_load 而非 yaml.load</strong>：杜绝 YAML 反序列化攻击</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>环境变量展开是字符串值上做的</strong>：dict key / 数字字段不展开</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>配置不存在不报错</strong>：全默认兜底，让「零配置启动」成立</div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="08-audit-chain.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">08 · 推理链审计</div>
+  </a>
+  <a href="10-cli-entry.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">10 · CLI 入口</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

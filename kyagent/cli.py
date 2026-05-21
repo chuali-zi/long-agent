@@ -35,6 +35,7 @@ from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import load_config
 from kyagent.mcp.tools import default_registry
+from kyagent.safety.confirm import ConfirmRequest
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.policy import Decision
 
@@ -54,15 +55,20 @@ console = Console()
 # ---- 交互回调：在 CLI 里弹出 confirm ---------------------------------------
 
 
-def _cli_confirm(tool_name: str, argv: list[str], verdict: dict) -> bool:
-    console.rule(f"[yellow]需要用户确认 — {tool_name}[/yellow]")
+def _cli_confirm(req: ConfirmRequest) -> bool:
+    """统一的交互式 confirm 渲染器。
+
+    与具体 verdict 类型解耦：任何 verdict 只要实现 to_confirm_request() 都能复用。
+    """
+    console.rule(f"[yellow]需要用户确认 — {req.title}[/yellow]")
+    lines = [f"[bold]风险等级[/]: {req.risk}"]
+    if req.body:
+        lines.append(f"[bold]详情[/]: {req.body}")
+    if req.summary_lines:
+        lines.append("[bold]命中规则[/]:")
+        lines.extend(f"  - {s}" for s in req.summary_lines)
     console.print(Panel.fit(
-        f"[bold]风险等级[/]: {verdict['risk']}\n"
-        f"[bold]待执行 argv[/]: {' '.join(argv)}\n"
-        f"[bold]命中规则[/]:\n" + "\n".join(
-            f"  - {h['rule_id']} ({h['risk']}): {h['description']}"
-            for h in verdict["hits"]
-        ),
+        "\n".join(lines),
         title="安全审查", border_style="yellow",
     ))
     ans = Prompt.ask("[bold]是否放行？[/]", choices=["y", "n"], default="n")
@@ -80,9 +86,21 @@ def chat(
     """启动交互式对话。"""
     cfg = load_config(config)
     agent = Agent.from_config(cfg, confirm=_cli_confirm)
+
+    # 后端栏：若发生了降级，显式提示「未配置 key 时自动降级，配 key 即生效」
+    backend_line = f"  LLM 后端     : [bold]{agent.llm.name}[/]"
+    fallback_from = getattr(agent.llm, "fallback_from", None)
+    if fallback_from:
+        reason = getattr(agent.llm, "fallback_reason", "")
+        backend_line = (
+            f"  LLM 后端     : [bold]{agent.llm.name}[/] "
+            f"[yellow](已从 {fallback_from} 降级；{reason}；"
+            f"设置该环境变量并重启即可启用真实后端)[/]"
+        )
+
     console.print(Panel.fit(
         f"[bold cyan]kyagent[/] 已就绪\n"
-        f"  LLM 后端     : [bold]{agent.llm.name}[/]\n"
+        f"{backend_line}\n"
         f"  执行账户     : [bold]{cfg.executor.account}[/]\n"
         f"  已注册工具   : {len(agent.registry.all())}\n"
         f"  审计 DB      : {cfg.resolve(cfg.audit.database)}\n"
@@ -142,8 +160,19 @@ def ask(
             "iterations": result.tool_iterations,
             "denied": result.denied,
             "notes": result.notes,
+            "backend": agent.llm.name,
+            "fallback_from": getattr(agent.llm, "fallback_from", None),
         }, ensure_ascii=False, indent=2) + "\n")
         return
+    # 降级提示（stderr，不污染 stdout 管道）
+    fallback_from = getattr(agent.llm, "fallback_from", None)
+    if fallback_from:
+        reason = getattr(agent.llm, "fallback_reason", "")
+        console.print(
+            f"[yellow][warn] LLM 后端已从 {fallback_from} 降级到 mock"
+            f"（{reason}）。设置该环境变量并重新运行即可启用真实后端。[/]",
+            style="yellow",
+        )
     console.print(result.final_text)
     if result.notes:
         console.print("[dim]" + " | ".join(result.notes) + "[/]")
@@ -183,36 +212,95 @@ def tools_list(config: str | None = typer.Option(None, "--config", "-c")):
 
 @safety_app.command("test")
 def safety_test(
-    cmdline: str = typer.Argument(..., help="待检测的 shell 命令字符串"),
+    text: str = typer.Argument(..., help="待检测的命令字符串 / 自然语言意图（自动两层都跑）"),
     config: str | None = typer.Option(None, "--config", "-c"),
+    layer: str = typer.Option(
+        "both", "--layer", "-l",
+        help="检测层：intent（NL 意图层）/ argv（shell 二次过滤）/ both（默认）",
+    ),
 ):
-    """让安全护栏对 cmdline 出具裁决（不真正执行）。"""
+    """让安全护栏对输入文本出具裁决（不真正执行）。
+
+    赛题第 3 条要求两层过滤都做到：
+      · intent 层：用户原始自然语言意图（如"请帮我删除 /etc"）+ Prompt Injection
+      · argv 层：LLM 已经吐出的 shell 命令（如 rm -rf /etc）
+    默认两层都跑；综合取最严的裁决。
+    """
     cfg = load_config(config)
-    guardrail = Guardrail.from_config(cfg)
-    verdict = guardrail.check_cmdline(cmdline)
+    color_map = {"low": "green", "medium": "yellow", "high": "red", "critical": "bold red"}
+    decision_color_map = {"allow": "green", "confirm": "yellow", "deny": "bold red"}
 
-    color = {"low": "green", "medium": "yellow", "high": "red", "critical": "bold red"}[verdict.risk.value]
-    decision_color = {"allow": "green", "confirm": "yellow", "deny": "bold red"}[verdict.decision.value]
+    intent_verdict = None
+    argv_verdict = None
 
-    body_lines = [
-        f"[bold]cmdline[/]: {cmdline}",
-        f"[bold]risk[/]:    [{color}]{verdict.risk.value}[/]",
-        f"[bold]decision[/]:[{decision_color}]{verdict.decision.value}[/]",
-        "",
-        "[bold]hits[/]:",
-    ]
-    if not verdict.hits:
-        body_lines.append("  (无)")
-    for h in verdict.hits:
-        body_lines.append(
-            f"  - {h.rule_id} ({h.risk.value}): {h.description}"
-            f"\n      matched: {h.matched}"
+    if layer in ("intent", "both"):
+        from kyagent.safety.intent import IntentGuard
+        ig = IntentGuard.from_config(cfg)
+        intent_verdict = ig.evaluate(text)
+        body = [
+            f"[bold]输入[/]: {text}",
+            f"[bold]risk[/]:    [{color_map[intent_verdict.risk.value]}]{intent_verdict.risk.value}[/]",
+            f"[bold]decision[/]:[{decision_color_map[intent_verdict.decision.value]}]{intent_verdict.decision.value}[/]",
+            "",
+            "[bold]hits[/]:",
+        ]
+        if not intent_verdict.hits:
+            body.append("  (无)")
+        for h in intent_verdict.hits:
+            body.append(
+                f"  - {h.rule_id} [{h.category}] ({h.risk.value}): "
+                f"matched={h.matched!r} via {h.variant}"
+            )
+        body.append("\n[bold]rationale[/]:")
+        for r in intent_verdict.rationale:
+            body.append(f"  · {r}")
+        console.print(Panel(
+            "\n".join(body),
+            title="意图层（自然语言 + Prompt Injection）",
+            border_style=decision_color_map[intent_verdict.decision.value],
+        ))
+
+    if layer in ("argv", "both"):
+        guardrail = Guardrail.from_config(cfg)
+        argv_verdict = guardrail.check_cmdline(text)
+        body = [
+            f"[bold]cmdline[/]: {text}",
+            f"[bold]risk[/]:    [{color_map[argv_verdict.risk.value]}]{argv_verdict.risk.value}[/]",
+            f"[bold]decision[/]:[{decision_color_map[argv_verdict.decision.value]}]{argv_verdict.decision.value}[/]",
+            "",
+            "[bold]hits[/]:",
+        ]
+        if not argv_verdict.hits:
+            body.append("  (无)")
+        for h in argv_verdict.hits:
+            body.append(
+                f"  - {h.rule_id} ({h.risk.value}): {h.description}"
+                f"\n      matched: {h.matched}"
+            )
+        body.append("\n[bold]rationale[/]:")
+        for r in argv_verdict.rationale:
+            body.append(f"  · {r}")
+        console.print(Panel(
+            "\n".join(body),
+            title="argv 层（LLM 输出二次过滤）",
+            border_style=decision_color_map[argv_verdict.decision.value],
+        ))
+
+    # 综合裁决：两层取最严
+    if intent_verdict and argv_verdict:
+        final_decision = max(
+            (intent_verdict.decision, argv_verdict.decision),
+            key=lambda d: d.order,
         )
-    body_lines.append("\n[bold]rationale[/]:")
-    for r in verdict.rationale:
-        body_lines.append(f"  · {r}")
-
-    console.print(Panel("\n".join(body_lines), title="safety verdict", border_style=decision_color))
+        final_risk = max(
+            (intent_verdict.risk, argv_verdict.risk),
+            key=lambda r: r.order,
+        )
+        console.print(
+            f"[bold]综合裁决[/]: "
+            f"risk=[{color_map[final_risk.value]}]{final_risk.value}[/] "
+            f"decision=[{decision_color_map[final_decision.value]}]{final_decision.value}[/]"
+        )
 
 
 # ---- audit ---------------------------------------------------------------

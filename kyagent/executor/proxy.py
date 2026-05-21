@@ -236,26 +236,40 @@ class ExecutionProxy:
     ) -> tuple[list[str], bool, str]:
         """根据 requires_root 与当前用户决定是否包裹 sudo。
 
+        语义（贴合赛题"最小权限代理执行：非必要不使用 root"）：
+          - 不需要 root → 始终在受限账户下跑（必要时 sudo -n -u kyagent 降权）
+          - 需要 root  → 通过 ``sudo -n -u root`` 走 sudoers 白名单
+              · 是否真的能跑由 ``configs/sudoers.kyagent`` 中的 NOPASSWD 决定，
+                不在白名单的命令会被 sudo 自己拒绝（非 0 退出，stderr 有解释），
+                这就是"最小权限"的边界。
+              · 仅当配置项 ``forbid_root_strict=true`` 时彻底拒绝所有 root 提升
+                （绕过 sudoers），用于"演示模式 / 无 sudoers 的高合规场景"。
+
+        修正了原 bug（codex 指控 #1）：
+            原代码 ``if forbid_root and target != "root": return ["/bin/false"]``
+            把"非必要不用 root"误读成"任何 requires_root 一律拒绝"，让 sudoers
+            白名单成了死代码。新代码保留通过 sudoers 走 root 的合法路径。
+
         返回 (final_argv, sudo_used, run_as)
         """
         target = self.cfg.account or self._current_user
 
-        # 默认按受限账户跑
+        # 不需要提权：默认按受限账户跑
         if not requires_root:
-            # 当前已经是目标账户：直接跑
             if self._current_user == target:
                 return list(argv), False, self._current_user
             # 我是别人，需要降权到 target：sudo -n -u target
             return self._sudo_wrap(argv, target), True, target
 
-        # requires_root=True
-        if self.cfg.forbid_root and target != "root":
-            # 策略禁止 root：直接拒绝
+        # 需要 root
+        if self.cfg.forbid_root_strict:
+            # 严格模式：彻底禁止 root，绕过 sudoers。占位失败命令明确告诉调用方
             return (
-                ["/bin/false"],  # 占位失败命令
+                ["/bin/false"],
                 False,
                 target,
             )
+        # 正常模式（赛题语义"非必要不 root"）：走 sudoers 让其自决
         return self._sudo_wrap(argv, "root"), True, "root"
 
     def _sudo_wrap(self, argv: list[str], target_user: str) -> list[str]:

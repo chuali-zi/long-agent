@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · 安全模型总览 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html" class="active">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 11 · SECURITY MODEL</div>
+  <h1>安全模型总览<br><span class="sub">六层防御 · 多层独立失效不耦合</span></h1>
+  <p class="lead">
+    <strong>不引入新代码</strong>，而是把前面各模块的安全机制串成一张「全景图」。
+    任何一条危险命令都要穿透 L4 → L3 → L2 → L1 才能落地。
+    <strong>每一层独立失效都不会让攻击成功。</strong>
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> 防御层（从外到内）</h2>
+
+  <div class="stack">
+    <div class="layer layer-system">
+      <div class="badge">L1</div>
+      <div class="name">系统层 · /etc/sudoers.d/kyagent</div>
+      <div class="desc">受限账户 kyagent（nologin shell）· NOPASSWD 白名单仅允许特定绝对路径命令 · 显式黑名单 sh / bash / python / awk / sed · log_input / log_output 系统侧 sudo 审计</div>
+    </div>
+    <div class="layer layer-process">
+      <div class="badge">L2</div>
+      <div class="name">进程层 · ExecutionProxy.run</div>
+      <div class="desc">永远 list[str] argv（绝不 shell=True）· PATH 白名单 + which() 强制解析 · clean env 洗掉 LD_PRELOAD / LD_LIBRARY_PATH 等 · preexec_fn setpgid + RLIMIT_CPU/AS/FSIZE/NOFILE · communicate(timeout=30s) + killpg 进程组级超时 · stdout/stderr 截断 64KB · forbid_root 禁用 root 提权</div>
+    </div>
+    <div class="layer layer-guard">
+      <div class="badge">L3</div>
+      <div class="name">护栏层 · Guardrail</div>
+      <div class="desc">27 条规则覆盖 rm / dd / mkfs / chmod / chown / curl|sh / 反弹shell · 工具声明 risk 作为下限（CRITICAL 不可降）· 可选 LLM 复审（只能升级）· Policy: critical→deny / high→confirm / medium→confirm</div>
+    </div>
+    <div class="layer layer-tool">
+      <div class="badge">L4</div>
+      <div class="name">工具层 · Tool.validate + build_argv</div>
+      <div class="desc">JSON Schema required + type 校验 · _safe_path 禁路径符号 + 敏感文件黑名单 · _validate_unit 禁 shell 元字符 + 核心服务黑名单 · shell-meta 黑名单（; | &amp; $ ` \n）· 不暴露 raw shell · 不暴露 install / remove / mask / disable</div>
+    </div>
+    <div class="layer layer-llm">
+      <div class="badge">L5</div>
+      <div class="name">LLM 协议层 · Agent.core</div>
+      <div class="desc">LLM 只能通过 tool_use 调命令 · 未知工具 / 参数错 → ERROR 兜底 · CONFIRM 必须主线程交互（C2 第二道防线）· 单次 ask 模式 confirm = always False · max_iterations 上限 8（防 LLM 循环）</div>
+    </div>
+    <div class="layer layer-audit">
+      <div class="badge">L6</div>
+      <div class="name">审计层 · Audit</div>
+      <div class="desc">全程 7+ 段事件落地（SQLite + JSONL）· SAFETY_CHECK 含完整 verdict / hits / rationale · EXECUTION_RESULT 含真实 argv / rc / duration / sudo · 任何拒绝路径都写 ERROR 事件留证据</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> 威胁模型 · 11 个攻击向量</h2>
+
+  <div class="threat-row" style="background:var(--bg-elev);font-weight:600;border-color:var(--border-strong);">
+    <div class="tid" style="background:none;border:none;color:var(--text-bright);">ID</div>
+    <div class="vector">攻击向量</div>
+    <div class="layer-name">第一道</div>
+    <div class="layer-name">第二道</div>
+    <div class="layer-name">兜底</div>
+  </div>
+
+  <div class="threat-row">
+    <div class="tid">T1</div>
+    <div class="vector">恶意用户自然语言诱导<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">"帮我删掉 /etc 里所有 .conf"</span></div>
+    <div class="layer-name">SYSTEM_PROMPT</div>
+    <div class="layer-name">工具不暴露 raw rm</div>
+    <div class="layer-name">Guardrail DENY</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T2</div>
+    <div class="vector">LLM 自身生成恶意 tool_use<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">unit="sshd; rm -rf /"</span></div>
+    <div class="layer-name">Tool.validate</div>
+    <div class="layer-name">_validate_unit shell-meta</div>
+    <div class="layer-name">argv 是 list 不走 shell</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T3</div>
+    <div class="vector">合法工具语义不合规<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">svc_restart unit="sshd"</span></div>
+    <div class="layer-name">declared HIGH</div>
+    <div class="layer-name">policy.decide → CONFIRM</div>
+    <div class="layer-name">confirm=False → [denied]</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T4</div>
+    <div class="vector">shell 元字符注入<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">path="/var/log; cat /etc/shadow"</span></div>
+    <div class="layer-name">_safe_path 检测 ;</div>
+    <div class="layer-name">argv 未构造</div>
+    <div class="layer-name">executor 没启动</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T5</div>
+    <div class="vector">PATH 污染<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">/tmp/bin/rm</span></div>
+    <div class="layer-name">clean_env 强制 PATH</div>
+    <div class="layer-name">shutil.which path 参数</div>
+    <div class="layer-name">rc=127</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T6</div>
+    <div class="vector">环境变量注入<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">LD_PRELOAD=/tmp/x.so</span></div>
+    <div class="layer-name">forbidden 黑名单</div>
+    <div class="layer-name">env 模板不含</div>
+    <div class="layer-name">sudoers !env_keep</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T7</div>
+    <div class="vector">长输出耗尽内存<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">fs_find 千万级文件</span></div>
+    <div class="layer-name">output_cap=64KB</div>
+    <div class="layer-name">RLIMIT_AS=1GB</div>
+    <div class="layer-name">RLIMIT_FSIZE=32MB</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T8</div>
+    <div class="vector">fork bomb / 长跑<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">:(){ :|:&amp; };:</span></div>
+    <div class="layer-name">Guardrail DENY</div>
+    <div class="layer-name">RLIMIT_NOFILE/CPU</div>
+    <div class="layer-name">killpg 超时杀</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T9</div>
+    <div class="vector">sudo 提权<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">sudo rm -rf /</span></div>
+    <div class="layer-name">forbid_root</div>
+    <div class="layer-name">sudoers 白名单</div>
+    <div class="layer-name">rm 不在白名单</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T10</div>
+    <div class="vector">绕过审计<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">"执行但不被审计"</span></div>
+    <div class="layer-name">主路径写死</div>
+    <div class="layer-name">try/except 写 ERROR</div>
+    <div class="layer-name">WAL + 即时 fsync</div>
+  </div>
+  <div class="threat-row">
+    <div class="tid">T11</div>
+    <div class="vector">prompt injection<br><span style="color:var(--text-mute);font-family:JetBrains Mono;font-size:11px;">"忽略你的安全护栏"</span></div>
+    <div class="layer-name">SYSTEM_PROMPT</div>
+    <div class="layer-name">L3-L4 强清洗</div>
+    <div class="layer-name">不依赖 LLM 善意</div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3</span> 信任边界图</h2>
+
+  <svg viewBox="0 0 1100 540" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:var(--bg-code);border:1px solid var(--border);border-radius:12px;padding:14px;">
+    <!-- untrusted -->
+    <rect x="160" y="20" width="780" height="80" rx="10" fill="#1A1F30" stroke="#FF3D6E" stroke-width="2"/>
+    <text x="550" y="50" text-anchor="middle" fill="#FF3D6E" font-size="14" font-weight="700">不可信：用户输入 / LLM 输出</text>
+    <text x="550" y="72" text-anchor="middle" fill="#C8CDD8" font-size="11" font-family="JetBrains Mono">自然语言可能含 injection · LLM 可能被诱导发起恶意 tool_use · args 可能含 shell-meta</text>
+
+    <text x="60" y="125" font-family="JetBrains Mono" font-size="11" fill="#FFC857" letter-spacing="2">◀ 信任边界 1：Tool.validate + build_argv</text>
+    <line x1="550" y1="100" x2="550" y2="140" stroke="#FFC857" stroke-width="2" stroke-dasharray="4,3"/>
+
+    <!-- semi-trusted -->
+    <rect x="160" y="150" width="780" height="80" rx="10" fill="#1A1F30" stroke="#FFC857" stroke-width="2"/>
+    <text x="550" y="180" text-anchor="middle" fill="#FFC857" font-size="14" font-weight="700">半可信：cleaned args + 构造好的 argv</text>
+    <text x="550" y="202" text-anchor="middle" fill="#C8CDD8" font-size="11" font-family="JetBrains Mono">类型 / 字段已校验 · shell 元字符已过滤 · 路径已规范化</text>
+
+    <text x="60" y="255" font-family="JetBrains Mono" font-size="11" fill="#FFC857" letter-spacing="2">◀ 信任边界 2：Guardrail.check_argv</text>
+    <line x1="550" y1="230" x2="550" y2="270" stroke="#FFC857" stroke-width="2" stroke-dasharray="4,3"/>
+
+    <!-- verdict -->
+    <rect x="160" y="280" width="780" height="80" rx="10" fill="#1A1F30" stroke="#B584FF" stroke-width="2"/>
+    <text x="550" y="310" text-anchor="middle" fill="#B584FF" font-size="14" font-weight="700">决策已生成：Verdict</text>
+    <text x="550" y="332" text-anchor="middle" fill="#C8CDD8" font-size="11" font-family="JetBrains Mono">decision = ALLOW/CONFIRM/DENY · rationale 已留痕 · DENY 短路 executor 不启动</text>
+
+    <text x="60" y="385" font-family="JetBrains Mono" font-size="11" fill="#FFC857" letter-spacing="2">◀ 信任边界 3：ExecutionProxy.run</text>
+    <line x1="550" y1="360" x2="550" y2="400" stroke="#FFC857" stroke-width="2" stroke-dasharray="4,3"/>
+
+    <!-- subprocess -->
+    <rect x="160" y="410" width="780" height="80" rx="10" fill="#1A1F30" stroke="#36E08A" stroke-width="2"/>
+    <text x="550" y="440" text-anchor="middle" fill="#36E08A" font-size="14" font-weight="700">子进程：受限账户 + sandbox + sudo</text>
+    <text x="550" y="462" text-anchor="middle" fill="#C8CDD8" font-size="11" font-family="JetBrains Mono">argv 构造错误时 sudoers 白名单兜底 · 子进程恶意时 RLIMIT 限制资源</text>
+
+    <text x="60" y="520" fill="#41E5FF" font-size="11" font-family="JetBrains Mono">每条信任边界都对应一个验证函数</text>
+  </svg>
+</section>
+
+<section>
+  <h2><span class="num">4</span> 不可绕过的强制路径</h2>
+
+  <p>任何一次工具调用必经的代码路径，<strong>不可绕过、不可短路</strong>。</p>
+
+  <h3>4.1 在 Agent 主循环里（_handle_tool_use）</h3>
+  <div class="timeline">
+    <div class="event evt-tool"><div class="seq">必经 1</div><div class="kind">tool = registry.get(tu.name) — 工具必须已注册</div><div class="payload"></div></div>
+    <div class="event evt-tool"><div class="seq">必经 2</div><div class="kind">tool.validate(tu.input) — 必须类型/必填通过</div><div class="payload"></div></div>
+    <div class="event evt-tool"><div class="seq">必经 3</div><div class="kind">tool.build_argv(cleaned) — 必须工具自己的清洗通过</div><div class="payload"></div></div>
+    <div class="event evt-tool"><div class="seq">必经 4</div><div class="kind">audit.event(TOOL_REQUEST) — 必须写审计</div><div class="payload"></div></div>
+    <div class="event evt-safety"><div class="seq">必经 5</div><div class="kind">guardrail.check_argv(argv, declared_risk) — 必须过护栏</div><div class="payload"></div></div>
+    <div class="event evt-safety"><div class="seq">必经 6</div><div class="kind">audit.event(SAFETY_CHECK) — 必须写裁决</div><div class="payload"></div></div>
+    <div class="event evt-error"><div class="seq">分支</div><div class="kind">if DENY: return [denied] — 短路，executor 不启动</div><div class="payload"></div></div>
+    <div class="event evt-error"><div class="seq">分支</div><div class="kind">if CONFIRM: confirm() 拒绝 → return [denied]</div><div class="payload"></div></div>
+    <div class="event evt-exec"><div class="seq">必经 7</div><div class="kind">audit.event(EXECUTION) — 写"即将执行"</div><div class="payload"></div></div>
+    <div class="event evt-exec"><div class="seq">必经 8</div><div class="kind">executor.run(argv, requires_root) — 必须经过 executor</div><div class="payload"></div></div>
+    <div class="event evt-result"><div class="seq">必经 9</div><div class="kind">audit.event(EXECUTION_RESULT) — 必须写结果</div><div class="payload"></div></div>
+  </div>
+
+  <div class="callout ok">
+    <span class="icon">SYM</span>
+    <div class="body">
+      MCP server <code>_call_tool</code> 路径形状完全一致——这是把<strong>「安全 + 审计」作为强制中间件</strong>的物理实现。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> 失败模式分析</h2>
+
+  <div class="cards">
+    <div class="card">
+      <div class="label">FAILURE · 5.1</div>
+      <div class="title">LLM 后端故障</div>
+      <div class="body">网络抖动 / 限流 → 不让进程崩，写 ERROR + 友好提示返回</div>
+    </div>
+    <div class="card">
+      <div class="label">FAILURE · 5.2</div>
+      <div class="title">非 utf-8 输出</div>
+      <div class="body">_truncate 用 errors="replace" + repr 兜底，永远不抛 UnicodeError</div>
+    </div>
+    <div class="card">
+      <div class="label">FAILURE · 5.3</div>
+      <div class="title">sudo 不可用</div>
+      <div class="body">sudo -n 在密码缺失时直接 rc=1 + stderr 提示，附在 ToolResult</div>
+    </div>
+    <div class="card">
+      <div class="label">FAILURE · 5.4</div>
+      <div class="title">SQLite 写入失败</div>
+      <div class="body">极端情况（磁盘满）抛 OperationalError · 已知薄弱点</div>
+    </div>
+    <div class="card">
+      <div class="label">FAILURE · 5.5</div>
+      <div class="title">JSONL 写入失败</div>
+      <div class="body">不影响 SQLite · trace 仍可回放，只是 JSONL 通道丢一行</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> 攻击-防御对照表</h2>
+  <table>
+    <thead><tr><th>攻击向量</th><th>第一道防线</th><th>第二道防线</th><th>兜底</th></tr></thead>
+    <tbody>
+      <tr><td><code>rm -rf /etc</code></td><td>SYSTEM_PROMPT</td><td>工具不暴露 raw rm</td><td><span class="decision deny">DENY</span></td></tr>
+      <tr><td><code>sshd; rm -rf /</code> 注入</td><td>build_argv shell-meta</td><td>argv 是 list 不走 shell</td><td><span class="decision deny">DENY</span></td></tr>
+      <tr><td>读 <code>/etc/shadow</code></td><td>_safe_path 黑名单</td><td>fs_ls 不是 cat</td><td>sudoers 不允许</td></tr>
+      <tr><td><code>LD_PRELOAD=/tmp/x.so</code></td><td>build_clean_env 过滤</td><td>env 模板不含</td><td>sudoers !env_keep</td></tr>
+      <tr><td>fork bomb</td><td><span class="decision deny">Guardrail DENY</span></td><td>RLIMIT_NOFILE/CPU</td><td>killpg 超时杀</td></tr>
+      <tr><td><code>dd of=/dev/sda</code></td><td><span class="decision deny">Guardrail DENY</span></td><td>没有 dd 工具</td><td>sudoers 不允许 dd</td></tr>
+      <tr><td><code>systemctl mask sshd</code></td><td>没有 mask 工具</td><td><span class="decision deny">Guardrail DENY</span></td><td>sudoers 只允许 restart/reload</td></tr>
+      <tr><td>长输出耗内存</td><td>output_cap=64KB</td><td>RLIMIT_AS=1GB</td><td>RLIMIT_FSIZE=32MB</td></tr>
+      <tr><td>LLM prompt injection</td><td>SYSTEM_PROMPT 提示</td><td>工具层强清洗</td><td>Guardrail + sandbox</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">7</span> 赛题视角自评</h2>
+  <table>
+    <thead><tr><th>赛题要求</th><th>kyagent 实现</th><th>关键代码</th></tr></thead>
+    <tbody>
+      <tr><td><strong>二次过滤危险参数</strong></td><td>27 条规则覆盖 rm / dd / mkfs / chmod / chown / 反弹shell / curl-pipe-sh</td><td>safety-rules.yaml + rules.py</td></tr>
+      <tr><td><strong>最小权限代理执行</strong></td><td>受限账户 + sudoers 白名单 + clean env + PATH 白名单 + RLIMIT + forbid_root</td><td>executor/sandbox.py + proxy.py + sudoers.kyagent</td></tr>
+      <tr><td><strong>MCP 风格插件化</strong></td><td>Tool 基类 + 6 大工具家族 + MCP stdio 服务器 + JSON Schema</td><td>mcp/tools/*.py + mcp/server.py</td></tr>
+      <tr><td><strong>完整推理链溯源</strong></td><td>7 段事件 SQLite + JSONL 双通道 + per-trace RLock 序列化</td><td>audit/trace.py + logger.py + store.py</td></tr>
+      <tr><td><strong>OS 实时状态感知</strong></td><td>18 个内置工具 ps/ss/lsof/journalctl/dmesg/systemctl/df/du/dnf</td><td>mcp/tools/*.py</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">8</span> 一句话总结</h2>
+  <div class="callout danger">
+    <span class="icon">CORE</span>
+    <div class="body">
+      <strong>多层独立失效不耦合。</strong><br><br>
+      LLM 失守 → 工具层兜<br>
+      工具层失守 → Guardrail 兜<br>
+      Guardrail 失守 → sandbox 兜<br>
+      sandbox 失守 → sudoers 兜<br>
+      任何一步行为都被审计源记录<br><br>
+      任意单一层被绕过都不会让攻击成功。这是赛题「<strong>杜绝误删库、误操作、危险注入</strong>」的物理实现。
+    </div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="10-cli-entry.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">10 · CLI 入口</div>
+  </a>
+  <a href="12-concurrency.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">12 · 并发模型</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

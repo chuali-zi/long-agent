@@ -17,6 +17,7 @@ import pytest
 
 from kyagent.agent.llm import (
     AssistantMessage,
+    MockBackend,
     OpenAIBackend,
     TextBlock,
     ToolUseBlock,
@@ -266,10 +267,108 @@ def test_build_backend_constructs_openai(monkeypatch):
 
 
 def test_build_backend_missing_key_raises(monkeypatch):
+    """fallback_to_mock=False（CI/生产）模式下，缺 key 必须直接 raise。"""
     fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAIClient)
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     cfg = Config()
     cfg.agent.llm_backend = "openai"
+    cfg.agent.fallback_to_mock = False
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         build_backend(cfg)
+
+
+def test_build_backend_missing_key_falls_back_to_mock(monkeypatch):
+    """默认 fallback_to_mock=True 时缺 key 应降级为 MockBackend 并挂上 fallback_from 标记。"""
+    fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAIClient)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = Config()
+    cfg.agent.llm_backend = "openai"
+    # 不动 fallback_to_mock，验证默认就是 True
+    assert cfg.agent.fallback_to_mock is True
+
+    be = build_backend(cfg)
+    assert isinstance(be, MockBackend)
+    assert getattr(be, "fallback_from", None) == "openai"
+    assert "OPENAI_API_KEY" in getattr(be, "fallback_reason", "")
+
+
+def test_build_backend_constructs_deepseek_preset(monkeypatch):
+    """llm_backend=deepseek 应走 OpenAIBackend，且 base_url 自动设为官方端点。"""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeOpenAIClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured.update(kwargs)
+
+    fake_module = types.SimpleNamespace(OpenAI=_CapturingClient)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-test")
+
+    cfg = Config()
+    cfg.agent.llm_backend = "deepseek"
+
+    be = build_backend(cfg)
+    assert isinstance(be, OpenAIBackend)
+    assert be.model == "deepseek-v4-flash"  # 预设值
+    assert captured["base_url"] == "https://api.deepseek.com"
+    assert captured["api_key"] == "sk-deepseek-test"
+
+
+def test_build_backend_constructs_qwen_preset(monkeypatch):
+    """llm_backend=qwen 应走 OpenAIBackend + DashScope 国内 compatible-mode 端点。"""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeOpenAIClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured.update(kwargs)
+
+    fake_module = types.SimpleNamespace(OpenAI=_CapturingClient)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-qwen-test")
+
+    cfg = Config()
+    cfg.agent.llm_backend = "qwen"
+
+    be = build_backend(cfg)
+    assert isinstance(be, OpenAIBackend)
+    assert be.model == "qwen-plus"
+    assert captured["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def test_build_backend_deepseek_user_override(monkeypatch):
+    """用户在 yaml 里 override base_url/model 时必须生效（不被 preset 覆盖）。"""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeOpenAIClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured.update(kwargs)
+
+    fake_module = types.SimpleNamespace(OpenAI=_CapturingClient)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
+
+    cfg = Config()
+    cfg.agent.llm_backend = "deepseek"
+    cfg.agent.deepseek.model = "deepseek-v4-pro"
+    cfg.agent.deepseek.base_url = "https://my-proxy.example.com/v1"
+
+    be = build_backend(cfg)
+    assert be.model == "deepseek-v4-pro"
+    assert captured["base_url"] == "https://my-proxy.example.com/v1"
+
+
+def test_build_backend_deepseek_missing_key_falls_back(monkeypatch):
+    """国产 LLM 也享受 fallback 语义。"""
+    fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAIClient)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    cfg = Config()
+    cfg.agent.llm_backend = "deepseek"
+    be = build_backend(cfg)
+    assert isinstance(be, MockBackend)
+    assert getattr(be, "fallback_from", None) == "deepseek"

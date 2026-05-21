@@ -37,7 +37,8 @@ class OpenAIConfig(BaseModel):
     """OpenAI Python SDK 适配后端配置。
 
     base_url 留空则走 https://api.openai.com/v1；填上即可对接任何 OpenAI 协议兼容服务
-    （Azure OpenAI 用其专用端点、vLLM/Ollama/DeepSeek/通义/智谱等国产模型走 /v1 路径）。
+    （Azure OpenAI 用其专用端点、vLLM/Ollama 等本地推理服务走 /v1 路径）。
+    DeepSeek / Qwen 已有专用配置节，建议优先用 llm_backend=deepseek / qwen。
     """
     model: str = "gpt-4o-mini"
     max_tokens: int = 4096
@@ -47,11 +48,51 @@ class OpenAIConfig(BaseModel):
     organization: str | None = None
 
 
+class DeepSeekConfig(BaseModel):
+    """DeepSeek 后端（走 OpenAI 协议兼容路径）。
+
+    2026-05 官方推荐：openai Python SDK + base_url=https://api.deepseek.com。
+    模型 ID 选择 deepseek-v4-flash（tools 支持完整、性价比最高）；
+    deepseek-v4-pro 适合强推理；legacy 别名 deepseek-chat/deepseek-reasoner 在
+    2026-07-24 退役，不建议新代码使用。
+    Key 获取：https://platform.deepseek.com
+    """
+    model: str = "deepseek-v4-flash"
+    max_tokens: int = 4096
+    temperature: float = 0.2
+    api_key_env: str = "DEEPSEEK_API_KEY"
+    # 留空则使用预设 https://api.deepseek.com；仅在使用第三方反代时填
+    base_url: str | None = None
+
+
+class QwenConfig(BaseModel):
+    """通义千问后端（走 DashScope OpenAI 协议兼容路径）。
+
+    2026-05 验证：base_url=https://dashscope.aliyuncs.com/compatible-mode/v1（国内）
+    或 https://dashscope-intl.aliyuncs.com/compatible-mode/v1（海外/新加坡）。
+    模型选 qwen-plus（性价比），高级任务可换 qwen3-max / qwen3-coder-plus。
+    Key 获取：https://bailian.console.aliyun.com （国内）
+    """
+    model: str = "qwen-plus"
+    max_tokens: int = 4096
+    temperature: float = 0.2
+    api_key_env: str = "DASHSCOPE_API_KEY"
+    # 留空则用国内端点；海外用户填 https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    base_url: str | None = None
+
+
 class AgentConfig(BaseModel):
     name: str = "kyagent"
+    # 支持的 backend: mock / anthropic / openai / deepseek / qwen
     llm_backend: str = "mock"
+    # 当真实后端缺 API key 时是否自动降级到 mock。
+    # true（默认）：开发者友好，CLI 打印 warning 后用 mock 跑完闭环
+    # false：缺 key 直接报错，适合 CI / 生产部署
+    fallback_to_mock: bool = True
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
+    deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
+    qwen: QwenConfig = Field(default_factory=QwenConfig)
     max_iterations: int = 8
 
 
@@ -59,7 +100,11 @@ class ExecutorConfig(BaseModel):
     account: str = "kyagent"
     timeout: int = 30
     output_cap: int = 65536
+    # 赛题"最小权限代理执行：非必要不使用 root"语义：
+    #   forbid_root=true → 默认按 kyagent 账户跑；requires_root=True 时通过 sudoers 白名单走 sudo
+    #   forbid_root_strict=true → 彻底拒绝任何 root 提升（演示 / 无 sudoers 部署）
     forbid_root: bool = True
+    forbid_root_strict: bool = False
     path: list[str] = Field(default_factory=lambda: ["/usr/local/bin", "/usr/bin", "/bin"])
 
 
@@ -72,6 +117,10 @@ class SafetyPolicy(BaseModel):
 
 class SafetyConfig(BaseModel):
     rules_file: str = "configs/safety-rules.yaml"
+    # 自然语言意图层规则（赛题第 3 条"对自然语言指令的意图风险过滤" + 抗 Prompt Injection）
+    intent_rules_file: str = "configs/intent-rules.yaml"
+    # 是否启用自然语言意图层（默认启用 — 不启用就不符合赛题第 3 条）
+    intent_check: bool = True
     policy: SafetyPolicy = Field(default_factory=SafetyPolicy)
     llm_review: bool = False
 

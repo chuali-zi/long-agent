@@ -26,8 +26,12 @@ class SandboxConfig:
     rlimit_address_mb: int = 1024       # 虚拟地址 1G
     rlimit_fsize_mb: int = 32           # 单文件最大写入 32M
     rlimit_nofile: int = 256
-    # 是否禁止 root 提权
+    # 是否禁止 root 提权（赛题语义："非必要不使用 root"）
+    # True  = 通过 sudoers 白名单走 sudo -n -u root（默认）
+    # 严格禁止 root 提升请用下面的 forbid_root_strict
     forbid_root: bool = True
+    # 严格模式：彻底拒绝任何 root 提升，绕过 sudoers。仅用于演示 / 无 sudoers 部署
+    forbid_root_strict: bool = False
 
 
 def make_preexec_fn(cfg: SandboxConfig):

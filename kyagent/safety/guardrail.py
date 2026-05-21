@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from kyagent.config import Config
+from kyagent.safety.confirm import ConfirmRequest
 from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.policy import Decision, Policy
 from kyagent.safety.rules import Hit, RuleEngine
@@ -36,6 +37,18 @@ class Verdict:
             ],
             "rationale": list(self.rationale),
         }
+
+    def to_confirm_request(self, tool_name: str, argv: list[str]) -> ConfirmRequest:
+        """把 argv 层裁决翻译成 UI 层认识的 ConfirmRequest。"""
+        return ConfirmRequest(
+            title=f"tool {tool_name}",
+            risk=self.risk.value,
+            summary_lines=[
+                f"{h.rule_id} ({h.risk.value}): {h.description}"
+                for h in self.hits
+            ],
+            body=" ".join(argv),
+        )
 
     def is_blocked(self) -> bool:
         return self.decision is Decision.DENY

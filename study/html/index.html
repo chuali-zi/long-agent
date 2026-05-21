@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>kyagent 源码精读 · 可视化导航</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html" class="active">导航</a>
+    <a href="00-START-HERE.html">00 起点</a>
+    <a href="02-data-flow.html">02 数据流</a>
+    <a href="11-security-model.html">11 安全模型</a>
+    <a href="13-testing-bench.html">13 测试基线</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">D:\race\long · A2 赛题 · 麒麟 OS 安全运维 Agent</div>
+  <h1>kyagent 源码精读<br><span class="sub">14 份文档 · 可视化导航</span></h1>
+  <p class="lead">
+    自然语言 ↔ 麒麟 OS 实时状态的<strong>可控闭环</strong>。
+    用户用中文说一句话，Agent 调系统工具拿到真状态，
+    安全护栏二次过滤，最小权限账户落地执行，
+    全过程留审计。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">MAP</span> 阅读路线推荐</h2>
+
+  <div class="cards">
+    <div class="card accent">
+      <div class="label">QUICK · 约 1 小时</div>
+      <div class="title">新手快速过</div>
+      <div class="body">
+        <code>00</code> → <code>01</code> → <code>02</code> → <code>03</code>
+        <br>看完顶层架构和一次 ask 的完整时序。
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">FULL · 约半天</div>
+      <div class="title">全面理解</div>
+      <div class="body">
+        按 <code>00</code> → <code>13</code> 顺序通读，
+        每份对照源码的 file:line 锚点跳一遍。
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">DEEP DIVE</div>
+      <div class="title">专项精读</div>
+      <div class="body">
+        安全护栏 → <code>05</code> + <code>11</code><br>
+        并发安全 → <code>12</code><br>
+        评测基线 → <code>13</code>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">CH</span> 完整文档清单</h2>
+
+  <div class="cards">
+    <a class="card" href="00-START-HERE.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 00</div>
+      <div class="title">起点：路线图</div>
+      <div class="body">仓库一句话定位，五大模块对应五条赛题要求，文件结构与快速冒烟命令。</div>
+    </a>
+    <a class="card" href="01-architecture-overview.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 01</div>
+      <div class="title">架构总览</div>
+      <div class="body">模块依赖图、关键不变量、三类入口（CLI / MCP / Agent）共享同一核心。</div>
+    </a>
+    <a class="card" href="02-data-flow.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 02</div>
+      <div class="title">数据流时序</div>
+      <div class="body">「查 80 端口」一句话的完整闭环：7 段事件、危险命令场景、MCP 通道差异。</div>
+    </a>
+    <a class="card" href="03-agent-core.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 03</div>
+      <div class="title">Agent 主循环</div>
+      <div class="body">ask() 318 行逐行解读：依赖注入、ThreadPool、并行 gate、_handle_tool_use 全生命周期。</div>
+    </a>
+    <a class="card" href="04-llm-backends.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 04</div>
+      <div class="title">LLM 后端层</div>
+      <div class="body">Anthropic / OpenAI / Mock 三套后端统一接口，prompt cache、双向协议翻译。</div>
+    </a>
+    <a class="card" href="05-safety-layer.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 05</div>
+      <div class="title">安全护栏</div>
+      <div class="body">27 条规则、RuleEngine + Policy + Guardrail 四级流水线，declared_risk 下限。</div>
+    </a>
+    <a class="card" href="06-executor-sandbox.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 06</div>
+      <div class="title">执行代理 + 沙箱</div>
+      <div class="body">sudoers 白名单、preexec_fn rlimit、PATH 白名单、forbid_root、killpg 超时。</div>
+    </a>
+    <a class="card" href="07-mcp-tools.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 07</div>
+      <div class="title">MCP 工具集</div>
+      <div class="body">六大工具家族 18 个工具，三层清洗（validate / build_argv / guardrail）+ MCP server。</div>
+    </a>
+    <a class="card" href="08-audit-chain.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 08</div>
+      <div class="title">推理链审计</div>
+      <div class="body">Trace + TraceEvent + EventKind，SQLite WAL + JSONL 双通道，每条 trace 一把 RLock。</div>
+    </a>
+    <a class="card" href="09-config.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 09</div>
+      <div class="title">配置系统</div>
+      <div class="body">Pydantic schema + YAML + 环境变量展开，零配置兜底默认值。</div>
+    </a>
+    <a class="card" href="10-cli-entry.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 10</div>
+      <div class="title">CLI 入口</div>
+      <div class="body">chat / ask / tools / safety / audit / mcp 六个子命令，Rich Panel 渲染。</div>
+    </a>
+    <a class="card" href="11-security-model.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 11</div>
+      <div class="title">安全模型总览</div>
+      <div class="body">六层防御叠加，11 种威胁向量映射，信任边界图。</div>
+    </a>
+    <a class="card" href="12-concurrency.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 12</div>
+      <div class="title">并发模型</div>
+      <div class="body">四道并行 gate、Trace RLock、三处 review 修复（H1 / C2 / C1）。</div>
+    </a>
+    <a class="card" href="13-testing-bench.html" style="text-decoration:none;color:inherit;">
+      <div class="label">CHAPTER · 13</div>
+      <div class="title">测试 + 性能基线</div>
+      <div class="body">99 个测试 / 7 个文件，冻结的 bench_ask.py + baseline.json，-34% p50 优化。</div>
+    </a>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> 赛题要求 ↔ 模块映射</h2>
+  <table>
+    <thead>
+      <tr><th>赛题要求</th><th>模块</th><th>单点入口</th><th>对应章节</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>① OS 环境深度感知</strong></td>
+        <td><code>kyagent/mcp/tools/</code></td>
+        <td><code>default_registry()</code></td>
+        <td><a href="07-mcp-tools.html">07</a></td>
+      </tr>
+      <tr>
+        <td><strong>② MCP 运维插件化</strong></td>
+        <td><code>kyagent/mcp/</code></td>
+        <td><code>Tool + ToolRegistry + McpServer</code></td>
+        <td><a href="07-mcp-tools.html">07</a></td>
+      </tr>
+      <tr>
+        <td><strong>③ 安全意图校验器</strong></td>
+        <td><code>kyagent/safety/</code></td>
+        <td><code>Guardrail.check_argv()</code></td>
+        <td><a href="05-safety-layer.html">05</a> · <a href="11-security-model.html">11</a></td>
+      </tr>
+      <tr>
+        <td><strong>④ 最小权限代理执行</strong></td>
+        <td><code>kyagent/executor/</code></td>
+        <td><code>ExecutionProxy.run()</code></td>
+        <td><a href="06-executor-sandbox.html">06</a></td>
+      </tr>
+      <tr>
+        <td><strong>⑤ 推理链路溯源</strong></td>
+        <td><code>kyagent/audit/</code></td>
+        <td><code>AuditLogger.event()</code></td>
+        <td><a href="08-audit-chain.html">08</a></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">$</span> 快速冒烟</h2>
+<pre><code># 装包
+python -m pip install -e .
+
+# 跑全部测试（99 通过，POSIX-only 用例在 Windows 上 2 个 skip）
+python -m pytest -q
+
+# mock 后端：不需要任何 API key，规则路由演示完整闭环
+python -m kyagent ask "查下 CPU 占用最高的进程" --json
+
+# 列工具 + 风险等级
+python -m kyagent tools list
+
+# 让护栏单独评估一条命令，不真正执行
+python -m kyagent safety test "rm -rf /etc"
+
+# 查看上一轮 trace
+python -m kyagent audit list -n 5
+python -m kyagent audit show &lt;trace-id&gt;
+
+# 作为 MCP server 挂到 Claude Desktop
+python -m kyagent mcp serve</code></pre>
+</section>
+
+<div class="footnav">
+  <a href="00-START-HERE.html" class="next">
+    <div class="dir">从这里开始 →</div>
+    <div class="ttl">00 · START HERE</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

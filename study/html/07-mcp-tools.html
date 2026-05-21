@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07 · MCP 工具集 · kyagent 源码精读</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand"><span class="dot"></span> kyagent 源码精读</div>
+  <div class="links">
+    <a href="index.html">导航</a>
+    <a href="00-START-HERE.html">00</a>
+    <a href="01-architecture-overview.html">01</a>
+    <a href="02-data-flow.html">02</a>
+    <a href="03-agent-core.html">03</a>
+    <a href="04-llm-backends.html">04</a>
+    <a href="05-safety-layer.html">05</a>
+    <a href="06-executor-sandbox.html">06</a>
+    <a href="07-mcp-tools.html" class="active">07</a>
+    <a href="08-audit-chain.html">08</a>
+    <a href="09-config.html">09</a>
+    <a href="10-cli-entry.html">10</a>
+    <a href="11-security-model.html">11</a>
+    <a href="12-concurrency.html">12</a>
+    <a href="13-testing-bench.html">13</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<div class="hero">
+  <div class="eyebrow">CHAPTER · 07 · MCP TOOLS · 赛题 ① + ②</div>
+  <h1>MCP 工具集<br><span class="sub">六大家族 · 18 个工具</span></h1>
+  <p class="lead">
+    对应文件 <code>kyagent/mcp/tools/*.py</code> + <code>kyagent/mcp/server.py</code>。
+    赛题<strong>第 ①「OS 环境深度感知」</strong> + <strong>第 ②「MCP 运维插件化」</strong>的落地。
+  </p>
+</div>
+
+<section>
+  <h2><span class="num">1</span> Tool 抽象 — 声明式契约</h2>
+
+  <div class="code-annot">
+    <div class="file">★ mcp/tools/base.py:35</div>
+<pre><code>class Tool(abc.ABC):
+    name: str = ""
+    description: str = ""
+    input_schema: dict = {"type": "object", "properties": {}}
+
+    risk_level: RiskLevel = RiskLevel.LOW
+    requires_root: bool = False
+    read_only: bool = True
+
+    def validate(self, args: dict) -> dict: ...     # JSON Schema 校验
+    def build_argv(self, args: dict) -> list[str]: ... # 子类必须实现
+    def format_result(self, exec_result) -> ToolResult: ...</code></pre>
+  </div>
+
+  <div class="bullets">
+    <div class="bul"><span class="b-num">declarative</span><div><strong>声明式属性</strong>：name / description / input_schema / risk_level / requires_root / read_only</div></div>
+    <div class="bul"><span class="b-num">validate</span><div>轻量 JSON Schema 校验（required + 一级 type） · <strong>未知字段静默丢弃</strong></div></div>
+    <div class="bul"><span class="b-num">build_argv</span><div>把 cleaned args 翻译成 argv，子类的核心逻辑</div></div>
+    <div class="bul"><span class="b-num">format_result</span><div>默认实现处理 windows_mock / skipped / timed_out / rc != 0 / 成功 五种分支</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> 六大工具家族</h2>
+
+  <h3>2.1 进程 · process.py（3 个）</h3>
+  <table>
+    <thead><tr><th>工具</th><th>argv 模板</th><th>risk</th><th>tags</th></tr></thead>
+    <tbody>
+      <tr><td><code>process_list</code></td><td><code>ps -eo user,pid,pcpu,pmem,etime,stat,comm,args --sort {-pcpu/-pmem} [-u user]</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>lsof_port</code></td><td><code>lsof -nP -i {TCP/UDP}:{port}</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>lsof_pid</code></td><td><code>lsof -nP -p {pid}</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 网络 · network.py（3 个）</h3>
+  <table>
+    <thead><tr><th>工具</th><th>argv 模板</th><th>risk</th><th>tags</th></tr></thead>
+    <tbody>
+      <tr><td><code>net_listen</code></td><td><code>ss {-tlnp/-ulnp/-tulnp}</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>net_connections</code></td><td><code>ss -tnp [state established/...]</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>net_ping</code></td><td><code>ping -c {count} -W 2 {host}</code> · count 限制 1-10</td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.3 日志 · logs.py（2 个）</h3>
+  <table>
+    <thead><tr><th>工具</th><th>argv 模板</th><th>risk</th><th>tags</th></tr></thead>
+    <tbody>
+      <tr><td><code>log_journal</code></td><td><code>journalctl --no-pager [--since X] [-p X] [-u X] -n N [--grep X]</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>log_dmesg</code></td><td><code>dmesg --human --color=never [-l level]</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.4 服务 · service.py（4 个）— 关键安全锚点</h3>
+  <table>
+    <thead><tr><th>工具</th><th>argv 模板</th><th>risk</th><th>tags</th></tr></thead>
+    <tbody>
+      <tr><td><code>svc_status</code></td><td><code>systemctl status --no-pager --lines=50 {unit}</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>svc_list</code></td><td><code>systemctl list-units --no-pager --no-legend --all [--state X]</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>svc_restart</code></td><td><code>systemctl restart {unit}</code></td><td><span class="risk high">high</span></td><td><span class="tag root">requires root</span> <span class="tag rw">write</span></td></tr>
+      <tr><td><code>svc_reload</code></td><td><code>systemctl reload {unit}</code></td><td><span class="risk medium">medium</span></td><td><span class="tag root">requires root</span> <span class="tag rw">write</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="code-annot">
+    <div class="file">service.py · _validate_unit · 两道防御</div>
+<pre><code>_FORBIDDEN_UNITS = {
+    "systemd-logind", "systemd-journald", "systemd-udevd",
+    "dbus", "dbus.service", "polkit", "polkit.service",
+}
+
+def _validate_unit(unit: str) -> str:
+    if not unit or any(c in unit for c in [" ", ";", "|", "&amp;", "$", "`"]):
+        raise ToolError(f"非法 unit 名: {unit!r}")
+    if unit.split(".")[0] in _FORBIDDEN_UNITS:
+        raise ToolError(f"unit {unit!r} 在工具层禁用名单内（防误关核心服务）")
+    return unit</code></pre>
+  </div>
+
+  <div class="callout danger">
+    <span class="icon">!</span>
+    <div class="body">
+      <strong>没有 mask / disable / enable 工具</strong>——这些操作根本不暴露给 LLM。要做这些必须人工 SSH 上去。
+    </div>
+  </div>
+
+  <h3>2.5 文件系统 · filesystem.py（4 个）</h3>
+  <table>
+    <thead><tr><th>工具</th><th>argv 模板</th><th>risk</th><th>tags</th></tr></thead>
+    <tbody>
+      <tr><td><code>fs_df</code></td><td><code>df -h -x tmpfs -x devtmpfs [path]</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>fs_du</code></td><td><code>du -h --max-depth={1-5} {path}</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>fs_ls</code></td><td><code>ls -lah --color=never {path}</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>fs_find</code></td><td><code>find {path} -maxdepth N [-name X] -type f</code></td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="code-annot">
+    <div class="file">filesystem.py · _safe_path · 三道防御</div>
+<pre><code>_PROTECTED_READ = {"/etc/shadow", "/etc/gshadow", "/etc/sudoers"}
+
+def _safe_path(p: str) -> str:
+    if not p:
+        raise ToolError("path 不能为空")
+    p = posixpath.normpath(p)
+    if any(c in p for c in [";", "|", "&amp;", "$", "`", "\n"]):
+        raise ToolError(f"非法路径字符: {p!r}")
+    if p in _PROTECTED_READ:
+        raise ToolError(f"路径 {p} 在工具层禁读名单内")
+    return p</code></pre>
+  </div>
+
+  <div class="callout danger">
+    <span class="icon">!</span>
+    <div class="body">
+      <strong>fs_find 特别强制不走 -exec</strong>——argv 构造里根本没有 -exec，即便 LLM 输入也无法插入。同样禁了 -delete。
+    </div>
+  </div>
+
+  <h3>2.6 软件包 · package.py（2 个）</h3>
+  <table>
+    <thead><tr><th>工具</th><th>argv 模板</th><th>risk</th><th>tags</th></tr></thead>
+    <tbody>
+      <tr><td><code>pkg_info</code></td><td>dnf / yum / apt / rpm / dpkg · info / show / -qi / -s</td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+      <tr><td><code>pkg_installed</code></td><td>dnf list installed / apt list --installed / rpm -qa / dpkg -l</td><td><span class="risk low">low</span></td><td><span class="tag ro">read-only</span></td></tr>
+    </tbody>
+  </table>
+
+  <p><code>_detect_pm()</code> 优先级：dnf &gt; yum &gt; apt &gt; rpm &gt; dpkg，默认 dnf（麒麟主流）。<strong>没有 pkg_install / pkg_remove</strong>——安装卸载是高风险变更，不在 LLM 工具层暴露。</p>
+</section>
+
+<section>
+  <h2><span class="num">3</span> 三层清洗的协作</h2>
+
+  <p>工具调用从 LLM 到落地一共要过<strong>三层</strong>，每一层都是必要的纵深防御。</p>
+
+  <div class="stack">
+    <div class="layer layer-tool">
+      <div class="badge">1</div>
+      <div class="name">Tool.validate(args) — JSON Schema 类型 + required 校验</div>
+      <div class="desc">失败 → ToolError → 「工具参数非法」 · 防 LLM 给参数类型不对</div>
+    </div>
+    <div class="layer layer-tool">
+      <div class="badge">2</div>
+      <div class="name">Tool.build_argv(cleaned) — 工具自己的语义清洗</div>
+      <div class="desc">_safe_path · _validate_unit · shell-meta 黑名单 · 防工具自身的语义攻击</div>
+    </div>
+    <div class="layer layer-guard">
+      <div class="badge">3</div>
+      <div class="name">Guardrail.check_argv(argv) — 规则引擎 + 策略映射</div>
+      <div class="desc">系统级危险模式 · 决定 ALLOW/CONFIRM/DENY · 防工具组合在 OS 上的危险后果</div>
+    </div>
+    <div class="layer layer-process">
+      <div class="badge">4</div>
+      <div class="name">ExecutionProxy.run(argv) — 落地</div>
+      <div class="desc">sudo + sandbox + Popen · 防执行环境本身（PATH / env / rlimit）</div>
+    </div>
+    <div class="layer layer-system">
+      <div class="badge">5</div>
+      <div class="name">sudoers 白名单 — 最外层</div>
+      <div class="desc">即便所有层失守，sudo 仍按白名单兜底</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4</span> ToolRegistry</h2>
+<pre><code>def register(self, tool: Tool) -> None:
+    if not tool.name:                    raise ValueError("Tool.name 不能为空")
+    if tool.name in self._tools:         raise ValueError(f"工具名重复: {tool.name}")
+    self._tools[tool.name] = tool
+
+def to_mcp_list(self) -> list[dict]:        # 用于 MCP tools/list 响应（inputSchema）
+    return [t.to_mcp() for t in self.all()]
+
+def to_anthropic_tools(self) -> list[dict]: # 用于 Anthropic API（input_schema）
+    return [{"name": t.name, "description": t.description,
+             "input_schema": t.input_schema} for t in self.all()]</code></pre>
+
+  <div class="callout">
+    <span class="icon">DIFF</span>
+    <div class="body">
+      <strong>两套序列化</strong>：MCP 用 <code>inputSchema</code>（camelCase）；Anthropic 用 <code>input_schema</code>（snake_case）。
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> MCP stdio JSON-RPC 服务器</h2>
+
+  <p>MCP（Model Context Protocol）= Anthropic 提出的 LLM 工具接入协议。kyagent 实现了 stdio 传输（JSON-RPC 2.0 over stdin/stdout，newline-delimited）。</p>
+
+  <h3>5.1 支持的方法</h3>
+  <div class="cards">
+    <div class="card"><div class="title">initialize</div><div class="body">协议握手，返回 protocolVersion + capabilities</div></div>
+    <div class="card"><div class="title">initialized</div><div class="body">客户端确认握手完成（notification 无 id）</div></div>
+    <div class="card"><div class="title">ping</div><div class="body">心跳</div></div>
+    <div class="card"><div class="title">tools/list</div><div class="body">列出所有工具</div></div>
+    <div class="card accent"><div class="title">tools/call</div><div class="body">调用一个工具 — 核心方法</div></div>
+  </div>
+
+  <h3>5.2 serve loop 特点</h3>
+  <div class="bullets">
+    <div class="bul"><span class="b-num">1</span><div><strong>单线程串行</strong>：stdio 天然不能并发，所有调用顺序执行</div></div>
+    <div class="bul"><span class="b-num">2</span><div><strong>解析错误不退出</strong>：单条 line 解析失败只回 -32700，继续读下一条</div></div>
+    <div class="bul"><span class="b-num">3</span><div><strong>任何异常被包成 -32603</strong>：进程不会因为单次工具失败而崩</div></div>
+    <div class="bul"><span class="b-num">4</span><div><strong>notification（无 id）不回包</strong>：_dispatch 返回 None 时不写</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> _call_tool · 核心方法</h2>
+
+  <div class="timeline">
+    <div class="event evt-user">
+      <div class="seq">STEP 1 · 起 Trace</div>
+      <div class="kind">trace = Trace(user="mcp-client")</div>
+      <div class="payload">audit.open(trace) · trace.metadata = {channel:"mcp", tool: name}</div>
+    </div>
+    <div class="event evt-tool">
+      <div class="seq">STEP 2 · validate + build_argv</div>
+      <div class="kind">工具不存在 / 参数错 → isError 直接返回</div>
+      <div class="payload">写 ERROR 事件，但不抛异常</div>
+    </div>
+    <div class="event evt-tool">
+      <div class="seq">STEP 3</div>
+      <div class="kind">audit.event(TOOL_REQUEST)</div>
+      <div class="payload">{tool, argv, args, risk, requires_root}</div>
+    </div>
+    <div class="event evt-safety">
+      <div class="seq">STEP 4</div>
+      <div class="kind">guardrail.check_argv + SAFETY_CHECK</div>
+      <div class="payload">DENY → isError · <strong>CONFIRM → MCP 默认 deny</strong></div>
+    </div>
+    <div class="event evt-exec">
+      <div class="seq">STEP 5</div>
+      <div class="kind">EXECUTION + executor.run + EXECUTION_RESULT</div>
+      <div class="payload">完整记录 argv / rc / stdout</div>
+    </div>
+    <div class="event evt-reply">
+      <div class="seq">STEP 6 · 关闭 Trace</div>
+      <div class="kind">audit.event(AGENT_REPLY) + audit.close(trace)</div>
+      <div class="payload">return {content:[{type:"text", text:out.content}], isError:not out.ok}</div>
+    </div>
+  </div>
+
+  <h3>6.1 关键差异 vs Agent 主循环</h3>
+  <div class="cards">
+    <div class="card"><div class="label">DIFF · 1</div><div class="title">不走 LLM</div><div class="body">MCP 调用方就是 LLM 自己，没有「再请 LLM 决策」环节</div></div>
+    <div class="card"><div class="label">DIFF · 2</div><div class="title">CONFIRM = DENY</div><div class="body">MCP 通道没法发起交互式 confirm，默认拒绝</div></div>
+    <div class="card"><div class="label">DIFF · 3</div><div class="title">每条 tools/call 独立 trace</div><div class="body">每个工具调用都是独立审计单元</div></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7</span> 挂到 Claude Desktop</h2>
+<pre><code>// ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "kyagent": {
+      "command": "kyagent",
+      "args": ["mcp", "serve"]
+    }
+  }
+}</code></pre>
+
+  <div class="callout ok">
+    <span class="icon">SAFE</span>
+    <div class="body">
+      Claude Desktop 启动后会 fork 一个 kyagent 进程通过 stdio 与之对话。
+      <strong>即便 Claude 跳过自家安全检查，kyagent 的 guardrail + executor + audit 三件套仍然在本地把控。</strong>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8</span> 部署侧白名单 · cfg.mcp.enable_tools</h2>
+<pre><code>mcp:
+  enable_tools: ["process_list", "lsof_port", "fs_df"]  # 留空表示全部启用</code></pre>
+  <p>Agent.from_config 和 McpServer.main 都会读它。生产环境想完全禁掉 <code>svc_restart</code>，白名单里不写它即可，<strong>工具不会暴露给 LLM 也不会出现在 tools/list 里</strong>。</p>
+</section>
+
+<section>
+  <h2><span class="num">9</span> 测试覆盖关键用例</h2>
+  <pre class="diagram">
+test_default_registry_has_core_tools          <span class="hi3"># 18 个工具全部注册</span>
+test_to_mcp_list_shape                        <span class="hi3"># MCP 协议字段</span>
+test_anthropic_tools_shape                    <span class="hi3"># Anthropic 协议字段</span>
+test_validate_required_args_missing           <span class="hi3"># required 缺失 ToolError</span>
+test_validate_coerces_string_to_int           <span class="hi3"># "80" → 80 类型转换</span>
+test_svc_restart_rejects_shell_metacharacters <span class="hi2"># unit="sshd; rm -rf /" 拒绝</span>
+test_svc_restart_rejects_forbidden_unit       <span class="hi2"># unit="systemd-logind" 拒绝</span>
+test_find_rejects_shell_meta_in_name          <span class="hi2"># name="*.log; rm -rf /" 拒绝</span>
+test_filesystem_blocks_shadow_read            <span class="hi2"># /etc/shadow 读取拒绝</span></pre>
+</section>
+
+<section>
+  <h2><span class="num">10</span> 关键不变量</h2>
+  <div class="bullets">
+    <div class="bul ok"><span class="b-num">1</span><div><strong>每个工具的 build_argv 必返回 list[str]</strong>：没有字符串、没有 shell</div></div>
+    <div class="bul ok"><span class="b-num">2</span><div><strong>每个工具的 read_only 字段必须如实声明</strong>：影响 _is_parallel_safe</div></div>
+    <div class="bul ok"><span class="b-num">3</span><div><strong>每个工具的 risk_level 是下限</strong>：永远只能向上抬，不能向下降</div></div>
+    <div class="bul ok"><span class="b-num">4</span><div><strong>没有 raw shell 工具</strong>：所有工具都是受控的命令包装</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>每个 Tool 实例是无状态的</strong>：可以被并发 worker 共享</div></div>
+  </div>
+</section>
+
+<div class="footnav">
+  <a href="06-executor-sandbox.html">
+    <div class="dir">← 上一章</div>
+    <div class="ttl">06 · 执行代理 + 沙箱</div>
+  </a>
+  <a href="08-audit-chain.html" class="next">
+    <div class="dir">下一章 →</div>
+    <div class="ttl">08 · 推理链审计</div>
+  </a>
+</div>
+
+</div>
+</body>
+</html>

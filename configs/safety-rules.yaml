@@ -181,3 +181,122 @@ rules:
     risk: high
     description: 从环境变量 eval 任意代码
     pattern: '\beval\s+["'']?\$\{?[A-Z_]+'
+
+  # ---- 等价删除 / 等价覆写（绕过 rm 的常见姿势） ----------------------
+  - id: truncate-critical-file
+    risk: critical
+    description: 用 truncate 截断关键账户/认证/启动文件
+    pattern: '\btruncate\b[^|;]*\s+/etc/(passwd|shadow|gshadow|sudoers|group|ssh/sshd_config|fstab|crypttab|hosts)\b|\btruncate\b[^|;]*\s+/boot/'
+
+  - id: shred-critical-target
+    risk: critical
+    description: shred 销毁关键文件 / 系统目录
+    command: shred
+    target_in: ["/etc", "/usr", "/var", "/boot", "/lib", "/lib64", "/bin", "/sbin", "/root", "/home", "/dev"]
+
+  - id: cp-devnull-overwrite
+    risk: critical
+    description: 通过 cp /dev/null / cp /dev/zero 等空源覆盖关键文件
+    pattern: '\bcp\b[^|;]*\s+/dev/(null|zero)\s+/(etc|boot|root|home)/|\bcp\b[^|;]*\s+/dev/(null|zero)\s+/etc/(passwd|shadow|sudoers|fstab|hosts)'
+
+  - id: tee-overwrite-critical
+    risk: critical
+    description: 用 tee 覆盖关键文件（绕过 > 重定向规则）
+    pattern: '\|\s*(sudo\s+)?tee\s+(--?[a-z]+\s+)*/etc/(passwd|shadow|sudoers|gshadow|ssh/sshd_config|fstab|crypttab|hosts)\b|\|\s*(sudo\s+)?tee\s+(--?[a-z]+\s+)*/boot/'
+
+  - id: install-overwrite-critical
+    risk: critical
+    description: install(1) 替换关键文件（具备 chmod/chown 副作用）
+    pattern: '\binstall\b[^|;]*\s+/etc/(passwd|shadow|sudoers|ssh/sshd_config)\b'
+
+  - id: find-delete-system
+    risk: critical
+    description: find ... -delete 递归删除关键目录
+    command: find
+    flags_any: ["-delete"]
+    target_in: ["/etc", "/usr", "/var", "/boot", "/lib", "/lib64", "/bin", "/sbin", "/opt", "/home", "/root", "/sys", "/proc", "/dev", "/srv"]
+
+  - id: find-exec-rm-system
+    risk: critical
+    description: find ... -exec rm（用 find 绕过 rm 规则的常见姿势）
+    pattern: '\bfind\b[^|;]*\s(/etc|/usr|/var|/boot|/lib|/lib64|/bin|/sbin|/home|/root|/sys|/proc|/dev|/srv|/opt)[^|;]*\s-(?:exec|execdir|ok|okdir)\s+(rm|unlink|shred|mv)\b'
+
+  # ---- 移动 / 重命名 关键目录（等价删除） -----------------------------
+  - id: mv-system-directory
+    risk: critical
+    description: 把关键系统目录 mv 到别处（等同删除）
+    command: mv
+    target_in: ["/etc", "/usr", "/var", "/boot", "/lib", "/lib64", "/bin", "/sbin", "/root", "/home", "/sys", "/proc", "/dev"]
+
+  # ---- 关键服务 stop/kill（不仅是 mask/disable） ----------------------
+  - id: systemctl-stop-critical
+    risk: high
+    description: 停止 / 杀掉关键服务（sshd / network / firewalld / auditd 等）
+    pattern: '\bsystemctl\b\s+(?:stop|kill)\b\s+(sshd?|networkd?|NetworkManager|systemd-logind|firewalld|auditd|chronyd|ntpd|crond?|kylin-\w+)\b'
+
+  - id: service-stop-critical
+    risk: high
+    description: 用旧 service 命令停掉关键服务
+    pattern: '\bservice\s+(sshd?|networkd?|firewalld|auditd|chronyd|ntpd|crond?)\s+(stop|kill)\b'
+
+  # ---- nftables / firewall-cmd / ufw（补齐 iptables 之外的防火墙） ---
+  - id: nft-flush-ruleset
+    risk: high
+    description: nft flush ruleset / 清空 nftables 规则
+    pattern: '\bnft\b[^|;]*\s+(flush\s+ruleset|delete\s+table)\b'
+
+  - id: firewall-cmd-shutdown
+    risk: high
+    description: firewall-cmd 关闭防火墙或清空规则
+    pattern: '\bfirewall-cmd\s+(--permanent\s+)?(--reload|--complete-reload|--reset-to-defaults|--remove-service=ssh|--panic-on|--panic-off)\b|\bsystemctl\s+(stop|disable|mask)\s+firewalld\b'
+
+  - id: ufw-reset
+    risk: high
+    description: ufw reset 重置所有规则（等同清空）
+    pattern: '\bufw\s+(reset|--force\s+reset)\b'
+
+  # ---- 计划任务 -------------------------------------------------------
+  - id: crontab-remove-all
+    risk: high
+    description: crontab -r 清空当前用户/指定用户所有计划任务
+    pattern: '\bcrontab\b\s+(-u\s+\S+\s+)?-r\b'
+
+  # ---- LVM / 分区表 ---------------------------------------------------
+  - id: lvm-vg-destroy
+    risk: critical
+    description: 销毁卷组 / 逻辑卷 / 物理卷
+    pattern: '\b(lvremove|vgremove|pvremove)\b[^|;]*\s(-f|--force|--yes)\b|\b(vgchange\s+-an|vgreduce\s+--removemissing)\b'
+
+  - id: partition-table-edit
+    risk: critical
+    description: parted / fdisk / sgdisk 非交互式改分区表
+    pattern: '\bparted\b[^|;]*\s+(mkpart|rm|mklabel|resizepart)\b|\bsgdisk\b[^|;]*\s+(-Z|-o|--zap-all|--clear)|\bfdisk\b[^|;]*\s+--script\b'
+
+  # ---- 包管理：移除关键包 ---------------------------------------------
+  - id: pkg-remove-critical
+    risk: critical
+    description: 卸载内核 / sshd / systemd / glibc 等关键包
+    pattern: '\b(dnf|yum|rpm|apt|apt-get)\b\s+(remove|erase|purge|-e)\b[^|;]*\b(kernel|kernel-core|systemd|glibc|openssh-server|openssh-clients|sudo|polkit|dbus|network-manager|NetworkManager|firewalld|selinux-policy)\b'
+
+  # ---- 关键 sink：无论何种 binary，写入这些路径都至少 critical ------
+  # 这是一条"目标地板"规则：覆盖任何未列出的等价改写姿势（cat > / python -c 直写等）
+  - id: critical-target-write
+    risk: critical
+    description: 任何形式的写入指向账户库 / sudoers / boot / sshd_config / fstab
+    pattern: '(>{1,2}|--output[= ]|-o\s+|--write-to[= ]|--file[= ])\s*/etc/(passwd|shadow|gshadow|sudoers(?:\.d/\S*)?|ssh/sshd_config|fstab|crypttab)\b|(>{1,2}|--output[= ])\s*/boot/'
+
+  # sed -i / awk -i / perl -pi 单独成规则（修改时跟在 -i 之后的不是路径而是脚本）
+  - id: sed-inplace-critical
+    risk: critical
+    description: sed -i 原地修改关键账户/认证/启动文件
+    pattern: '\bsed\b\s+(--in-place\b|-i\b|-i[a-zA-Z0-9.]+\b)[^|;]*\s+/etc/(passwd|shadow|gshadow|sudoers(?:\.d/\S*)?|ssh/sshd_config|fstab|crypttab|hosts|resolv\.conf)\b|\bsed\b\s+(-i\b|--in-place\b)[^|;]*\s+/boot/'
+
+  - id: awk-inplace-critical
+    risk: critical
+    description: awk -i inplace / gawk inplace 改写关键文件（gawk extension）
+    pattern: '\b(g?awk)\b\s+-i\s+inplace\b[^|;]*\s+/etc/(passwd|shadow|gshadow|sudoers(?:\.d/\S*)?|ssh/sshd_config|fstab)\b'
+
+  - id: perl-inplace-critical
+    risk: critical
+    description: perl -pi -e 原地改写关键文件
+    pattern: '\bperl\b\s+-[pn]?i[a-zA-Z]*\b[^|;]*\s+/etc/(passwd|shadow|sudoers|ssh/sshd_config|fstab)\b|\bperl\b\s+-i[^|;]*\s+/boot/'

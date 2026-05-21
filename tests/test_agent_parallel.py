@@ -103,7 +103,7 @@ def test_confirm_required_tools_do_not_enter_parallel_path(
     executor = RecordingExecutor(supports_parallel_tool_execution=True)
     confirm_threads: list[str] = []
 
-    def deny_confirm(name, argv, verdict):  # noqa: ANN001, ARG001
+    def deny_confirm(req):  # noqa: ANN001, ARG001
         confirm_threads.append(threading.current_thread().name)
         time.sleep(0.02)
         return False
@@ -152,7 +152,7 @@ def test_handle_tool_use_denies_confirm_off_main_thread(tmp_path):
     executor = RecordingExecutor(supports_parallel_tool_execution=True)
     confirm_called: list[str] = []
 
-    def confirm_should_never_run(name, argv, verdict):  # noqa: ANN001, ARG001
+    def confirm_should_never_run(req):  # noqa: ANN001, ARG001
         confirm_called.append("RAN")
         return True
 

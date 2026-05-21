@@ -57,13 +57,24 @@ class Tool(abc.ABC):
     # ---- 参数校验 ------------------------------------------------------
 
     def validate(self, args: dict[str, Any]) -> dict[str, Any]:
-        """根据 input_schema 做轻量校验。
+        """根据 input_schema 校验 + 类型 coerce。
 
-        只校验 required + type，类型按 JSON Schema 一级简化处理。
-        缺失参数 → ToolError。
+        校验的 JSON Schema 关键字（covers MCP "Servers MUST validate all tool inputs"）：
+          - required : 必填字段
+          - type     : string / integer / number / boolean / array / object
+          - enum     : 离散值集合
+          - minimum / maximum : 数值范围
+          - minLength / maxLength : 字符串长度
+          - pattern  : 字符串正则
+        校验失败一律抛 ToolError；MCP server / Agent.core 把它转成干净的客户端可见错误，
+        不会进 traceback 兜底分支（这是 codex 报告的"traceback 泄漏路径" 的修复点）。
         """
+        if not isinstance(args, dict):
+            raise ToolError(f"工具参数必须是对象，收到 {type(args).__name__}")
+
         props = self.input_schema.get("properties", {})
         required = self.input_schema.get("required", [])
+        additional = self.input_schema.get("additionalProperties", True)
         cleaned: dict[str, Any] = {}
 
         for key in required:
@@ -73,32 +84,108 @@ class Tool(abc.ABC):
         for k, v in args.items():
             schema = props.get(k)
             if schema is None:
-                # 严格模式：忽略未知字段；可扩展为报错
+                if additional is False:
+                    raise ToolError(f"未声明的字段 {k!r}")
                 continue
-            cleaned[k] = self._coerce_type(v, schema, k)
+            cleaned[k] = self._coerce_and_validate(v, schema, k)
         return cleaned
+
+    @classmethod
+    def _coerce_and_validate(cls, value: Any, schema: dict[str, Any], key: str) -> Any:
+        """先做 type coerce（兼容 LLM 偶尔以字符串回传数字），再走全 schema 约束。"""
+        value = cls._coerce_type(value, schema, key)
+        cls._check_constraints(value, schema, key)
+        return value
 
     @staticmethod
     def _coerce_type(value: Any, schema: dict[str, Any], key: str) -> Any:
         expected = schema.get("type")
         if expected is None:
             return value
-        if expected == "string" and not isinstance(value, str):
-            return str(value)
+        if expected == "string":
+            if not isinstance(value, str):
+                return str(value)
+            return value
         if expected == "integer":
+            if isinstance(value, bool):
+                # JSON Schema 把 bool 视为 number 但不视为 integer 的"语义" — 我们严格化
+                raise ToolError(f"{key} 期望 integer，收到 boolean")
             try:
                 return int(value)
             except (TypeError, ValueError):
                 raise ToolError(f"{key} 期望 integer，收到 {value!r}")
+        if expected == "number":
+            if isinstance(value, bool):
+                raise ToolError(f"{key} 期望 number，收到 boolean")
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                raise ToolError(f"{key} 期望 number，收到 {value!r}")
         if expected == "boolean":
             if isinstance(value, bool):
                 return value
             if isinstance(value, str):
                 return value.lower() in ("1", "true", "yes", "y")
             return bool(value)
-        if expected == "array" and not isinstance(value, list):
-            raise ToolError(f"{key} 期望 array")
+        if expected == "array":
+            if not isinstance(value, list):
+                raise ToolError(f"{key} 期望 array")
+            return value
+        if expected == "object":
+            if not isinstance(value, dict):
+                raise ToolError(f"{key} 期望 object")
+            return value
         return value
+
+    @staticmethod
+    def _check_constraints(value: Any, schema: dict[str, Any], key: str) -> None:
+        # enum
+        if "enum" in schema:
+            allowed = schema["enum"]
+            if value not in allowed:
+                raise ToolError(
+                    f"{key}={value!r} 不在允许集合 {allowed!r}"
+                )
+        # 数值范围
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in schema and value < schema["minimum"]:
+                raise ToolError(
+                    f"{key}={value} 小于最小值 {schema['minimum']}"
+                )
+            if "maximum" in schema and value > schema["maximum"]:
+                raise ToolError(
+                    f"{key}={value} 大于最大值 {schema['maximum']}"
+                )
+            if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
+                raise ToolError(
+                    f"{key}={value} 必须严格大于 {schema['exclusiveMinimum']}"
+                )
+            if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
+                raise ToolError(
+                    f"{key}={value} 必须严格小于 {schema['exclusiveMaximum']}"
+                )
+        # 字符串约束
+        if isinstance(value, str):
+            if "minLength" in schema and len(value) < schema["minLength"]:
+                raise ToolError(
+                    f"{key} 长度 {len(value)} 小于 minLength {schema['minLength']}"
+                )
+            if "maxLength" in schema and len(value) > schema["maxLength"]:
+                raise ToolError(
+                    f"{key} 长度 {len(value)} 超过 maxLength {schema['maxLength']}"
+                )
+            if "pattern" in schema:
+                import re as _re
+                if not _re.search(schema["pattern"], value):
+                    raise ToolError(
+                        f"{key}={value!r} 不匹配 pattern {schema['pattern']!r}"
+                    )
+        # 数组约束
+        if isinstance(value, list):
+            if "minItems" in schema and len(value) < schema["minItems"]:
+                raise ToolError(f"{key} 长度 {len(value)} 小于 minItems")
+            if "maxItems" in schema and len(value) > schema["maxItems"]:
+                raise ToolError(f"{key} 长度 {len(value)} 超过 maxItems")
 
     # ---- 子类实现的接口 ------------------------------------------------
 

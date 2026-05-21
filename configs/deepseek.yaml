@@ -1,0 +1,62 @@
+# kyagent —— DeepSeek 后端配置（赛题鼓励的国产开源大模型路径）
+#
+# 用法：
+#   1. 申请 key：https://platform.deepseek.com  （新账户送 5M token）
+#   2. export DEEPSEEK_API_KEY=sk-...
+#   3. export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
+#   4. kyagent ask "哪个进程 CPU 占用最高？"
+#
+# 不设 DEEPSEEK_API_KEY 时会自动降级到 mock（CLI 启动 banner 会提示）；
+# 想禁掉降级（生产/CI），把 agent.fallback_to_mock 改成 false。
+#
+# 2026-05 验证信息：
+#   - 官方走 OpenAI 协议兼容，无独立 SDK（用 pip install openai 即可）
+#   - base_url:  https://api.deepseek.com  （/v1 是兼容别名，不必加）
+#   - 模型 ID:   deepseek-v4-flash  / deepseek-v4-pro
+#   - tools/function calling 与 OpenAI 完全一致（response.tool_calls）
+#   - 注意：legacy 别名 deepseek-chat / deepseek-reasoner 在 2026-07-24 退役
+agent:
+  name: kyagent
+  llm_backend: deepseek
+  fallback_to_mock: true
+  deepseek:
+    # deepseek-v4-flash：tools 完整支持、$0.14/M in、推荐主力
+    # deepseek-v4-pro：强推理（thinking 模式），价格更高
+    model: ${KYAGENT_DEEPSEEK_MODEL:-deepseek-v4-flash}
+    max_tokens: 4096
+    temperature: 0.2
+    api_key_env: DEEPSEEK_API_KEY
+    # 留空走 https://api.deepseek.com；仅在使用反代时填
+    base_url: ${KYAGENT_DEEPSEEK_BASE_URL:-}
+  max_iterations: 8
+
+executor:
+  account: kyagent
+  timeout: 30
+  output_cap: 65536
+  forbid_root: true
+  path:
+    - /usr/local/bin
+    - /usr/bin
+    - /bin
+    - /usr/sbin
+    - /sbin
+
+safety:
+  rules_file: configs/safety-rules.yaml
+  policy:
+    critical: deny
+    high: confirm
+    medium: confirm
+    low: allow
+  llm_review: false
+
+audit:
+  database: ./var/audit.db
+  jsonl_file: ./var/audit.jsonl
+  retain_days: 90
+
+mcp:
+  enable_tools: []
+  server_name: kyagent
+  server_version: 0.1.0

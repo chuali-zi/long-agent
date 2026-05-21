@@ -73,10 +73,43 @@ def test_sudo_wrap_for_root_when_allowed():
     assert final[:5] == ["sudo", "-n", "-u", "root", "--"]
 
 
-def test_forbid_root_returns_false_command():
+def test_forbid_root_default_still_routes_through_sudoers():
+    """赛题"非必要不用 root"修复（codex 指控 #1）：默认 forbid_root=True 不应
+    把 requires_root 工具替换成 /bin/false；应通过 sudo 走 sudoers 白名单，由
+    sudoers 决定是否真的能跑。这才让 configs/sudoers.kyagent 的 KY_SVC_MUTATE
+    白名单不再是死代码。
+    """
     cfg = SandboxConfig(account="kyagent", forbid_root=True)
     proxy = ExecutionProxy(cfg)
-    final, _, _ = proxy._wrap_privilege(["systemctl", "restart", "nginx"],
-                                        requires_root=True)
-    # forbid_root=True 且目标账户非 root：用 /bin/false 占位
+    final, sudo_used, run_as = proxy._wrap_privilege(
+        ["systemctl", "restart", "nginx"], requires_root=True
+    )
+    assert sudo_used, "应通过 sudo 包裹"
+    assert run_as == "root"
+    assert final[:5] == ["sudo", "-n", "-u", "root", "--"]
+    assert final[5:] == ["systemctl", "restart", "nginx"]
+
+
+def test_forbid_root_strict_rejects_with_false_command():
+    """forbid_root_strict=True 是显式的"演示 / 合规"模式：彻底拒绝 root 提升，
+    绕过 sudoers，requires_root 工具被替换成 /bin/false。"""
+    cfg = SandboxConfig(account="kyagent", forbid_root=True, forbid_root_strict=True)
+    proxy = ExecutionProxy(cfg)
+    final, sudo_used, run_as = proxy._wrap_privilege(
+        ["systemctl", "restart", "nginx"], requires_root=True
+    )
     assert final == ["/bin/false"]
+    assert sudo_used is False
+    assert run_as == "kyagent"
+
+
+def test_forbid_root_disabled_runs_root_directly_via_sudo():
+    """显式 forbid_root=False：与未修复前完全一样的行为；用于环境必须直接 root 的极端场景。"""
+    cfg = SandboxConfig(account="kyagent", forbid_root=False)
+    proxy = ExecutionProxy(cfg)
+    final, sudo_used, run_as = proxy._wrap_privilege(
+        ["systemctl", "restart", "nginx"], requires_root=True
+    )
+    assert sudo_used
+    assert run_as == "root"
+    assert final[:5] == ["sudo", "-n", "-u", "root", "--"]

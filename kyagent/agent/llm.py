@@ -1,10 +1,15 @@
 """LLM 后端抽象。
 
-提供三种后端：
+提供以下后端：
   - AnthropicBackend：调用真实 Claude API（需 ANTHROPIC_API_KEY）
   - OpenAIBackend：调用 OpenAI Chat Completions（需 OPENAI_API_KEY），同时兼容
                    任何 OpenAI 协议（Azure OpenAI / vLLM / DeepSeek / 智谱 / Ollama …）
   - MockBackend：纯规则路由，不需要任何外部依赖；可用于离线 demo / CI
+
+国产 LLM（赛题鼓励的 DeepSeek / Qwen）走 OpenAI 协议兼容路径，由
+build_backend 工厂识别 llm_backend 别名后转成 OpenAIBackend(base_url=预设)。
+2026-05 验证：DeepSeek 官方推荐 openai SDK + base_url=https://api.deepseek.com；
+DashScope 提供 compatible-mode/v1 端点。tools/tool_calls 协议与 OpenAI 完全一致。
 
 每个后端实现统一的 chat(messages, tools) -> AssistantMessage。
 Agent.core 始终以 Anthropic 风格组装 messages/tools；OpenAIBackend 内部完成双向翻译。
@@ -12,11 +17,14 @@ Agent.core 始终以 Anthropic 风格组装 messages/tools；OpenAIBackend 内�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("kyagent.llm")
 
 
 # ---- 统一的消息模型 -------------------------------------------------------
@@ -158,6 +166,24 @@ class OpenAIBackend(LlmBackend):
         "content_filter": "content_filter",
     }
 
+    # 国产 LLM 预设：(base_url, 推荐 model, 默认 api_key_env, 显示名)
+    # 数据来源：2026-05 DeepSeek / DashScope 官方文档。模型 ID 选「tools 支持完整 + 性价比」挡。
+    _PRESETS: dict[str, dict[str, str]] = {
+        "deepseek": {
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "display": "DeepSeek (V4 Flash)",
+        },
+        "qwen": {
+            # 国内默认；海外用户改 dashscope-intl.aliyuncs.com / dashscope-us.aliyuncs.com
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-plus",
+            "api_key_env": "DASHSCOPE_API_KEY",
+            "display": "Qwen (DashScope)",
+        },
+    }
+
     def __init__(
         self,
         model: str,
@@ -166,6 +192,7 @@ class OpenAIBackend(LlmBackend):
         api_key_env: str = "OPENAI_API_KEY",
         base_url: str | None = None,
         organization: str | None = None,
+        display_name: str | None = None,
     ):
         try:
             import openai  # noqa: F401
@@ -185,6 +212,39 @@ class OpenAIBackend(LlmBackend):
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        # display_name 仅供 CLI banner / 审计 metadata 显示，不影响协议
+        if display_name:
+            self.name = f"openai({display_name})"
+
+    @classmethod
+    def preset(
+        cls,
+        provider: str,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+        api_key_env: str | None = None,
+        base_url_override: str | None = None,
+    ) -> OpenAIBackend:
+        """国产 LLM 便捷构造：provider in {'deepseek', 'qwen'}。
+
+        所有参数都可被显式 override；不传则使用 _PRESETS 中的推荐值。
+        """
+        key = provider.lower()
+        if key not in cls._PRESETS:
+            raise ValueError(
+                f"未知 OpenAI 协议兼容供应商：{provider!r}；"
+                f"已知预设：{sorted(cls._PRESETS)}"
+            )
+        p = cls._PRESETS[key]
+        return cls(
+            model=model or p["model"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            api_key_env=api_key_env or p["api_key_env"],
+            base_url=base_url_override or p["base_url"],
+            display_name=p["display"],
+        )
 
     # ---- 公共入口 ------------------------------------------------------
 
@@ -491,24 +551,82 @@ class MockBackend(LlmBackend):
 # ---- 工厂 -----------------------------------------------------------------
 
 
-def build_backend(cfg) -> LlmBackend:
-    """根据配置构造后端。"""
+class _MissingKeyError(RuntimeError):
+    """专用类型：仅当环境变量缺失时由后端构造函数抛出，工厂据此判断是否降级。"""
+
+
+def _construct_backend(cfg) -> LlmBackend:
+    """根据 cfg.agent.llm_backend 直接构造，缺 key 时抛 _MissingKeyError。"""
     name = (cfg.agent.llm_backend or "mock").lower()
+
     if name == "mock":
         return MockBackend()
+
     if name == "anthropic":
+        a = cfg.agent.anthropic
+        if not os.environ.get(a.api_key_env):
+            raise _MissingKeyError(a.api_key_env)
         return AnthropicBackend(
-            model=cfg.agent.anthropic.model,
-            max_tokens=cfg.agent.anthropic.max_tokens,
-            api_key_env=cfg.agent.anthropic.api_key_env,
+            model=a.model, max_tokens=a.max_tokens, api_key_env=a.api_key_env
         )
+
     if name == "openai":
+        o = cfg.agent.openai
+        if not os.environ.get(o.api_key_env):
+            raise _MissingKeyError(o.api_key_env)
         return OpenAIBackend(
-            model=cfg.agent.openai.model,
-            max_tokens=cfg.agent.openai.max_tokens,
-            temperature=cfg.agent.openai.temperature,
-            api_key_env=cfg.agent.openai.api_key_env,
-            base_url=cfg.agent.openai.base_url,
-            organization=cfg.agent.openai.organization,
+            model=o.model,
+            max_tokens=o.max_tokens,
+            temperature=o.temperature,
+            api_key_env=o.api_key_env,
+            base_url=o.base_url or None,
+            organization=o.organization or None,
         )
+
+    if name in ("deepseek", "qwen"):
+        # 国产 LLM：走 OpenAI 协议兼容路径
+        sub = getattr(cfg.agent, name)
+        env = sub.api_key_env
+        if not os.environ.get(env):
+            raise _MissingKeyError(env)
+        return OpenAIBackend.preset(
+            provider=name,
+            model=sub.model or None,
+            max_tokens=sub.max_tokens,
+            temperature=sub.temperature,
+            api_key_env=env,
+            base_url_override=sub.base_url or None,
+        )
+
     raise ValueError(f"未知 LLM 后端：{name}")
+
+
+def build_backend(cfg) -> LlmBackend:
+    """根据配置构造后端；缺 key 时按 fallback_to_mock 策略降级到 Mock。
+
+    降级规则（仅 key 缺失）：
+      - cfg.agent.fallback_to_mock = True（默认）：WARN + 返回 MockBackend
+      - cfg.agent.fallback_to_mock = False：直接 raise，用于 CI / 生产
+    其他错误（缺依赖包、配置非法）一律 raise，不被吞掉。
+    """
+    name = (cfg.agent.llm_backend or "mock").lower()
+    try:
+        backend = _construct_backend(cfg)
+    except _MissingKeyError as e:
+        env_var = str(e)
+        if not getattr(cfg.agent, "fallback_to_mock", True):
+            raise RuntimeError(
+                f"LLM 后端 {name!r} 需要环境变量 {env_var}，但未设置；"
+                f"且 agent.fallback_to_mock=false 禁止降级。"
+            ) from e
+        logger.warning(
+            "LLM 后端 %r 缺少环境变量 %s，已自动降级到 mock。"
+            "设置该变量并重启即可启用真实后端。",
+            name, env_var,
+        )
+        mb = MockBackend()
+        # 把降级原因挂到实例上，CLI / 审计可读取
+        mb.fallback_from = name  # type: ignore[attr-defined]
+        mb.fallback_reason = f"环境变量 {env_var} 未设置"  # type: ignore[attr-defined]
+        return mb
+    return backend
