@@ -1,0 +1,26 @@
+# 龙芯（LoongArch64 Old World，Kylin V10）专用依赖清单
+# 配合 DEPLOYMENT-LOONGARCH.md 第 6.4 节使用。
+# 设计依据：implementation-notes.html "2026-05-22 龙芯依赖替换方案 A"
+#
+# 安装方式（必须按此顺序，否则 pip 会自动拉 jiter）：
+#   pip install --upgrade "pip>=23" setuptools wheel
+#   pip install --no-binary PyYAML -r requirements-loongarch.txt
+#   pip install --no-deps "anthropic==0.39.0"
+#   pip install -e . --no-deps
+#
+# 全程零 Rust 编译、零 C 编译。
+
+# === 主依赖（pyproject.toml 同步）===
+pydantic>=1.10.13,<2
+PyYAML>=6.0,<7
+typer>=0.12
+rich>=13.7
+
+# === anthropic 0.39.0 的运行时依赖（手动补齐，全部 py3-none-any）===
+# 这些是 `anthropic==0.39.0` 的 Requires-Dist 列表去掉 jiter 后的子集。
+# 用 --no-deps 装 anthropic 后，必须显式装下面这些。
+anyio>=3.5.0,<5
+distro>=1.7.0,<2
+httpx>=0.23.0,<1
+sniffio
+typing-extensions>=4.7,<5

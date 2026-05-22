@@ -83,6 +83,10 @@ class LlmBackend:
 class AnthropicBackend(LlmBackend):
     name = "anthropic"
 
+    # 龙芯（LoongArch64 Old World）部署用 `pip install --no-deps anthropic==0.39.0`，未装 jiter。
+    # 切勿改用 messages.stream() / 任何 anthropic.lib.streaming.* — 会触发 ImportError: jiter。
+    # 如需流式：要么先解决 LoongArch 上的 Rust 编译，要么改走 httpx 手打 SSE。
+
     def __init__(
         self,
         model: str,

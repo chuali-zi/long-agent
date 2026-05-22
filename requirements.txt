@@ -1,9 +1,11 @@
-pydantic>=2.5
-PyYAML>=6.0
+# 2026-05-22 龙芯（LoongArch64 Old World）部署兼容：见 requirements-loongarch.txt
+pydantic>=1.10.13,<2
+PyYAML>=6.0,<7
 typer>=0.12
 rich>=13.7
-anthropic>=0.39
+anthropic==0.39.0
 # 可选：OpenAI SDK（用 configs/openai.yaml 接 OpenAI / DeepSeek / 智谱 / vLLM 等兼容服务）
 # openai>=1.30
 # 可选：官方 MCP SDK（在需要把 kyagent-mcp 接到 Claude Desktop / Cursor 时安装）
+# 注意：mcp>=1.0 依赖 pydantic v2，在龙芯老世界上需要 pydantic-core Rust 编译，不建议安装
 # mcp>=1.0
