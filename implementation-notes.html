@@ -69,6 +69,51 @@
 <p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
 </div>
 
+<h2>2026-05-23 — HttpxBackend 运行时可靠性补完（reviewer 触发）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-23 reviewer 复审 6c00ac3</span>
+<div class="files">kyagent/agent/llm.py、tests/test_httpx_backend.py</div>
+<p><strong>触发</strong>：DeepSeek 定价修正 commit (6c00ac3) 之后 reviewer 给出第二次审查，明确指出：</p>
+<blockquote>"HttpxBackend 仍没有重试，timeout 也没对齐 SDK。<code>llm.py:447</code> 默认 timeout=60.0，<code>llm.py:526</code> 仍是单次 post() 后直接处理响应。OpenAI SDK 默认是 2 次 retry，覆盖连接错误、timeout、408/409/429/5xx，并且默认 timeout 是 10 分钟。协议翻译测试能过，但运行时可靠性不是等价替换。"</blockquote>
+<p><strong>事实复核</strong>：openai 1.x <code>_base_client.py</code> 源码默认 <code>DEFAULT_TIMEOUT=600.0</code>（10 分钟）、<code>DEFAULT_MAX_RETRIES=2</code>，<code>_should_retry</code> 触发集为 <code>408/409/429/5xx</code> + httpx 连接/超时类异常 + 遵循 <code>Retry-After</code> 头。Review 完全成立 —— 之前 HttpxBackend 实现只过协议层等价测试，没覆盖运行时可靠性，"drop-in replacement" 的承诺不成立。</p>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-23 对齐 openai SDK 重试 / 超时语义</span>
+<div class="files">kyagent/agent/llm.py（HttpxBackend +~110 行）、tests/test_httpx_backend.py（+24 测试 = 总 48）</div>
+<p><strong>修复</strong>：</p>
+<ul>
+  <li>HttpxBackend 类常量 <code>DEFAULT_TIMEOUT = 600.0</code>、<code>DEFAULT_MAX_RETRIES = 2</code> 对齐 openai SDK；<code>_RETRY_STATUS = {408, 409, 429}</code>（5xx 另判）、<code>_BACKOFF_MAX = 8.0</code>、<code>_RETRY_AFTER_MAX = 60.0</code> 上限常量化便于审计</li>
+  <li><code>__init__</code> 加 <code>max_retries</code> 参数；<code>timeout</code> 默认从 60 调到 600；两者保存到实例属性以便审计</li>
+  <li>新增 <code>_post_with_retry()</code> 私有方法包装单次 POST：重试触发集 = HTTP 408/409/429 + 所有 5xx + httpx 的 6 个连接/超时异常类（ConnectError、ConnectTimeout、ReadTimeout、WriteTimeout、PoolTimeout、RemoteProtocolError）</li>
+  <li>4xx 非重试码（400/401/403/404 等）+ JSON 解析失败一次性 fail-fast，不浪费配额；错误信息含 "after N retries" 计数便于运维定位</li>
+  <li><code>_compute_backoff()</code> 实现退避策略：服务器 <code>Retry-After</code> 数字头优先（cap 60s 防恶意拖延 / 缓存 bug），兜底 <code>min(0.5 × 2^attempt, 8.0) + uniform(0, 0.25)</code> jitter，与 openai SDK 行为等价</li>
+  <li><code>_sleep()</code> 单独静态方法包装 <code>time.sleep</code>，便于测试 monkeypatch（不真睡）</li>
+  <li><code>httpx</code> import 在 <code>_post_with_retry</code> 中 lazy 化 + 捕获 ImportError 兜底空 tuple，避免测试环境差异</li>
+</ul>
+<p><strong>新增测试 24 项</strong>：</p>
+<ul>
+  <li><strong>默认值对齐</strong>（3）：<code>DEFAULT_TIMEOUT==600</code> + <code>DEFAULT_MAX_RETRIES==2</code> + httpx.Client 收到 600.0；<code>timeout=30.0</code> 透传；<code>max_retries</code> 写入实例属性</li>
+  <li><strong>重试触发</strong>（5）：429+Retry-After、5xx 链（500→503→200）、408、409、504</li>
+  <li><strong>不应重试</strong>（5）：400 / 401 / 404 / 非 JSON 200 / <code>max_retries=0</code> 完全禁用 → 全部立即 fail-fast，0 sleep</li>
+  <li><strong>httpx 异常重试</strong>（3）：ConnectError → 1 次重试成功、ReadTimeout → 2 次重试成功、连续 ConnectError 用尽抛错（错误信息含 "network error after N retries" + 异常类型名）</li>
+  <li><strong>退避策略单元</strong>（8）：exponential 0.5/1.0/2.0 增长含 jitter 上界、attempt≥4 时 base cap 8s、Retry-After 数字头优先、Retry-After cap 60s、负数 / 空 / 无效字符串 / HTTP-date 格式全部回落 exponential</li>
+</ul>
+<p><strong>向后兼容保障</strong>：</p>
+<ul>
+  <li><code>_make_backend()</code> fixture 默认 <code>max_retries=0</code>（注释明确"测试默认禁重试 vs 生产默认 2"），既有 24 个协议测试零改动通过</li>
+  <li>OpenAIBackend / AnthropicBackend / MockBackend / Agent.core / cli / runtime / configs / 其它 backend 调用方零改动</li>
+</ul>
+<p><strong>验证</strong>：</p>
+<ul>
+  <li><code>pytest tests/</code> → 237 passed, 2 skipped（POSIX-only）。新 retry/timeout 系列 24 项 + 既有协议层 24 项 + 其它 189 测试 100% 通过</li>
+  <li><code>python -m compileall -q kyagent</code> → 静默通过</li>
+  <li>对照 openai SDK <code>_base_client.py</code> 源码逐项核对：timeout 默认 ✓、retry 默认 ✓、触发集 ✓、Retry-After 处理 ✓、退避策略 ✓</li>
+</ul>
+<p><strong>方法论教训</strong>：把 OpenAIBackend → HttpxBackend 当 "drop-in replacement" 时，必须区分两层等价 ——「协议层等价」（payload/response 字段映射）和「运行时等价」（timeout、retry、退避、限流、错误恢复）。第一次实现只满足协议层等价就声称 drop-in，是<strong>分类错误</strong>。今后做 SDK / backend 替换型重构，必须显式列出参考 SDK 的运行时可靠性配置矩阵（DEFAULT_* 常量、_should_retry 实现、_make_request 异常处理路径），按矩阵逐项对齐 + 测试覆盖，而不是只跑协议字段映射的等价性测试。</p>
+</div>
+
 <h2>2026-05-23 — DeepSeek 事实校对（reviewer 触发）</h2>
 
 <div class="entry fact">

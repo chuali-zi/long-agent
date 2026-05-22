@@ -33,10 +33,17 @@ from kyagent.config import Config
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int = 200, json_body: Any = None, text: str = ""):
+    def __init__(
+        self,
+        status_code: int = 200,
+        json_body: Any = None,
+        text: str = "",
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self._json = json_body
         self.text = text or (json.dumps(json_body) if json_body is not None else "")
+        self.headers = headers or {}
 
     def json(self):
         if isinstance(self._json, Exception):
@@ -45,7 +52,13 @@ class _FakeResponse:
 
 
 class _FakeHttpxClient:
-    """记录入参；按需返回 _FakeResponse。"""
+    """记录入参；按需返回 _FakeResponse 或抛异常。
+
+    支持两种使用模式：
+      - 单次模式（向后兼容）：设置 .next_response = _FakeResponse(...)
+      - 队列模式（重试测试）：append 多个响应 / 异常到 .responses_queue，
+        每次 post 按 FIFO 弹出；列表元素是 Exception 实例时直接 raise
+    """
 
     def __init__(self, base_url: str = "", headers: dict | None = None, timeout: float = 60.0):
         self.base_url = base_url
@@ -54,11 +67,19 @@ class _FakeHttpxClient:
         self.last_path: str | None = None
         self.last_payload: dict | None = None
         self.next_response: _FakeResponse | None = None
+        self.responses_queue: list = []
+        self.call_count: int = 0
 
     def post(self, path: str, json: Any = None):  # noqa: A002 - 模拟 httpx 签名
         self.last_path = path
         self.last_payload = json
-        assert self.next_response is not None, "测试需先设置 next_response"
+        self.call_count += 1
+        if self.responses_queue:
+            item = self.responses_queue.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        assert self.next_response is not None, "测试需先设置 next_response 或 responses_queue"
         return self.next_response
 
 
@@ -67,8 +88,14 @@ def _make_backend(
     max_tokens: int = 512,
     temperature: float = 0.0,
     base_url: str = "https://api.deepseek.com",
+    max_retries: int = 0,
 ) -> tuple[HttpxBackend, _FakeHttpxClient]:
-    """构造带注入 fake client 的 HttpxBackend，跳过环境变量校验。"""
+    """构造带注入 fake client 的 HttpxBackend，跳过环境变量校验。
+
+    测试默认 max_retries=0（禁重试），让大多数协议层 / 错误处理测试保持
+    单次 POST 语义。生产默认是 HttpxBackend.DEFAULT_MAX_RETRIES=2，重试
+    行为另由 test_retry_* 系列覆盖。
+    """
     # 用 client= 注入参数绕开真实 httpx；规范化 base_url 仅在自造 client 时执行，
     # 这里我们手动给 fake client 设置 base_url 以模拟同样的拼接逻辑
     base = base_url.rstrip("/") + "/"
@@ -78,6 +105,7 @@ def _make_backend(
         max_tokens=max_tokens,
         temperature=temperature,
         base_url=base_url,
+        max_retries=max_retries,
         client=fake,
     )
     return be, fake
@@ -526,3 +554,314 @@ def test_httpx_and_openai_backend_produce_equivalent_messages():
     assert tu_h[0].id == tu_o[0].id
     assert tu_h[0].name == tu_o[0].name
     assert tu_h[0].input == tu_o[0].input
+
+
+# ---------- 重试 / 退避 / 超时（运行时可靠性对齐 openai SDK）-----------------
+
+
+def _patch_sleep(monkeypatch) -> list[float]:
+    """让 HttpxBackend 用的 time.sleep 不真睡，返回 sleeps 调用记录列表。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr("kyagent.agent.llm.time.sleep", lambda s: sleeps.append(s))
+    return sleeps
+
+
+def _ok_response(text: str = "ok") -> _FakeResponse:
+    return _FakeResponse(json_body={
+        "choices": [{"message": {"content": text}, "finish_reason": "stop"}]
+    })
+
+
+# ---------- 默认值对齐 OpenAI SDK -----------------------------------------
+
+
+def test_defaults_aligned_with_openai_sdk():
+    """DEFAULT_TIMEOUT / DEFAULT_MAX_RETRIES 必须对齐 openai SDK 默认值
+    （参考 openai/_base_client.py：600s timeout + 2 retries）。"""
+    assert HttpxBackend.DEFAULT_TIMEOUT == 600.0
+    assert HttpxBackend.DEFAULT_MAX_RETRIES == 2
+
+
+def test_real_client_uses_default_timeout(monkeypatch):
+    """没传 timeout 参数时，httpx.Client 应收到 600.0 而非旧的 60.0。"""
+    captured: dict = {}
+
+    class _CaptureClient:
+        def __init__(self, base_url, headers, timeout):
+            captured["timeout"] = timeout
+
+    import types
+    monkeypatch.setitem(__import__("sys").modules, "httpx",
+                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
+
+    HttpxBackend(model="m", max_tokens=10, api_key_env="DEEPSEEK_API_KEY")
+    assert captured["timeout"] == 600.0
+
+
+def test_real_client_respects_explicit_timeout(monkeypatch):
+    captured: dict = {}
+
+    class _CaptureClient:
+        def __init__(self, base_url, headers, timeout):
+            captured["timeout"] = timeout
+
+    import types
+    monkeypatch.setitem(__import__("sys").modules, "httpx",
+                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
+
+    HttpxBackend(model="m", max_tokens=10, api_key_env="DEEPSEEK_API_KEY", timeout=30.0)
+    assert captured["timeout"] == 30.0
+
+
+def test_backend_records_max_retries():
+    """构造时保留 max_retries 到实例属性，便于审计 / 调试。"""
+    be, _ = _make_backend(max_retries=5)
+    assert be.max_retries == 5
+    assert be.timeout == HttpxBackend.DEFAULT_TIMEOUT
+
+
+# ---------- 重试触发：HTTP 状态码 ----------------------------------------
+
+
+def test_retry_on_429_then_success(monkeypatch):
+    """429 触发一次重试，第 2 次成功；Retry-After 头优先生效。"""
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [
+        _FakeResponse(status_code=429, text='{"error":"rate limit"}',
+                      headers={"retry-after": "2"}),
+        _ok_response("after_429"),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "after_429"
+    assert fake.call_count == 2
+    assert sleeps == [2.0]
+
+
+def test_retry_on_500_chain_then_success(monkeypatch):
+    """500 → 503 → 200 三次成功；无 Retry-After 时走 exponential backoff。"""
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [
+        _FakeResponse(status_code=500, text="err1"),
+        _FakeResponse(status_code=503, text="err2"),
+        _ok_response("done"),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "done"
+    assert fake.call_count == 3
+    assert len(sleeps) == 2
+    # exponential: 第 0 次重试 ~0.5+jitter, 第 1 次 ~1.0+jitter
+    assert 0.5 <= sleeps[0] <= 0.75 + 1e-6
+    assert 1.0 <= sleeps[1] <= 1.25 + 1e-6
+
+
+def test_retry_exhausted_raises_with_count_in_message(monkeypatch):
+    """3 次都 503 后用尽重试，错误信息含 'after 2 retries' 和最后一次的 body。"""
+    _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [
+        _FakeResponse(status_code=503, text="down1"),
+        _FakeResponse(status_code=503, text="down2"),
+        _FakeResponse(status_code=503, text="give_up"),
+    ]
+    with pytest.raises(RuntimeError, match=r"HTTP 503.*after 2 retries.*give_up"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert fake.call_count == 3
+
+
+def test_408_retries(monkeypatch):
+    """HTTP 408 Request Timeout → 重试。"""
+    _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=1)
+    fake.responses_queue = [
+        _FakeResponse(status_code=408, text="request timeout"),
+        _ok_response(),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "ok"
+
+
+def test_409_retries(monkeypatch):
+    """HTTP 409 Conflict → 重试（对齐 openai SDK 行为）。"""
+    _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=1)
+    fake.responses_queue = [
+        _FakeResponse(status_code=409, text="conflict"),
+        _ok_response(),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "ok"
+
+
+def test_504_retries(monkeypatch):
+    """504 Gateway Timeout → 5xx 范围内重试。"""
+    _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=1)
+    fake.responses_queue = [
+        _FakeResponse(status_code=504, text="gateway timeout"),
+        _ok_response(),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "ok"
+
+
+# ---------- 不应重试的场景 ------------------------------------------------
+
+
+def test_400_does_not_retry(monkeypatch):
+    """400 Bad Request 不在重试集合 → 立即失败，无 sleep。"""
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [_FakeResponse(status_code=400, text="bad request")]
+    with pytest.raises(RuntimeError, match=r"HTTP 400.*bad request"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert fake.call_count == 1
+    assert sleeps == []
+
+
+def test_401_does_not_retry(monkeypatch):
+    """401 Unauthorized → 立即失败（重试不会让无效 key 变有效）。"""
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [_FakeResponse(status_code=401, text="bad key")]
+    with pytest.raises(RuntimeError, match=r"HTTP 401"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert fake.call_count == 1
+    assert sleeps == []
+
+
+def test_404_does_not_retry(monkeypatch):
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [_FakeResponse(status_code=404, text="not found")]
+    with pytest.raises(RuntimeError, match=r"HTTP 404"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert fake.call_count == 1
+    assert sleeps == []
+
+
+def test_invalid_json_does_not_retry(monkeypatch):
+    """200 OK 但 body 非 JSON 不是瞬时故障 → fail-fast 不重试。"""
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [
+        _FakeResponse(status_code=200, json_body=ValueError("not json"),
+                      text="<html>upstream error</html>"),
+    ]
+    with pytest.raises(RuntimeError, match="非 JSON"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert fake.call_count == 1
+    assert sleeps == []
+
+
+def test_max_retries_zero_disables_retry(monkeypatch):
+    """max_retries=0 时 5xx 也不重试 —— 用于 CI / 测试场景禁用重试。"""
+    sleeps = _patch_sleep(monkeypatch)
+    be, fake = _make_backend(max_retries=0)
+    fake.responses_queue = [_FakeResponse(status_code=503, text="down")]
+    with pytest.raises(RuntimeError, match=r"HTTP 503"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert fake.call_count == 1
+    assert sleeps == []
+
+
+# ---------- httpx 异常类重试 ----------------------------------------------
+
+
+def test_retry_on_connect_error(monkeypatch):
+    """httpx.ConnectError → 重试。"""
+    _patch_sleep(monkeypatch)
+    import httpx
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [
+        httpx.ConnectError("connection refused"),
+        _ok_response(),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "ok"
+    assert fake.call_count == 2
+
+
+def test_retry_on_read_timeout(monkeypatch):
+    """httpx.ReadTimeout（典型："服务器拉新流式 token 卡了"）→ 重试。"""
+    _patch_sleep(monkeypatch)
+    import httpx
+    be, fake = _make_backend(max_retries=2)
+    fake.responses_queue = [
+        httpx.ReadTimeout("read timeout 1"),
+        httpx.ReadTimeout("read timeout 2"),
+        _ok_response(),
+    ]
+    am = be.chat("s", [{"role": "user", "content": "x"}], [])
+    assert am.blocks[0].text == "ok"
+    assert fake.call_count == 3
+
+
+def test_connect_error_exhausted_raises(monkeypatch):
+    """连续 ConnectError 用尽重试 → 抛 RuntimeError 含 retries 计数和异常类型。"""
+    _patch_sleep(monkeypatch)
+    import httpx
+    be, fake = _make_backend(max_retries=1)
+    fake.responses_queue = [
+        httpx.ConnectError("refused 1"),
+        httpx.ConnectError("refused 2"),
+    ]
+    with pytest.raises(RuntimeError, match=r"network error after 1 retries.*ConnectError"):
+        be.chat("s", [{"role": "user", "content": "x"}], [])
+
+
+# ---------- _compute_backoff 单元 ----------------------------------------
+
+
+def test_compute_backoff_exponential_growth():
+    """退避基础按 0.5 * 2^attempt 增长，每次都加少量 jitter。"""
+    # attempt 0: base=0.5, 范围 [0.5, 0.75]
+    v0 = HttpxBackend._compute_backoff(0, None)
+    assert 0.5 <= v0 <= 0.75 + 1e-6
+    # attempt 1: base=1.0, 范围 [1.0, 1.25]
+    v1 = HttpxBackend._compute_backoff(1, None)
+    assert 1.0 <= v1 <= 1.25 + 1e-6
+    # attempt 2: base=2.0, 范围 [2.0, 2.25]
+    v2 = HttpxBackend._compute_backoff(2, None)
+    assert 2.0 <= v2 <= 2.25 + 1e-6
+
+
+def test_compute_backoff_caps_at_8s():
+    """高 attempt 时退避 base 上限 8 秒（对齐 openai SDK 行为）。"""
+    for attempt in [4, 5, 6, 10, 100]:
+        v = HttpxBackend._compute_backoff(attempt, None)
+        assert 8.0 <= v <= 8.25 + 1e-6
+
+
+def test_compute_backoff_uses_retry_after_when_valid():
+    """Retry-After 数字头优先于 exponential backoff。"""
+    assert HttpxBackend._compute_backoff(0, "5") == 5.0
+    assert HttpxBackend._compute_backoff(3, "0.5") == 0.5
+    # 含小数也接受
+    assert HttpxBackend._compute_backoff(0, "2.5") == 2.5
+
+
+def test_compute_backoff_caps_retry_after_at_60s():
+    """Retry-After: 9999 被 cap 到 60 秒，防恶意 / bug 服务器拖死调用方。"""
+    assert HttpxBackend._compute_backoff(0, "9999") == 60.0
+    assert HttpxBackend._compute_backoff(0, "60") == 60.0
+    assert HttpxBackend._compute_backoff(0, "61") == 60.0
+
+
+def test_compute_backoff_negative_retry_after_falls_back():
+    """Retry-After: -1（无效值）应回落 exponential backoff。"""
+    v = HttpxBackend._compute_backoff(0, "-1")
+    assert 0.5 <= v <= 0.75 + 1e-6
+
+
+def test_compute_backoff_invalid_retry_after_falls_back():
+    """Retry-After 非数字（HTTP-date 等）→ 不解析，回落退避。"""
+    v = HttpxBackend._compute_backoff(0, "Wed, 23 May 2026 12:00:00 GMT")
+    assert 0.5 <= v <= 0.75 + 1e-6
+    v = HttpxBackend._compute_backoff(0, "")
+    assert 0.5 <= v <= 0.75 + 1e-6
+    v = HttpxBackend._compute_backoff(0, None)
+    assert 0.5 <= v <= 0.75 + 1e-6

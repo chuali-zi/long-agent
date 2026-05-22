@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -427,6 +429,21 @@ class HttpxBackend(LlmBackend):
     （choices[].message.{content,tool_calls}、tool_calls[].function.
     {name,arguments}、choices[].finish_reason）与 SDK 对象属性命名严格
     一一对应；DeepSeek / DashScope 兼容端点同样遵循此协议，无需差异化。
+
+    运行时可靠性对齐 openai SDK（_base_client.py 默认值，2026-05 校对）：
+      - DEFAULT_TIMEOUT = 600s（10 分钟，覆盖长推理 / 思考模式响应）
+      - DEFAULT_MAX_RETRIES = 2（共最多 3 次尝试 = 1 + 2 retry）
+      - 重试触发集：HTTP 408 / 409 / 429 / 5xx，以及 httpx 的连接 / 超时
+        类异常（ConnectError、ConnectTimeout、ReadTimeout、WriteTimeout、
+        PoolTimeout、RemoteProtocolError）
+      - Retry-After 响应头优先（数字秒数；HTTP-date 不解析，回落退避），
+        上限 60 秒防恶意服务器拖死调用方
+      - 退避公式：min(0.5 × 2^attempt, 8.0) + uniform(0, 0.25) jitter
+      - 4xx 非重试码（400/401/403/404 等）一次失败立即抛 RuntimeError
+        不浪费配额；JSON 解析失败同理 fail-fast（不是网络问题）
+
+    上述策略与 openai 1.x SDK 行为等价 —— 协议测试 + 运行时可靠性都是
+    drop-in replacement。
     """
 
     name = "httpx_openai"
@@ -434,6 +451,16 @@ class HttpxBackend(LlmBackend):
     # 复用 OpenAIBackend 的协议常量，确保两条路径行为一致
     _STOP_MAP = OpenAIBackend._STOP_MAP
     _PRESETS = OpenAIBackend._PRESETS
+
+    # 对齐 openai SDK 默认值（参考 openai/_base_client.py
+    # DEFAULT_TIMEOUT / DEFAULT_MAX_RETRIES 常量，2026-05 校对）
+    DEFAULT_TIMEOUT: float = 600.0
+    DEFAULT_MAX_RETRIES: int = 2
+    # 触发重试的 HTTP 状态码集合（5xx 单独判断）
+    _RETRY_STATUS: frozenset[int] = frozenset({408, 409, 429})
+    # 退避上限与 Retry-After 上限（秒）
+    _BACKOFF_MAX: float = 8.0
+    _RETRY_AFTER_MAX: float = 60.0
 
     def __init__(
         self,
@@ -444,9 +471,16 @@ class HttpxBackend(LlmBackend):
         base_url: str | None = None,
         organization: str | None = None,
         display_name: str | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
+        max_retries: int | None = None,
         client: Any = None,
     ):
+        # 默认值用类常量；显式 None 表示走默认（区分"用户主动传 0/快超时"）
+        if timeout is None:
+            timeout = self.DEFAULT_TIMEOUT
+        if max_retries is None:
+            max_retries = self.DEFAULT_MAX_RETRIES
+
         # client 参数是测试 / 高级用法的注入口；正常用 None 让我们自己造
         if client is None:
             try:
@@ -472,6 +506,8 @@ class HttpxBackend(LlmBackend):
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.timeout = timeout
+        self.max_retries = max_retries
         if display_name:
             self.name = f"httpx({display_name})"
 
@@ -522,22 +558,101 @@ class HttpxBackend(LlmBackend):
             payload["tools"] = oai_tools
             payload["tool_choice"] = "auto"
 
-        # 相对路径 + base 末尾 / → 拼成 base + "chat/completions"
-        resp = self._client.post("chat/completions", json=payload)
-        if resp.status_code >= 400:
-            # 不打印 headers（含 Authorization）；body 截 500 字防 PII / token 泄露
-            body_snippet = (resp.text or "")[:500]
-            raise RuntimeError(
-                f"HttpxBackend HTTP {resp.status_code} from upstream: {body_snippet}"
-            )
-        try:
-            data = resp.json()
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(
-                f"HttpxBackend 响应非 JSON: {(resp.text or '')[:200]}"
-            ) from e
+        return self._post_with_retry(payload)
 
-        return self._from_openai_dict(data)
+    def _post_with_retry(self, payload: dict[str, Any]) -> AssistantMessage:
+        """带重试的 POST，对齐 openai SDK _base_client 的重试语义。
+
+        共 max_retries + 1 次尝试（默认 3 次）。重试触发：
+          - HTTP 408 / 409 / 429 / 5xx 响应
+          - httpx 的连接 / 超时类异常
+        4xx 非重试码 + JSON 解析失败一次性 fail-fast。
+        """
+        # httpx 异常类型 lazy import，避开测试场景里 httpx 未真正安装的情况
+        try:
+            import httpx
+            retry_exc_types: tuple[type[BaseException], ...] = (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+                httpx.PoolTimeout,
+                httpx.RemoteProtocolError,
+            )
+        except ImportError:
+            # 测试场景或缺包：用空 tuple，重试只对 HTTP 状态码生效
+            retry_exc_types = ()
+
+        attempt = 0
+        while True:
+            try:
+                resp = self._client.post("chat/completions", json=payload)
+            except retry_exc_types as exc:
+                if attempt >= self.max_retries:
+                    raise RuntimeError(
+                        f"HttpxBackend network error after {attempt} retries: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                self._sleep(self._compute_backoff(attempt, None))
+                attempt += 1
+                continue
+
+            status = resp.status_code
+            # 成功路径
+            if status < 400:
+                try:
+                    data = resp.json()
+                except Exception as e:  # noqa: BLE001
+                    # JSON 解析失败：网络/服务器返回了 200 但 body 不是 JSON。
+                    # 不是瞬时故障，重试无意义 → fail-fast。
+                    raise RuntimeError(
+                        f"HttpxBackend 响应非 JSON: {(resp.text or '')[:200]}"
+                    ) from e
+                return self._from_openai_dict(data)
+
+            # 应该重试的状态码
+            should_retry = (status in self._RETRY_STATUS) or (status >= 500)
+            if should_retry and attempt < self.max_retries:
+                retry_after = None
+                try:
+                    retry_after = resp.headers.get("retry-after")
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sleep(self._compute_backoff(attempt, retry_after))
+                attempt += 1
+                continue
+
+            # 4xx 非重试 或 重试用尽：抛错（不打印 headers 含 Authorization；
+            # body 截 500 字防 PII / token 泄露）
+            body_snippet = (resp.text or "")[:500]
+            suffix = f" (after {attempt} retries)" if attempt > 0 else ""
+            raise RuntimeError(
+                f"HttpxBackend HTTP {status} from upstream{suffix}: {body_snippet}"
+            )
+
+    @classmethod
+    def _compute_backoff(cls, attempt: int, retry_after: str | None) -> float:
+        """计算下一次重试前的等待秒数。
+
+        优先：服务器 Retry-After 数值头（上限 _RETRY_AFTER_MAX 防恶意拖延）。
+        兜底：min(0.5 * 2^attempt, _BACKOFF_MAX) + uniform(0, 0.25) jitter。
+        HTTP-date 格式的 Retry-After 不解析，直接回落退避。
+        """
+        if retry_after:
+            try:
+                v = float(retry_after)
+                if v >= 0:
+                    return min(v, cls._RETRY_AFTER_MAX)
+            except (ValueError, TypeError):
+                pass
+        base = min(0.5 * (2 ** attempt), cls._BACKOFF_MAX)
+        return base + random.uniform(0, 0.25)
+
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        """单独包装便于测试 monkeypatch；< 0 视为 0 不睡。"""
+        if seconds > 0:
+            time.sleep(seconds)
 
     # ---- JSON → 内部统一表示 -------------------------------------------
 
