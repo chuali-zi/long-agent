@@ -152,9 +152,9 @@ Anthropic SDK 返回的 `resp.content` 已经是 list of blocks。我们只搬�
 
 OpenAI 协议比 Anthropic 协议复杂——tool calls 是 message 上的字段，而不是 content block。需要双向翻译。
 
-### 5.1 兼容覆盖面
+### 5.1 兼容覆盖面（代码协议层）
 
-`OpenAIBackend` 不只对 OpenAI 官方有效：
+`OpenAIBackend` 在协议层不只对 OpenAI 官方有效。下表是**代码兼容性参考**，不是生产推荐清单：
 
 | 服务 | base_url | model |
 |---|---|---|
@@ -165,6 +165,10 @@ OpenAI 协议比 Anthropic 协议复杂——tool calls 是 message 上的字段
 | vLLM / Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:14b` 等 |
 
 只要服务遵循 OpenAI Chat Completions 协议（tools / tool_calls / tool_choice），就能直接接。
+
+> **部署推广边界**：当前阶段（含龙芯部署）**只推 DeepSeek 一个真实后端**，上表其他条目仅
+> 用于说明 `OpenAIBackend` 的协议适配能力。生产文档（README.kyagent.md、DEPLOYMENT-*）
+> 不应再列举多供应商。详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目。
 
 ### 5.2 初始化（llm.py:161）
 

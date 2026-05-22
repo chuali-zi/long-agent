@@ -409,6 +409,175 @@ class OpenAIBackend(LlmBackend):
         return AssistantMessage(blocks=blocks, stop_reason=stop_reason, raw=raw)
 
 
+# ---- Httpx 实现（OpenAI 协议兼容，零 openai SDK 依赖）---------------------
+
+
+class HttpxBackend(LlmBackend):
+    """基于 httpx 的 OpenAI 协议兼容后端。
+
+    与 OpenAIBackend 接口契约完全一致（输入 system+messages+tools，输出
+    AssistantMessage），但内部不 import openai —— 直接拼 HTTP 请求 +
+    解析 JSON 响应。设计目标：在缺少 jiter Rust 编译环境的平台（典型为
+    龙芯 LoongArch Old World，pip install openai 会自动拉 jiter 触发
+    Rust 编译）上仍可对接 DeepSeek / Qwen / OpenAI 兼容服务。
+
+    依赖：仅 httpx（项目其它地方已经在用，零新增编译依赖）。
+
+    协议事实（2026-05 校对）：OpenAI Chat Completions JSON 响应字段
+    （choices[].message.{content,tool_calls}、tool_calls[].function.
+    {name,arguments}、choices[].finish_reason）与 SDK 对象属性命名严格
+    一一对应；DeepSeek / DashScope 兼容端点同样遵循此协议，无需差异化。
+    """
+
+    name = "httpx_openai"
+
+    # 复用 OpenAIBackend 的协议常量，确保两条路径行为一致
+    _STOP_MAP = OpenAIBackend._STOP_MAP
+    _PRESETS = OpenAIBackend._PRESETS
+
+    def __init__(
+        self,
+        model: str,
+        max_tokens: int,
+        temperature: float = 0.2,
+        api_key_env: str = "OPENAI_API_KEY",
+        base_url: str | None = None,
+        organization: str | None = None,
+        display_name: str | None = None,
+        timeout: float = 60.0,
+        client: Any = None,
+    ):
+        # client 参数是测试 / 高级用法的注入口；正常用 None 让我们自己造
+        if client is None:
+            try:
+                import httpx
+            except ImportError as e:
+                raise RuntimeError("缺少依赖：pip install httpx") from e
+            key = os.environ.get(api_key_env)
+            if not key:
+                raise RuntimeError(f"环境变量 {api_key_env} 未设置")
+            # 规范化 base_url：必须以 / 结尾，否则 httpx 的相对路径 join
+            # 会把 base 的最后一段（如 /v1）替换掉
+            base = (base_url or "https://api.openai.com/v1").rstrip("/") + "/"
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            }
+            if organization:
+                headers["OpenAI-Organization"] = organization
+            self._client = httpx.Client(base_url=base, headers=headers, timeout=timeout)
+        else:
+            self._client = client
+
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        if display_name:
+            self.name = f"httpx({display_name})"
+
+    @classmethod
+    def preset(
+        cls,
+        provider: str,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+        api_key_env: str | None = None,
+        base_url_override: str | None = None,
+    ) -> HttpxBackend:
+        """国产 LLM 便捷构造：provider in {'deepseek', 'qwen'}。
+
+        与 OpenAIBackend.preset 同语义，但底层不依赖 openai SDK。
+        """
+        key = provider.lower()
+        if key not in cls._PRESETS:
+            raise ValueError(
+                f"未知 OpenAI 协议兼容供应商：{provider!r}；"
+                f"已知预设：{sorted(cls._PRESETS)}"
+            )
+        p = cls._PRESETS[key]
+        return cls(
+            model=model or p["model"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            api_key_env=api_key_env or p["api_key_env"],
+            base_url=base_url_override or p["base_url"],
+            display_name=p["display"],
+        )
+
+    # ---- 公共入口 ------------------------------------------------------
+
+    def chat(self, system, messages, tools):
+        # 复用 OpenAIBackend 的格式翻译函数（@staticmethod，不依赖 SDK）
+        oai_messages = OpenAIBackend._to_openai_messages(system, messages)
+        oai_tools = OpenAIBackend._to_openai_tools(tools) if tools else None
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": oai_messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+        }
+        if oai_tools:
+            payload["tools"] = oai_tools
+            payload["tool_choice"] = "auto"
+
+        # 相对路径 + base 末尾 / → 拼成 base + "chat/completions"
+        resp = self._client.post("chat/completions", json=payload)
+        if resp.status_code >= 400:
+            # 不打印 headers（含 Authorization）；body 截 500 字防 PII / token 泄露
+            body_snippet = (resp.text or "")[:500]
+            raise RuntimeError(
+                f"HttpxBackend HTTP {resp.status_code} from upstream: {body_snippet}"
+            )
+        try:
+            data = resp.json()
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"HttpxBackend 响应非 JSON: {(resp.text or '')[:200]}"
+            ) from e
+
+        return self._from_openai_dict(data)
+
+    # ---- JSON → 内部统一表示 -------------------------------------------
+
+    @classmethod
+    def _from_openai_dict(cls, data: dict[str, Any]) -> AssistantMessage:
+        """把 OpenAI 协议 JSON 响应解析成 AssistantMessage。
+
+        与 OpenAIBackend._from_openai_choice 语义等价，但从 dict 读字段
+        而非从 SDK 对象读属性（字段名一一对应）。
+        """
+        choices = data.get("choices") or []
+        if not choices:
+            return AssistantMessage(blocks=[], stop_reason="end_turn", raw=data)
+
+        choice = choices[0]
+        msg = choice.get("message") or {}
+        blocks: list[TextBlock | ToolUseBlock] = []
+
+        text = msg.get("content")
+        if text:
+            blocks.append(TextBlock(text=text))
+
+        tool_calls = msg.get("tool_calls") or []
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name") or ""
+            args_raw = fn.get("arguments") or ""
+            try:
+                parsed = json.loads(args_raw) if args_raw else {}
+                if not isinstance(parsed, dict):
+                    parsed = {"_raw": parsed}
+            except json.JSONDecodeError:
+                parsed = {"_raw": args_raw}
+            blocks.append(ToolUseBlock(id=tc.get("id") or "", name=name, input=parsed))
+
+        finish_reason = choice.get("finish_reason") or "stop"
+        stop_reason = cls._STOP_MAP.get(finish_reason, finish_reason)
+        return AssistantMessage(blocks=blocks, stop_reason=stop_reason, raw=data)
+
+
 # ---- Mock 实现 ------------------------------------------------------------
 
 
@@ -595,6 +764,37 @@ def _construct_backend(cfg) -> LlmBackend:
             raise _MissingKeyError(env)
         return OpenAIBackend.preset(
             provider=name,
+            model=sub.model or None,
+            max_tokens=sub.max_tokens,
+            temperature=sub.temperature,
+            api_key_env=env,
+            base_url_override=sub.base_url or None,
+        )
+
+    if name in ("openai_httpx", "deepseek_httpx", "qwen_httpx"):
+        # 与 openai / deepseek / qwen 同义，但走 HttpxBackend（不依赖 openai SDK）。
+        # 用途：龙芯 LoongArch Old World 等缺 jiter Rust 编译环境的部署。
+        # 配置层复用 cfg.agent.{openai,deepseek,qwen} 三个子节，无需新增 Pydantic 字段。
+        provider = name.removesuffix("_httpx")
+        if provider == "openai":
+            sub = cfg.agent.openai
+            env = sub.api_key_env
+            if not os.environ.get(env):
+                raise _MissingKeyError(env)
+            return HttpxBackend(
+                model=sub.model,
+                max_tokens=sub.max_tokens,
+                temperature=sub.temperature,
+                api_key_env=sub.api_key_env,
+                base_url=sub.base_url or None,
+                organization=sub.organization or None,
+            )
+        sub = getattr(cfg.agent, provider)
+        env = sub.api_key_env
+        if not os.environ.get(env):
+            raise _MissingKeyError(env)
+        return HttpxBackend.preset(
+            provider=provider,
             model=sub.model or None,
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,

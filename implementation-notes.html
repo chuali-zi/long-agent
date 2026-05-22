@@ -64,7 +64,656 @@
 <ul>
   <li>P-VM-TEST：sudo / sudoers / systemd 部分无法在 Windows 本机验证；代码层 + 单元测试已就绪，需要在麒麟实机/Linux VM 上跑 <code>tests/test_executor.py::test_posix_*</code> 那两个被 skip 的用例</li>
   <li>P-PARALLEL-DORMANT：并行工具调度仍是 dormant（preexec_fn + threading 风险）— 与本轮赛题贴合度修复无关，留下次性能轮做</li>
+  <li>P-LOONGARCH-VERIFY-VM：龙芯依赖替换方案 A 已实施（2026-05-22），但仍未在真实龙芯硬件上端到端跑通；需在麒麟 V10 LoongArch64 VM 上跑 V1-V9 验证清单确认零编译</li>
 </ul>
+<p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
+</div>
+
+<h2>2026-05-22 — HttpxBackend 实现：P-OPENAI-DEPS resolved（方案 B）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-22 实施前的三 agent 独立调研结论</span>
+<div class="files">kyagent/agent/llm.py（新增 HttpxBackend 类）、tests/test_httpx_backend.py（新增 24 项测试）、configs/deepseek.yaml、DEPLOYMENT-LOONGARCH.md 第 9 步</div>
+<p><strong>触发</strong>：用户决定动手解决 P-OPENAI-DEPS，并要求三个独立 subagent 调研 jiter 现状再投票决策。三 agent 关键结论高度收敛：</p>
+<ul>
+  <li><strong>事实 1（Agent A：OpenAI SDK 版本演化）</strong>：jiter 首次出现在 openai <code>v1.40.0</code>（2024-08-06）；前一版 <code>v1.39.0</code> 完全无 jiter，依赖纯 Python（anyio / distro / httpx / pydantic / sniffio / tqdm / typing-extensions），且 <code>chat.completions.create(tools=...)</code> + <code>response.tool_calls</code> 字段在 1.39.0 完全支持。</li>
+  <li><strong>事实 2（Agent B：jiter 库可获取性）</strong>：jiter 官方 wheel 矩阵覆盖 x86_64/aarch64/i686/armv7l/ppc64le/s390x/riscv64，<strong>无任何 loongarch64 wheel</strong>。Rust 上游 <code>loongarch64-unknown-linux-gnu</code> Tier 2 要求 glibc≥2.36 + kernel≥5.19（New World）；麒麟 V10 是 glibc 2.28 + kernel 4.19（Old World）→ <strong>硬冲突</strong>。源码编译成功率 30-50%，且需自行 bootstrap Rust 1.88+。pydantic/jiter 上游无任何 loongarch issue/PR。</li>
+  <li><strong>事实 3（Agent C：社区实战）</strong>：CSDN/知乎/OSC 上龙芯+大模型文章全部走本地推理（ollama/llama.cpp），<strong>未发现任何"在 LoongArch 上完整装 openai SDK"成功案例</strong>。OpenAI 官方 issue #1616 明确 <code>close as "not planned"</code>，拒绝去掉 jiter 依赖 → 升级路线长期封死。社区有 <code>jiter-pupy</code> 纯 Python 替身但维护质量不确定。<strong>DashScope SDK</strong> 不依赖 jiter，是另一条国产化备选。</li>
+</ul>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-22 选方案 B（HttpxBackend）</span>
+<div class="files">kyagent/agent/llm.py:410+（新增 HttpxBackend 类 ~180 行 + 工厂分支）</div>
+<p><strong>选择</strong>：新增 <code>HttpxBackend</code> 类，与 <code>OpenAIBackend</code> 平级实现 <code>LlmBackend</code> 抽象接口；内部不 <code>import openai</code>，直接用 <code>httpx.Client</code> POST /chat/completions。<code>_construct_backend</code> 工厂新增三个等效分支：<code>openai_httpx</code> / <code>deepseek_httpx</code> / <code>qwen_httpx</code>，复用 cfg.agent 现有 openai/deepseek/qwen 子节，无需新增 Pydantic 字段。配置切换由 <code>KYAGENT_DEEPSEEK_TRANSPORT</code> 环境变量驱动（deepseek.yaml 内 <code>llm_backend: ${KYAGENT_DEEPSEEK_TRANSPORT:-deepseek}</code>）。</p>
+<p><strong>依据</strong>：</p>
+<ul>
+  <li>抽象层契约保障：Agent.core / cli / runtime / tests 全部通过 <code>LlmBackend.chat()</code> 接口调用，不感知具体后端。HttpxBackend 输出与 OpenAIBackend 等价的 <code>AssistantMessage</code> → 调用方零改动</li>
+  <li>复用率高：HttpxBackend 复用 <code>OpenAIBackend._to_openai_messages</code> / <code>_to_openai_tools</code>（@staticmethod，不依赖 SDK），仅响应解析改成从 dict 读字段（OpenAI 协议 JSON 字段名与 SDK 对象属性名一一对应，无翻译损失）</li>
+  <li>OpenAIBackend 类完整保留 → Windows/macOS/x86 Linux 等正常环境继续走 SDK 路径，回归零风险</li>
+  <li>vs 方案 A（pin openai==1.39.0 + --no-deps）：方案 A 修复快但 1.39 已 EOL 不维护、未来 DeepSeek 协议演化（如新工具调用字段）会逐步偏离；方案 B 自维护但 OpenAI Chat Completions 协议长期稳定，HTTP POST + JSON 解析 ~80 行核心代码长期可控</li>
+  <li>零新增依赖：httpx 已在 <code>requirements-loongarch.txt</code> 第 24 行（作为 anthropic 0.39.0 的运行时依赖手动补齐项），HttpxBackend 直接复用，<strong>不动 requirements-loongarch.txt</strong></li>
+</ul>
+<p><strong>关键实现要点</strong>：</p>
+<ul>
+  <li><strong>base_url 规范化</strong>：构造时强制以 <code>/</code> 结尾，调用用相对路径 <code>chat/completions</code>（无前导 /）；否则 httpx URL join 会把 <code>/v1</code> 等路径段替换掉</li>
+  <li><strong>错误处理</strong>：4xx/5xx 不打 headers（含 Authorization），body 截 500 字防 token 泄露；JSON 解析失败截 200 字</li>
+  <li><strong>边界场景</strong>：choices=[] 时返回空 AssistantMessage 不崩；未知 finish_reason 原样透传（OpenAI 协议未来扩展兼容性）</li>
+</ul>
+<p><strong>验证</strong>：</p>
+<ul>
+  <li>新增 <code>tests/test_httpx_backend.py</code> 共 24 项测试：base_url 规范化、payload 字段、tool_calls 解析、错误处理（HTTP 4xx/5xx 不泄露 Authorization、body 截 500 字、非 JSON 响应）、preset 工厂（deepseek/qwen）、build_backend 路由（openai_httpx/deepseek_httpx/qwen_httpx）、缺 key 降级语义与 deepseek 路径完全一致、与 OpenAIBackend._from_openai_choice 在同一 JSON 输入下产出等价 AssistantMessage（抽象层契约回归）</li>
+  <li>完整测试套件：<code>pytest tests/</code> → 213 passed, 2 skipped（POSIX-only，Windows 跳过；与本次改动无关）。<strong>OpenAIBackend / Anthropic / Mock / Agent.core / Audit / Intent / Safety / MCP 全部测试零变化通过</strong></li>
+  <li>配置层验证：未设 <code>KYAGENT_DEEPSEEK_TRANSPORT</code> 时 <code>cfg.agent.llm_backend == "deepseek"</code>；设置 <code>=deepseek_httpx</code> 时 <code>== "deepseek_httpx"</code>，环境变量切换生效</li>
+</ul>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-22 方案 B vs 方案 A vs 方案 C</span>
+<div class="files">kyagent/agent/llm.py、requirements-loongarch.txt（未改）</div>
+<table>
+<tr><th>方案</th><th>做法</th><th>工作量</th><th>风险</th><th>结论</th></tr>
+<tr><td>A</td><td>pin openai==1.39.0 + --no-deps + 手补依赖</td><td>~30 分钟（5 行 requirements + 文档）</td><td>1.39 已 EOL；未来 DeepSeek 工具调用协议演化兼容性逐步流失；同时 openai 1.40 是为 structured outputs 引入 jiter，若 DeepSeek 跟进类似特性 1.39 接不上</td><td>短期可行但长期被动</td></tr>
+<tr><td><strong>B（采纳）</strong></td><td>新增 HttpxBackend 类，自实现 OpenAI 协议 HTTP 调用</td><td>~3 小时（180 行实现 + 24 项测试 + 配置切换 + 文档）</td><td>自维护成本，但 OpenAI Chat Completions 协议长期稳定；新协议特性需自行跟进，但 kyagent 当前仅用基础 chat + tool_calls，覆盖面 100%</td><td>长期可控，抽象层零回归</td></tr>
+<tr><td>C</td><td>jiter-pupy（纯 Python 替身）+ 保留新版 openai</td><td>~1 小时</td><td>第三方维护、API 等价性未经充分验证；openai 内部若用了 jiter 非公开 API 会运行时炸；维护方仅一人</td><td>不推荐：风险换不到对应收益</td></tr>
+</table>
+<p><strong>选 B 的关键判据</strong>：三 agent 调研中 Agent C 指出 OpenAI 官方 issue #1616 已 close as "not planned"，意味着 openai SDK 未来版本都会跟 jiter 缠斗；方案 A 是一次性绕开，方案 B 是永久绕开。结合 kyagent 的 LlmBackend 抽象层做得已经足够干净（Agent.core 只调 .chat() 接口，全仓库 <code>import openai</code> 只有 2 行），新增一个平级 backend 类型的边际成本极低（180 行 + 24 项测试），收益是<strong>未来任何 LLM SDK 在国产架构上的安装问题都有了一套模板</strong>。</p>
+</div>
+
+<h2>2026-05-22 — codex review：龙芯部署 P1 audit 写权限 + P2 openai 依赖</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-22 codex 二次审阅 DEPLOYMENT-LOONGARCH.md</span>
+<div class="files">DEPLOYMENT-LOONGARCH.md、configs/*.yaml、requirements-loongarch.txt、kyagent/audit/store.py、kyagent/config.py</div>
+<p><strong>触发</strong>：codex 审阅龙芯部署文档后提出两项阻断性问题：</p>
+<ol>
+  <li><strong>[P1] audit 路径权限冲突</strong>：第 6.1 步 chown <code>/opt/kyagent</code> 给部署用户，第 8 步切到 <code>kyagent</code> 受限账户运行；但 audit 默认相对路径 <code>./var/audit.db</code> 经 <code>cfg.base_dir = cfg_path.parent.parent</code>（config.py:182）解析后落到 <code>/opt/kyagent/var/</code>，<code>AuditStore.__init__</code>（store.py:46-48）尝试 <code>mkdir(parents=True)</code> 即被拒；setup-sudoers.sh 创建的可写目录 <code>/var/lib/kyagent</code>、<code>/var/log/kyagent</code> 配置里未使用，但 systemd <code>ReadWritePaths</code> 段又正确地写了这两个 → <strong>文档/配置自相矛盾</strong>。</li>
+  <li><strong>[P2] openai SDK 缺失</strong>：第 9 步推荐 DeepSeek/Qwen（走 OpenAIBackend），但 <code>requirements-loongarch.txt</code> 和 6.4 节安装命令都没装 <code>openai</code>；直接 <code>pip install openai>=1.30</code> 会拉回 <code>jiter</code>（Rust），与方案 A 零编译目标冲突。</li>
+</ol>
+<p><strong>用户决策</strong>：先修 P1，P2 暂缓（用户自学依赖链后决定 SDK pin 还是自实现 backend）。</p>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-22 P1 修复：audit 路径用 ${KYAGENT_AUDIT_*} 覆盖</span>
+<div class="files">configs/{default,deepseek,qwen,openai}.yaml — audit 节；DEPLOYMENT-LOONGARCH.md — 第 8 步（mock 验证）、第 9 步（DeepSeek 验证）、方式 A <code>/etc/kyagent/env</code> 段</div>
+<p><strong>选择</strong>：4 个 yaml 的 audit 路径改为 <code>${KYAGENT_AUDIT_DB:-./var/audit.db}</code> / <code>${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}</code>。部署文档相应位置加 <code>export</code> + <code>--preserve-env</code> 穿透；方式 A 的 env 文件追加两行；方式 B systemd 因 <code>EnvironmentFile=/etc/kyagent/env</code> 自动包含，无需改动。</p>
+<p><strong>依据</strong>：</p>
+<ul>
+  <li>kyagent/config.py:13-27 的 <code>_expand_env</code> 已支持 <code>${VAR:-default}</code> 正则展开（与 <code>llm_backend</code>、<code>deepseek.model</code> 等现有用法同源），<strong>零代码改动</strong></li>
+  <li>默认相对路径不变 → Windows / macOS / CI / 本地开发完全无感（向后兼容）</li>
+  <li>覆盖路径 <code>/var/lib/kyagent/audit.db</code>、<code>/var/log/kyagent/audit.jsonl</code> 与 setup-sudoers.sh 创建的目录、systemd <code>ReadWritePaths=/var/lib/kyagent /var/log/kyagent</code> 三处对齐</li>
+  <li><code>cfg.resolve()</code>（config.py:150-154）对绝对路径直接返回，不拼接 base_dir → 覆盖路径不会被 yaml 所在目录影响</li>
+</ul>
+<p><strong>验证</strong>：</p>
+<ul>
+  <li>手测：未设置 env 时 4 个 yaml 都得 <code>./var/audit.db</code>；设置 <code>KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db</code> 后 4 个 yaml 都得 <code>/var/lib/kyagent/audit.db</code>。两种场景均符合预期。</li>
+  <li>回归：<code>pytest tests/test_audit.py tests/test_integration.py tests/test_agent_parallel.py tests/test_mcp_protocol.py</code> → 28 passed</li>
+</ul>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-22 P1 修复方案对比（3 选 1）</span>
+<div class="files">configs/*.yaml、DEPLOYMENT-LOONGARCH.md</div>
+<table>
+<tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th></tr>
+<tr><td><strong>A（采纳）</strong></td><td>4 个 yaml 用 <code>${KYAGENT_AUDIT_DB:-./var/audit.db}</code>，部署文档加 env 覆盖</td><td>向后兼容；与现有 env 替换风格一致；与 systemd <code>ReadWritePaths</code> 对齐；零代码改动</td><td>用户在 env 文件多记 2 个变量</td></tr>
+<tr><td>B</td><td>把 deepseek/qwen/openai 三个 yaml 的 audit 路径硬编码为 <code>/var/lib/kyagent/audit.db</code></td><td>用户零配置</td><td>硬编码 Linux 路径，Windows/Mac 跑这些 yaml 即崩；default.yaml 不改的话第 8 步 mock 验证仍挂；与现有 env 替换风格不一致</td></tr>
+<tr><td>C</td><td>不改 yaml，部署文档加 <code>chown -R kyagent /opt/kyagent/var</code></td><td>改动最小</td><td>与 systemd <code>ReadWritePaths=/var/lib/kyagent /var/log/kyagent</code> 设计矛盾（两套写入路径）；用户漏一步即挂；目录需先存在；audit.db / audit.jsonl 散落项目目录不方便外部 SIEM 抽取</td></tr>
+</table>
+<p><strong>选 A 的核心理由</strong>：现有代码已有 <code>${VAR:-default}</code> 解析器；默认行为零变更；与文档其它环境变量风格统一；与 systemd 的 ReadWritePaths 在路径上一致（生产部署 audit 文件统一进 <code>/var/lib</code>、<code>/var/log</code> 符合 FHS）。</p>
+</div>
+
+<div class="entry resolved" id="P-OPENAI-DEPS">
+<span class="tag R">已解决</span><span class="ts">2026-05-22 P2 暂缓 → 当日内解决（见上方 HttpxBackend 实现条目）</span>
+<div class="files">requirements-loongarch.txt、DEPLOYMENT-LOONGARCH.md 第 6.4 / 第 9 步、kyagent/agent/llm.py（OpenAIBackend）</div>
+<p><strong>状态</strong>：<strong>resolved（2026-05-22）</strong> — 选定方案 B（自实现 HttpxBackend），详见上方 "2026-05-22 — HttpxBackend 实现" 区块。<br>下文保留原 pending 阶段的问题陈述与方案对比，作为决策上下文留档。</p>
+<p><strong>问题</strong>：第 9 步推荐 DeepSeek/Qwen，但 <code>requirements-loongarch.txt</code> 没装 <code>openai</code>；当前龙芯部署只有 anthropic 后端可用，DeepSeek/Qwen 文档承诺无法兑现。直接 <code>pip install openai>=1.30</code> 会拉 <code>jiter</code>（Rust），与方案 A 零编译目标冲突。</p>
+<p><strong>候选方案</strong>：</p>
+<ul>
+  <li><strong>方案 A（最小改动）</strong>：<code>requirements-loongarch.txt</code> 追加 <code>openai==1.12.0</code> 或更早未引入 jiter 的版本，<code>--no-deps</code> 装并手动补齐运行时依赖。需先验证：① 1.12 的 <code>Requires-Dist</code> 是否还有 Rust 依赖；② DeepSeek/Qwen 的工具调用响应字段在 1.12 SDK 下是否仍解析正确（关注 <code>tool_calls</code> shape 在 1.x 中段是否变过）。</li>
+  <li><strong>方案 B（彻底）</strong>：在 <code>kyagent/agent/llm.py</code> 新增 <code>HttpxBackend</code>，对 DeepSeek/Qwen 的 OpenAI 兼容协议直接 httpx POST，绕开 SDK。代码量约 ~100 行，零编译依赖。配合配置层加 <code>llm_backend: openai_compat</code>。</li>
+</ul>
+<p><strong>影响（暂缓期间）</strong>：龙芯路径上 anthropic 后端、mock 后端可正常运转（A2 闭环演示不受影响）。但 DEPLOYMENT-LOONGARCH 第 9 步「国产模型推荐 DeepSeek 或 Qwen」目前无法跑通。</p>
+<p><strong>建议</strong>：在 P2 决定之前，第 9 步段首应加 warning 提示「openai SDK 在方案 A 下尚未打包」；用户未明确要求时本次提交不擅自加。</p>
+</div>
+
+<h2>2026-05-22 — 龙芯（LoongArch64 Old World）依赖替换方案设计</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-22 三子 agent 协同侦察</span>
+<div class="files">DEPLOYMENT-LOONGARCH.md、pyproject.toml、requirements.txt、kyagent/config.py、kyagent/agent/llm.py、kyagent/safety/{patterns,intent}.py</div>
+<p><strong>触发</strong>：用户要求审查 DEPLOYMENT-LOONGARCH.md 中提到的 3 个「需要现场编译，不能开箱即用」依赖，确认它们在仓库里的作用、是否可替代、若可替代则设计替换方案（不执行，待审核）。</p>
+<p><strong>三子 agent 协同结论</strong>：</p>
+<ul>
+  <li><strong>Part 1 仓库侦察</strong>（Explore agent）：
+    <ul>
+      <li><code>pydantic</code> 仅在 <code>kyagent/config.py:10</code> 一处 import；11 个 <code>BaseModel</code> 子类、9 处 <code>Field(default_factory=...)</code>、唯一 v2 专用 API 是 L180 的 <code>Config.model_validate(raw)</code>；<strong>未用</strong> validator / model_config / discriminator / JSON Schema / .dict() / TypeAdapter / RootModel</li>
+      <li><code>anthropic</code> 仅在 <code>kyagent/agent/llm.py:94-143</code> <code>AnthropicBackend</code>；调用单一入口 <code>messages.create(...)</code> 同步非流式 + prompt cache + tools；该后端可被 mock/openai/deepseek/qwen 任一替代</li>
+      <li><code>PyYAML</code> 在 3 个文件，全部仅用 <code>yaml.safe_load</code>，无 dump / 无自定义 Loader / 无 tag/anchor</li>
+    </ul>
+  </li>
+  <li><strong>Part 2 架构适配</strong>（general-purpose agent，WebFetch PyPI 元数据验证）：
+    <ul>
+      <li>pydantic 1.10.26 PyPI 同时发布 <code>py3-none-any</code> 纯 Python wheel + cython 编译版；loongarch64 自动 fallback 到纯 Python</li>
+      <li>anthropic 0.39.0 主包 <code>py3-none-any</code>；jiter 仅在 <code>lib/streaming/*</code> 内函数体内 lazy import，非流式路径不触发；<code>tokenizers</code> Rust 依赖在 0.38→0.39 之间被砍掉 → 0.39 是「最少二进制」甜点版本</li>
+      <li>PyYAML sdist 在缺 libyaml-devel 时 setup.py 自动跳过 C 扩展，纯 Python <code>SafeLoader</code> 是 <code>safe_load</code> 默认路径</li>
+      <li>关键发现：anthropic 0.26 之前依赖 tokenizers（Rust），所以「降到老版避开 jiter」是陷阱；0.39 才是甜点</li>
+    </ul>
+  </li>
+  <li><strong>Part 3 方案设计</strong>（general-purpose agent，综合 Part 1+2 产出 diff 级方案）：见下方决策条目</li>
+</ul>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-22 龙芯依赖替换方案 A（推荐）</span>
+<div class="files">pyproject.toml L15-21、requirements.txt L1-5、kyagent/config.py:180、DEPLOYMENT-LOONGARCH.md 多处、新增 requirements-loongarch.txt</div>
+<p><strong>核心策略</strong>：最小改动 / 不重写。3 个依赖各采取不同的「绕开编译」方式：</p>
+<table>
+<tr><th>依赖</th><th>原方案（需编译）</th><th>新方案（零编译）</th><th>代码改动</th></tr>
+<tr><td>pydantic</td><td>v2.5（pydantic-core Rust）</td><td>降到 v1.10.13+（<code>py3-none-any</code> wheel）</td><td><code>config.py:180</code> 的 <code>model_validate</code> → <code>parse_obj</code>（1 行）</td></tr>
+<tr><td>anthropic</td><td>0.39+（带 jiter Rust 解析器）</td><td>锁 0.39.0 + <code>pip install --no-deps</code>，手动补齐 anyio/distro/httpx/sniffio/typing-extensions（全 <code>py3-none-any</code>）</td><td>0 行</td></tr>
+<tr><td>PyYAML</td><td>libyaml-devel + cython</td><td><code>pip install --no-binary PyYAML</code>，sdist 自动只装纯 Python 部分</td><td>0 行</td></tr>
+</table>
+<p><strong>依据</strong>：</p>
+<ol>
+  <li>kyagent 用的 pydantic 子集（BaseModel + Field + 实例化 + 一次 model_validate）在 v1 100% 等价</li>
+  <li>kyagent 用的 anthropic 子集（messages.create 非流式）在源码层完全不进入 jiter 的 lazy import 路径</li>
+  <li>kyagent 用的 yaml 子集（safe_load）默认就走纯 Python <code>SafeLoader</code>，C 加速本来就只是可选加速器</li>
+  <li>anthropic 0.39 的 <code>Requires-Dist: pydantic&lt;3,&gt;=1.9.0</code> 同时兼容 v1/v2 — 三者不会互相打架</li>
+</ol>
+<p><strong>验证清单</strong>（V1-V9，Windows 本地可跑无需龙芯硬件）：见用户对话中的方案文档第 4 节。</p>
+<p><strong>状态</strong>：方案已产出，<strong>未执行任何修改</strong>，等用户审核（详见未决问题 P-LOONGARCH-PLAN 等 6 项）。</p>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-22 方案 A vs 方案 B vs 重写架构</span>
+<div class="files">kyagent/config.py（影响面）</div>
+<p><strong>方案 A（推荐）</strong>：降 pydantic 到 v1.10。改动 = 1 行 Python + pyproject/requirements 版本约束。优：可逆、低风险、保持 BaseModel API。缺：v1 已进入维护模式（仅安全更新），未来若需 v2 新特性需重新规划。</p>
+<p><strong>方案 B</strong>：删 pydantic，11 个 BaseModel → @dataclass + ~40 行 _from_dict 递归胶水。优：彻底零外部依赖、纯标准库。缺：失去字段类型校验（kyagent 现状本就没用 validator，但默认强转行为改变可能引入隐 bug）；改动面 ~50 行。</p>
+<p><strong>方案 C（已弃）</strong>：保留 pydantic v2，让用户在龙芯上现场编 pydantic-core。被弃因 DEPLOYMENT-LOONGARCH.md 已明确该路径耗时 10-30 分钟、对 Rust 版本敏感、且 jiter 同样需要 Rust。</p>
+<p><strong>最终选择</strong>：A 作为默认推荐；B 作为「如果用户坚持现代 API」的备选；C 不考虑。</p>
+</div>
+
+<div class="entry deviation">
+<span class="tag B">偏差</span><span class="ts">2026-05-22 anthropic 版本固定 vs 范围</span>
+<div class="files">pyproject.toml、requirements.txt、requirements-loongarch.txt</div>
+<p><strong>原 spec</strong>：<code>anthropic&gt;=0.39</code>（允许任意新版本）</p>
+<p><strong>实际方案</strong>：<code>anthropic==0.39.0</code>（精确锁死）</p>
+<p><strong>偏离原因</strong>：<code>--no-deps</code> 绕过 jiter 的前提是「jiter 仅出现在 streaming 路径」。这个不变量在 0.39.0 已通过源码核实；但 anthropic 后续小版本若把 jiter 用到非流式路径（虽不可能但不能 100% 排除），<code>--no-deps</code> 会在 <code>import anthropic</code> 时直接爆 ImportError。锁版本是保险措施。</p>
+<p><strong>负面影响</strong>：失去自动获取上游 bug fix / 安全补丁的能力。缓解：在 DEPLOYMENT-LOONGARCH.md 加注「升级 anthropic 前先在测试环境跑 V9 grep 验证」。</p>
+</div>
+
+<div class="entry resolved" id="P-LOONGARCH-PLAN">
+<span class="tag R">已解决</span><span class="ts">2026-05-22 用户拍板</span>
+<p><strong>P-LOONGARCH-PLAN</strong>：用户选**方案 A**（降 pydantic v1）。已执行。</p>
+</div>
+
+<div class="entry resolved" id="P-LOONGARCH-ANTHROPIC-PIN">
+<span class="tag R">已解决</span><span class="ts">2026-05-22</span>
+<p><strong>P-LOONGARCH-ANTHROPIC-PIN</strong>：采用**锁死 <code>==0.39.0</code>**。已写入 <code>pyproject.toml</code>、<code>requirements.txt</code>、<code>requirements-loongarch.txt</code>。</p>
+</div>
+
+<div class="entry resolved" id="P-LOONGARCH-REQS-FILE">
+<span class="tag R">已解决</span><span class="ts">2026-05-22</span>
+<p><strong>P-LOONGARCH-REQS-FILE</strong>：新增 <code>requirements-loongarch.txt</code> 进仓库。包含 anthropic 0.39.0 的 5 个手动补齐运行时依赖。</p>
+</div>
+
+<div class="entry resolved" id="P-LOONGARCH-DEFENSIVE-NOTE">
+<span class="tag R">已解决</span><span class="ts">2026-05-22</span>
+<p><strong>P-LOONGARCH-DEFENSIVE-NOTE</strong>：已在 <code>kyagent/agent/llm.py</code> <code>AnthropicBackend</code> 类定义上方加 3 行注释，明确禁止改用 <code>messages.stream()</code> / <code>anthropic.lib.streaming.*</code>。V9 grep 验证仅命中该注释，无实际流式调用。</p>
+</div>
+
+<div class="entry resolved" id="P-LOONGARCH-MIRROR">
+<span class="tag R">已解决</span><span class="ts">2026-05-22</span>
+<p><strong>P-LOONGARCH-MIRROR</strong>：DEPLOYMENT-LOONGARCH.md 第 5 节已标注"2026-05-22 起非必需"，建议直接走 PyPI 官方源。mirror 段保留作为可选路径。</p>
+</div>
+
+<div class="entry resolved" id="P-LOONGARCH-RUST-DOC">
+<span class="tag R">已解决</span><span class="ts">2026-05-22</span>
+<p><strong>P-LOONGARCH-RUST-DOC</strong>：DEPLOYMENT-LOONGARCH.md 第 3 节标题改为「装 Rust 工具链 — ⚠️ 已弃用（2026-05-22 起）」，加 blockquote 横幅说明已不再需要，原内容保留作历史参考。</p>
+</div>
+
+<div class="entry resolved" id="LOONGARCH-EXEC">
+<span class="tag R">已解决</span><span class="ts">2026-05-22 方案 A 执行完成</span>
+<div class="files">pyproject.toml、requirements.txt、kyagent/config.py、kyagent/agent/llm.py、DEPLOYMENT-LOONGARCH.md、requirements-loongarch.txt（新增）</div>
+<p><strong>实施摘要</strong>：</p>
+<ul>
+  <li><strong>pyproject.toml</strong>：<code>pydantic&gt;=2.5</code> → <code>&gt;=1.10.13,&lt;2</code>；<code>anthropic&gt;=0.39</code> → <code>==0.39.0</code>；PyYAML 加上界 <code>&lt;7</code>；mcp 可选项加注释提醒不要在龙芯装</li>
+  <li><strong>requirements.txt</strong>：同步上述约束</li>
+  <li><strong>kyagent/config.py:180</strong>：<code>Config.model_validate(raw)</code> → <code>Config.parse_obj(raw)</code>（1 行）</li>
+  <li><strong>kyagent/agent/llm.py</strong>：<code>AnthropicBackend</code> 上方加 3 行禁流式注释</li>
+  <li><strong>requirements-loongarch.txt</strong>：新建，含 5 个 anthropic 手动补齐运行时依赖（anyio/distro/httpx/sniffio/typing-extensions）</li>
+  <li><strong>DEPLOYMENT-LOONGARCH.md</strong>：第 0.3 节表重写为「零编译方案」；第 3 节加「已弃用」横幅；第 4 节 libyaml-devel 移至可选；第 5 节 mirror 标注非必需；第 6.4 节 pip 命令重写为 7 步分阶段安装 + 自检；第 10 节风险表 #2 标已规避</li>
+</ul>
+<p><strong>本地验证结果</strong>（Windows，pydantic 2.12.5）：</p>
+<ul>
+  <li>V7（config 加载）：✅ <code>parse_obj</code> 在 v2 上仍以兼容别名工作，Config 实例化成功</li>
+  <li>V8（pytest 全套）：✅ <strong>189 passed, 2 skipped</strong>（skipped 是 POSIX 专属用例，Windows 本就 skip）</li>
+  <li>V9（grep 流式 API）：✅ 全仓仅命中新加的防御注释行，无实际流式调用</li>
+  <li>V1-V6（pip download 网络验证）：⚠️ 未在本轮执行（无龙芯硬件，且 V8 通过已证明 parse_obj 兼容）；建议在麒麟 VM 拿到机器后跑</li>
+</ul>
+<p><strong>遗留风险</strong>：</p>
+<ul>
+  <li>pydantic v1 vs v2 默认类型强转行为差异：v1 默认会把 <code>123</code> 强转为 <code>"123"</code>。kyagent 配置字段都是人手写 YAML 来源，影响面小，但若用户在 default.yaml 写出歧义类型（如 port 写成 <code>"80"</code> 而非 <code>80</code>），v1 下不会报错；v2 下会。建议在麒麟 VM 上首次部署时跑 <code>kyagent ask "ping"</code> 看配置加载是否产生 warning</li>
+  <li>anthropic 0.39.0 锁死后失去补丁更新通道。如未来必须升级，需重跑 V9 grep 验证流式路径假设仍成立</li>
+  <li>mcp 可选依赖在龙芯上不可装（依赖 pydantic v2 → pydantic-core Rust），已在 requirements.txt 注释提醒</li>
+</ul>
+<p><strong>新未决</strong>：见上方 nav 的 P-LOONGARCH-VERIFY-VM（需真机 V1-V9 端到端验证）</p>
+</div>
+
+<h2>2026-05-21 — 防御侧加固技术调研（A2 观测 + 隔离）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-21 WebSearch/WebFetch 调研</span>
+<div class="files">无代码改动；产出为竞赛级公开技术综述，向用户回返文字结论</div>
+<p><strong>背景</strong>：用户要求做一次「合法防御原语」综述（不写攻击代码、不写规避检测），
+范围 = （A）实时 OS 可观测性升级（替/补 lsof/netstat/ps）+（B）每次工具调用级别的
+合法沙箱（用户已 confirm 通过的命令仍要受限）+（C）auditd 防御性交叉对照 +（D）
+麒麟 KySec / V10 SP3 公开能力盘点 +（E）2025-2026 参考实现（Anthropic Claude Code
+sandbox 11 月博客 / OSS LLM ops agent）。</p>
+<p><strong>关键事实落锚</strong>：</p>
+<ul>
+  <li>Kylin V10 SP3 内核 = <code>4.19.90</code>（Lance v2207 / Halberd v2401），已有
+      bpftool 包 + BTF + CO-RE 多次后向移植（KYBA-202306-1030 / 202307-1018 /
+      202410-1057）。CO-RE 官方最低门槛 4.18，所以 SP3 4.19.90 <strong>可以</strong>
+      跑 libbpf-CO-RE 程序，但 Landlock 需要 ≥5.13——SP3 的 4.19.90 <strong>没有</strong>
+      Landlock，这条要么落到 openKylin/SP4，要么先用 systemd-run 沙箱替代。</li>
+  <li>BCC Python 绑定（python3-bpfcc）已被社区共识标记 legacy，新项目走 libbpf
+      + CO-RE。但 BCC apt 包仍在 Ubuntu/Debian 主仓，作为 demo 摆设最快。</li>
+  <li>Anthropic 2025-11 博客 <em>"Beyond permission prompts"</em>：Claude Code
+      新沙箱用 <strong>Linux bubblewrap + macOS seatbelt</strong>，filesystem +
+      network 双边界；内部统计 permission prompt 减少 84%。CVE-2025-66479 是该
+      沙箱的 deny-all 误判，2025-11-26 修复。即 bwrap 是工业级首选。</li>
+  <li>KySec 是 Kylin 默认 MAC（替代 SELinux/AppArmor），三种模式
+      enforcing/warning/softmode；命令 <code>setstatus</code> /
+      <code>getstatus</code> / <code>kysec_set</code>。生态加固我们能贴上去
+      （softmode 下做审计型交叉对照而不冲突）。</li>
+</ul>
+<p><strong>Top-5 推荐落地点（给执行器/感知层）</strong>：</p>
+<ol>
+  <li><code>kyagent/executor/sandbox.py</code> 增加 <code>BwrapJail</code> /
+      <code>SystemdRunJail</code> 两个后端（plug-in 形态）</li>
+  <li>新增 <code>kyagent/perception/proc_reader.py</code>：用 psutil + /proc 直读，
+      <code>process</code> / <code>network</code> 工具 fast-path 走它，回退原 subprocess</li>
+  <li>新增 <code>kyagent/perception/audit_xref.py</code>：auparse 读 ausearch --raw，
+      与 audit/store 的 trace 做篡改证据对照</li>
+  <li><code>kyagent/safety/</code> 加 <code>seccomp_profiles.py</code>：
+      read_only_ops / network_probe / package_query 三套 allowlist</li>
+  <li><code>kyagent/perception/ebpf_probe.py</code>（可选 demo 档）：bpftrace
+      一行 oneliner 包装，演示用，<strong>不</strong>列为强依赖</li>
+</ol>
+<p><strong>未列入</strong>：Tetragon / Pixie / Parca / Pyroscope ——
+都是 K8s/集群尺度，单机 ops agent demo 量级不匹配，调研结果归档不落地。</p>
+</div>
+
+<h2>2026-05-21 — A2 优化方案三向调研（MCP 协议 / 安全护栏 / 审计可观测）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-21 WebSearch/WebFetch — MCP 协议 2025-2026 新特性</span>
+<div class="files">无代码改动；调研产出，候选落地点在 <code>kyagent/mcp/server.py</code> 与新文件</div>
+<p><strong>背景</strong>：当前 <code>PROTOCOL_VERSION="2024-11-05"</code>（server.py:72），
+仅实现 tools/* 三个方法。MCP 2025 共发了三个版本：<strong>2025-03-26</strong>（Streamable HTTP、
+OAuth 2.1 雏形）、<strong>2025-06-18</strong>（Elicitation、structured tool output、Resources 订阅）、
+<strong>2025-11-25</strong>（Tasks 实验、URL-mode Elicitation、Sampling-with-tools）。</p>
+<p><strong>Top-5 推荐落地（按 影响÷成本 排序）</strong>：</p>
+<ol>
+  <li><strong>Elicitation</strong> — <code>elicitation/create</code>。服务器发起结构化询问，
+      客户端 accept/decline/cancel。<u>直接修补</u> <code>server.py:204</code> "MCP 通道无法 CONFIRM 只能 deny" 的天坑。
+      支持客户端：VS Code Copilot YES / Cursor YES / Claude Code 2.1.76+ YES / Claude Desktop NO。
+      工作量 M。落点：新建 <code>kyagent/mcp/elicitation.py</code> + 改 <code>server.py</code> + 联动 <code>confirm_adapter.py</code>。
+      <a href="https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation">spec 2025-11-25</a></li>
+  <li><strong>Progress notifications</strong> — <code>notifications/progress</code> + <code>_meta.progressToken</code>。
+      长操作（journalctl 1GB 扫描、pkg install）流式回报。无需 capability 声明。工作量 S。落点：
+      <code>server.py</code> 提取 progressToken，<code>tools/logs.py</code> 与 <code>tools/package.py</code> 推进度。
+      <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress">spec</a></li>
+  <li><strong>Resources + Subscriptions</strong> — 把 <code>proc://loadavg</code> / <code>journal://tail</code> /
+      <code>net://listeners</code> 当订阅式资源暴露，比强制 tool 调用更自然。工作量 M。落点：
+      新建 <code>kyagent/mcp/resources.py</code>，capability 加 <code>{"resources":{"subscribe":true,"listChanged":true}}</code>。
+      <a href="https://modelcontextprotocol.io/specification/2025-06-18/server/resources">spec</a></li>
+  <li><strong>Prompts 作为安全模板</strong> — 暴露 <code>/safe-rollback</code> / <code>/incident-triage</code> /
+      <code>/cve-patch-dry-run</code>，全客户端支持，便宜的「原创性 + 安全」叙事。工作量 S。
+      落点：新建 <code>kyagent/mcp/prompts.py</code>。
+      <a href="https://modelcontextprotocol.io/specification/2025-06-18/server/prompts">spec</a></li>
+  <li><strong>真 Cancellation + 协议版本升 2025-06-18</strong> — <code>notifications/cancelled</code> 现在 no-op（server.py:135），
+      接通到 <code>executor/proxy.py</code> 杀进程组；同步声明 <code>tools.listChanged</code> /
+      <code>prompts</code> / <code>resources</code> / <code>elicitation</code> 能力。工作量 S。
+      <a href="https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation">spec</a></li>
+</ol>
+<p><strong>主动剔除</strong>：Sampling（Palo Alto Unit 42 指认其为 prompt-injection 攻击面，本地 agent 不需要）；
+Streamable HTTP / OAuth 2.1（spec 明确 stdio 部署应从 env 读凭证、不走 OAuth）；
+Tasks（实验阶段，ROI 不如 #1~#5）。</p>
+</div>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-21 WebSearch — LLM Agent 安全护栏 2024-2026</span>
+<div class="files">调研产出；候选落地点 <code>kyagent/safety/</code> 与 <code>kyagent/agent/</code></div>
+<p><strong>关键判定</strong>：英文向开源护栏模型（Llama Guard 4 / Prompt Guard 2 / ShieldGemma 2 / Granite Guardian）
+中文支持普遍羸弱，对赛题（中文运维口令）<u>实际不能用</u>。需要本地中文原生 SOTA。</p>
+<p><strong>Top-5 推荐落地（按 影响÷成本，年份标注便于"新颖性"叙事）</strong>：</p>
+<ol>
+  <li><strong>Qwen3Guard-Gen-0.6B</strong>（Alibaba 2025-09, Apache-2.0, arXiv 2510.14276）—
+      唯一中文原生 SOTA 护栏，返回 tri-class <code>safe/controversial/unsafe</code> 正好映射 LOW/MEDIUM/HIGH。
+      0.6B FP16 约 600MB，CPU 可跑。落点：新建 <code>kyagent/safety/qwen_guard.py</code>，在 <code>core.py</code> 计划前调用、
+      在 <code>intent.py</code> 边界用例升级。+1 dep（transformers/torch，可能已有）。
+      <a href="https://huggingface.co/Qwen/Qwen3Guard-Gen-0.6B">HF</a></li>
+  <li><strong>Landlock 自我限制沙箱</strong>（kernel ≥5.13，&lt;1ms syscall）—
+      <strong>但 Kylin V10 SP3 内核 4.19.90 不支持</strong>。本条降级为 <em>openKylin / SP4 备份方案</em>，
+      SP3 上用 systemd-run + bwrap 替代（已在 4 号 agent 报告里覆盖）。</li>
+  <li><strong>Plan-then-Execute + Critic 中段</strong>（arXiv 2509.08646, 2025-09 + LlamaFirewall arXiv 2505.03574, 2025-05）—
+      planner 出计划后冻结，进 critic 阶段（轻 path 用 Qwen3Guard，重 path 用 Qwen3-1.7B 提示词审）。
+      可在审计链里实打实看到「审查」事件，<u>对抗 indirect prompt injection 的控制流完整性</u>。
+      工作量 M（~250 LOC）。落点：新建 <code>kyagent/agent/critic.py</code> + <code>kyagent/safety/constitution.md</code>（10 条中文宪法）。
+      <a href="https://arxiv.org/abs/2509.08646">arXiv</a> · <a href="https://arxiv.org/abs/2505.03574">LlamaFirewall</a></li>
+  <li><strong>Spotlighting + StruQ</strong>（Microsoft arXiv 2403.14720 + USENIX'25 arXiv 2402.06363）—
+      工具输出回灌 LLM 前打"数据标记"+ 结构化分区，<u>indirect prompt injection 攻击成功率降到&lt;2%</u>。
+      80 LOC、零依赖。落点：新建 <code>kyagent/safety/spotlight.py</code>，所有读盘/读网工具走包装。
+      <a href="https://arxiv.org/html/2403.14720v1">spotlight</a></li>
+  <li><strong>事务化 shadow 执行</strong>（arXiv 2512.12806, 2025-12）—
+      高危但 confirm 通过的 mutating 命令先在 overlayfs 上层执行，diff 出"实际会改的文件"再二审是否 commit。
+      论文称 100% 高危拦截 / 100% 回滚 / ~14.5%（1.8s）开销。<strong>这是 demo-杀手锏功能</strong>，
+      没有别队会有。工作量 L（~400 LOC + 加 sudoers 行）。落点：新建 <code>kyagent/executor/shadow.py</code>。
+      <a href="https://arxiv.org/pdf/2512.12806">paper</a></li>
+</ol>
+<p><strong>新颖性叙事一句话</strong>：「2024-Spotlighting + 2025-Qwen3Guard + 2025-LlamaFirewall +
+2025-Plan-then-Execute CFI + 2025-12-事务沙箱，5 篇独立发表的 2024-2025 防御技术叠加，
+跑在 2021 Landlock / bwrap 内核沙箱上」——5 项新颖性引用一次性给到。</p>
+</div>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-21 WebSearch — AI Agent 审计与可观测 2025-2026</span>
+<div class="files">调研产出；候选落地点 <code>kyagent/audit/</code> 与 <code>kyagent/cli.py</code></div>
+<p><strong>合规角度</strong>：GB/T 22239-2019（等保 2.0）与 ISO 27001:2022 Annex A.8.15 都明确要求
+日志的「防篡改可验证」。这是中国政府赛题判分时<strong>会看的关键词</strong>。</p>
+<p><strong>Top-5 推荐落地</strong>：</p>
+<ol>
+  <li><strong>HMAC-SHA256 哈希链</strong> 加在 <code>events</code> 表 — 每条 entry_hash =
+      HMAC(key, canonical_json(payload) ‖ prev_hash)，CLI 加 <code>kyagent audit verify &lt;trace-id&gt;</code>。
+      80 LOC，纯本地，对 SHA-256 约 500ns 每条，开销忽略。
+      <strong>判分关键词：「可验证不可篡改」</strong>。
+      落点：<code>kyagent/audit/store.py</code> + 新建 <code>kyagent/audit/integrity.py</code> + <code>cli.py</code> 加 verify 子命令。
+      <a href="https://tracehold.ai/blog/immutable-audit-log-hmac-hash-chain/">HMAC 链指南</a></li>
+  <li><strong>OpenTelemetry GenAI 语义约定</strong>（2025 稳定）+ W3C Trace Context 跨 Agent→MCP 传播 —
+      把每个 EventKind 包成 OTel span，<code>gen_ai.provider.name</code> / <code>gen_ai.request.model</code> /
+      <code>gen_ai.usage.input_tokens</code> / <code>gen_ai.agent.name</code> / <code>gen_ai.conversation.id=trace_id</code>。
+      MCP 跨进程通过 <code>params._meta.traceparent</code> 传（不是 HTTP header）。Jaeger/Tempo/Phoenix/Langfuse 都能直接收。
+      250 LOC，1-2 个 OTel pip 包。
+      <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/">MCP semconv</a></li>
+  <li><strong>Anthropic thinking 块独立 EventKind</strong> — 当前 <code>LLM_THOUGHT</code> 把 thinking 截成 4KB 文本糊住，
+      升级为新 <code>EventKind.LLM_THINKING</code> 原样存 thinking / redacted_thinking（含 signature/data），
+      加 <code>--redact-thinking</code> 选项做隐私可控。60 LOC。落点：
+      <code>kyagent/audit/trace.py</code> + <code>kyagent/agent/core.py</code>。
+      <a href="https://platform.claude.com/docs/en/build-with-claude/extended-thinking">Anthropic docs</a></li>
+  <li><strong>journald 结构化下沉</strong>（Kylin 原生加分）—
+      <code>sd_journal_send()</code> 第三路 sink，字段 <code>TRACE_ID</code> / <code>EVENT_KIND</code> /
+      <code>EVENT_SEQ</code> / <code>KYAGENT_VERDICT</code>。优雅降级（systemd-python 不在时跳过）。50 LOC。
+      <strong>判分关键词：「OS-aware 设计、与系统日志/SIEM 对接」</strong>。
+      落点：新建 <code>kyagent/audit/journald.py</code>。
+      <a href="https://github.com/systemd/python-systemd">systemd-python</a></li>
+  <li><strong><code>kyagent audit replay &lt;trace-id&gt;</code></strong> 时光回放 — 借鉴 LangGraph checkpoint
+      模式，确定性重放决策树；配合 #1 哈希链就是「可验证确定性回放」，覆盖赛题原话「故障可回溯、决策可复现」。
+      200 LOC。落点：新建 <code>kyagent/audit/replay.py</code> + <code>cli.py</code>。</li>
+</ol>
+<p><strong>不入选</strong>：Langfuse / Phoenix 自托管（落地 OTel 后两小时就能接，作为 stretch goal）；
+LangSmith / Helicone / Datadog（SaaS、中国网络不便、判分基本拿不到分）；
+Merkle 压缩（&lt;1M event 量级用不上 Crosby-Wallach）。</p>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-21 调研结论 — 优先级合成</span>
+<div class="files">未触代码；后续 PR 拆分依据</div>
+<p><strong>跨四向合成后的最终顶层优先级</strong>（每项都列：影响 / 工作量 / 谁是阻塞器）：</p>
+<table>
+<tr><th>#</th><th>特性</th><th>来源</th><th>影响</th><th>工作量</th><th>阻塞</th></tr>
+<tr><td>1</td><td>HMAC 哈希链 + audit verify</td><td>审计</td><td>判分关键词「不可篡改」</td><td>S 80 LOC</td><td>无</td></tr>
+<tr><td>2</td><td>MCP Elicitation</td><td>MCP</td><td>修补 server CONFIRM 黑洞</td><td>M ~200 LOC</td><td>仅 VS Code/Cursor/CC 2.1.76+ 客户端支持</td></tr>
+<tr><td>3</td><td>Spotlighting 工具输出包装</td><td>护栏</td><td>indirect injection 拦截 ASR&lt;2%</td><td>S 80 LOC</td><td>需 audit 所有 tool 输出口</td></tr>
+<tr><td>4</td><td>bwrap + systemd-run 沙箱后端</td><td>沙箱</td><td>每次工具调用进程隔离</td><td>M ~150 LOC</td><td>bwrap 包要装；Kylin 软件源有</td></tr>
+<tr><td>5</td><td>OTel GenAI + W3C 跨 MCP 传播</td><td>审计</td><td>2025 行业 SOTA 标准</td><td>M 250 LOC</td><td>无</td></tr>
+<tr><td>6</td><td>Qwen3Guard-Gen-0.6B 中文护栏</td><td>护栏</td><td>唯一中文 SOTA</td><td>M ~150 LOC + 600MB 模型</td><td>需 transformers/torch</td></tr>
+<tr><td>7</td><td>MCP Progress notifications</td><td>MCP</td><td>UX 提升</td><td>S</td><td>无</td></tr>
+<tr><td>8</td><td>journald 第三路 sink</td><td>审计</td><td>Kylin 原生 / OS-aware 叙事</td><td>S 50 LOC</td><td>仅 Linux</td></tr>
+<tr><td>9</td><td>Plan→Critic→Execute 中段审</td><td>护栏</td><td>CFI 对抗 prompt injection</td><td>M 250 LOC</td><td>依赖 #6</td></tr>
+<tr><td>10</td><td>事务 shadow 执行（overlayfs）</td><td>护栏</td><td>demo 杀手锏</td><td>L 400 LOC</td><td>+sudoers mount 行</td></tr>
+<tr><td>11</td><td>thinking 块独立 EventKind</td><td>审计</td><td>「推理链审计」原义</td><td>S 60 LOC</td><td>仅 Anthropic backend</td></tr>
+<tr><td>12</td><td>MCP Resources + Subscriptions</td><td>MCP</td><td>原创度高，让 LLM 主动浏览 /proc</td><td>M</td><td>仅 VS Code Copilot 全支持</td></tr>
+<tr><td>13</td><td>pyseccomp 三套 allowlist</td><td>沙箱</td><td>+一层内核级强制</td><td>S</td><td>无</td></tr>
+<tr><td>14</td><td>audit replay 时光回放</td><td>审计</td><td>「决策可复现」原义</td><td>M 200 LOC</td><td>依赖 #1</td></tr>
+<tr><td>15</td><td>MCP Prompts 安全模板</td><td>MCP</td><td>叙事 + 全客户端支持</td><td>S</td><td>无</td></tr>
+</table>
+<p><strong>建议两周实施顺序</strong>（按依赖链 + 性价比）：
+Week-1 Day-1-2 做 #1（哈希链 — 解锁合规叙事）+ #11（thinking 块）+ #8（journald）；
+Day-3-4 做 #5（OTel）+ #15（Prompts）；
+Day-5 做 #3（Spotlighting）+ #7（Progress）。
+Week-2 Day-1-3 做 #2（Elicitation 闭环）；Day-4-5 做 #4（沙箱）；Day-6-7 做 #13（seccomp）；
+余下时间挑 #6/#9/#10/#12/#14 中 1-2 个做 demo 杀手锏。</p>
+<p><strong>必须重跑的 gate</strong>：<code>benchmarks/bench_ask.py</code> 全部对照 <code>baseline.json</code>。
+特别是 #6（Qwen3Guard 推理）和 #9（Critic 二审）有真实推理开销，会动 ask p50。</p>
+</div>
+
+<h2>2026-05-21 — 文档漂移扫描与修正（README + docs + study 13 篇）</h2>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-21 多 agent 并行侦察 → 验证 → 选择性修正</span>
+<div class="files">改动 <code>README.kyagent.md · docs/kyagent/architecture.md ·
+study/02-data-flow.md · study/03-agent-core.md · study/07-mcp-tools.md ·
+study/08-audit-chain.md · study/10-cli-entry.md</code></div>
+<p><strong>背景</strong>：今日三轮重构（confirm 依赖反向修正 / 抽 build_runtime
+composition root / 抽 pipeline 流水线）在 17 份文档里留下了不少漂移点。用 4 个
+Explore agent 并行扫描 README / docs/kyagent / study 00-06 / study 07-13，再
+人工 cross-check 一遍源码，挑出"真漂移"（结构/签名/语义错），跳过纯行号偏移
+（line 数偏移本身就是脆弱锚点，硬改一遍下次还会再脏）。</p>
+<p><strong>修正清单（仅 HIGH/MEDIUM 实质内容）</strong>：</p>
+<ul>
+  <li><code>README.kyagent.md</code>：目录树补上顶层 <code>confirm.py</code> / <code>runtime.py</code>；safety 模块描述去掉过时的"流水线"字样</li>
+  <li><code>docs/kyagent/architecture.md</code>：output_cap 64K 改为"sandbox 64K/流 + pipeline 6KB 统一截断"，澄清两层 cap 的关系</li>
+  <li><code>study/02-data-flow.md</code>：<code>_handle_tool_use</code> 放大图重画为三阶段 pipeline 形态；CONFIRM 调用签名从 <code>(name, argv, verdict)</code> 改为 <code>confirm_adapter.for_tool_call(verdict, name, argv) → ConfirmRequest</code>；MCP 通道现在也落 PERCEPTION 的说明补上</li>
+  <li><code>study/03-agent-core.md</code>：ConfirmFn 类型与 _auto_deny 别名重写；__init__ 补 intent_guard 参数；from_config 整段替换为 build_runtime 简化版；ask() 起手补意图层 7 行说明；_handle_tool_use 8 小节全部改为 pipeline 委托视角</li>
+  <li><code>study/07-mcp-tools.md</code>：<code>_call_tool</code> 与 <code>main</code> 两段代码全部改为 pipeline + build_runtime 版本；补"两条通道行为一致"约束声明</li>
+  <li><code>study/08-audit-chain.md</code>：EventKind 列表补 INTENT_CHECK；PERCEPTION 不再标"暂未使用"，改写为"read_only+LOW 工具落此事件"</li>
+  <li><code>study/10-cli-entry.md</code>：<code>_cli_confirm</code> 签名改为 <code>(req: ConfirmRequest) → bool</code>，正文补 adapter / ConfirmFn 解耦说明</li>
+</ul>
+<p><strong>测试</strong>：文档改动不影响代码，pytest 189 passed / 2 skipped 维持不变。</p>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-21 不修纯行号漂移</span>
+<div class="files">study/*.md 多处 <code>core.py:NN</code> 形式的锚点</div>
+<p>scout 报告里有十余条 LOW 严重度"line 编号偏移 5-50 行"。这类锚点本身就是脆弱
+——下次重构必然再脏，硬改一遍只是把脏度归零。决定全部跳过：要么留着（仍然
+可以用函数名搜索定位），要么下次彻底改造为不带行号的锚点（如 <code>core.py:Agent.ask</code>）。
+本次只做"读了会被误导"的实质内容修正。</p>
+</div>
+
+<div class="entry deviation">
+<span class="tag B">偏差</span><span class="ts">2026-05-21 scout 误报：safety-model.md 缺少 adapter 说明</span>
+<div class="files"><code>docs/kyagent/safety-model.md</code></div>
+<p>scout-2 报告 safety-model.md 第 6 节 confirm 表"没提 adapter 层"为 MEDIUM 漂移。
+人工核对后判定为**误报**：该文档是面向运维/用户的安全模型说明，adapter 是内部
+实现细节，写出来反而模糊语义。维持原状。判定标准——"如果没有偏移不要硬改"。</p>
+</div>
+
+<h2>2026-05-21 — Confirm 依赖方向修正（adapter 层 + safety 去 UI 依赖）</h2>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-21 引入 adapter 层，修正依赖方向</span>
+<div class="files">新增 <code>kyagent/confirm.py · kyagent/agent/confirm_adapter.py</code>；
+删除 <code>kyagent/safety/confirm.py</code>；
+改动 <code>kyagent/safety/guardrail.py · intent.py · agent/core.py · cli.py</code></div>
+<p><strong>问题</strong>：reviewer 指出前一次 confirm 解耦只走了一半——
+我把 CLI 从认识 verdict 解耦了，却反过来让 safety verdict 依赖了 UI 数据
+<code>ConfirmRequest</code>。<code>Verdict.to_confirm_request(tool_name, argv)</code>
+还接收"调用上下文"，进一步污染了 domain。Smell 有二：</p>
+<ol>
+<li><strong>方向错误</strong>：safety domain 知道了 UI 长啥样 → UI 加字段会牵着 safety 改</li>
+<li><strong>SRP 违反</strong>：Verdict 承担了"裁决"和"如何被展示"两个职责</li>
+</ol>
+<p><strong>修正</strong>：把 <code>ConfirmRequest</code> 从 <code>kyagent/safety/confirm.py</code>
+搬到顶层 <code>kyagent/confirm.py</code>（它本就是跨层契约，不属于 safety domain），
+新建 <code>kyagent/agent/confirm_adapter.py</code> 提供两个纯函数：</p>
+<ul>
+<li><code>for_tool_call(verdict, tool_name, argv) -> ConfirmRequest</code></li>
+<li><code>for_intent(verdict) -> ConfirmRequest</code></li>
+</ul>
+<p><strong>依赖方向（之后）</strong>：</p>
+<pre>kyagent/confirm.py (ConfirmRequest)         ← UI 契约
+       ↑                          ↑
+       │ uses                     │ uses
+       │                          │
+agent/confirm_adapter.py     cli.py / 其它通道
+       │
+       │ reads (one-way)
+       ↓
+safety/{guardrail,intent}.py (Verdict, IntentVerdict)  ← 纯 domain</pre>
+<p>safety domain 现在不知道 <code>ConfirmRequest</code> 的存在；UI 通道也不需要
+知道 Verdict 的具体形状；adapter 是唯一同时认识两边的层。</p>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-21 adapter 放在 agent 包而非顶层</span>
+<div class="files"><code>kyagent/agent/confirm_adapter.py</code></div>
+<p>候选位置：<code>kyagent/confirm_adapter.py</code>（顶层）vs <code>kyagent/agent/confirm_adapter.py</code>。
+当前只有 Agent 主循环在调它（MCP 通道不需要 confirm，直接 deny），所以归 agent 包
+语义最准。等出现第二个调用方（如 web UI）再上提到顶层（"3 个数据点再抽抽象"原则）。</p>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-21 承认前一次 confirm 解耦不彻底</span>
+<div class="files">对比 <code>implementation-notes.html</code> 同日早些条目</div>
+<p>前一次（顶部第三个 H2 "Confirm 渲染层解耦重构"）标榜"治本而非补丁"，
+实际上只解决了"UI 不认识 verdict"，但反向耦合了 safety→UI。本次才是真正彻底的
+解耦。后人若读历史条目，请把两个条目合起来看：前者是中间态，后者是终态。</p>
+</div>
+
+<div class="entry resolved">
+<span class="tag R">已解决</span><span class="ts">2026-05-21 git mv 等价：旧 staged 文件用 git rm 移除</span>
+<div class="files">
+<code>+ kyagent/confirm.py · + kyagent/agent/confirm_adapter.py ·
+- kyagent/safety/confirm.py</code></div>
+<p>旧 <code>kyagent/safety/confirm.py</code> 之前是 <code>A</code>（staged）状态，
+本次直接 <code>git rm</code> 让 staging area 反映"从未追踪过"。新文件
+<code>kyagent/confirm.py</code> 和 <code>kyagent/agent/confirm_adapter.py</code>
+立即 <code>git add</code>，避免 untracked 引发的 ModuleNotFoundError。</p>
+</div>
+
+<div class="entry resolved">
+<span class="tag R">已解决</span><span class="ts">2026-05-21 测试 189 passed</span>
+<div class="files">pytest 全套</div>
+<p>测试零改动：之前测试就不 import <code>safety.confirm</code>，本次搬家透明。</p>
+</div>
+
+<h2>2026-05-21 — Composition root：抽出 build_runtime（消除装配双份维护）</h2>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-21 抽 Runtime + build_runtime(cfg)</span>
+<div class="files">新增 <code>kyagent/runtime.py</code>；改动
+<code>kyagent/agent/core.py · kyagent/mcp/server.py</code></div>
+<p><strong>问题</strong>：reviewer 指出 <code>Agent.from_config</code> 与 <code>McpServer.main</code>
+各自手动构造 SandboxConfig / ExecutionProxy / Guardrail / AuditLogger / Registry，
+字段一字不差地复制了两份（包括 <code>path_whitelist</code> fallback 那 6 行）。
+新增执行器/审计/规则配置都要记得改两处，否则两条通道行为漂移。</p>
+<p><strong>方案</strong>：把"通道无关基础设施"装配收敛到 <code>build_runtime(cfg) -> Runtime</code>。
+Runtime 是 dataclass，含 5 个字段：sandbox / executor / guardrail / audit / registry。
+通道特定的对象（LLM 后端、IntentGuard、confirm 回调）保留在调用方，避免污染 Runtime 语义。</p>
+<p><strong>代码量</strong>：</p>
+<ul>
+<li><code>Agent.from_config</code>：23 行 → 7 行</li>
+<li><code>McpServer.main</code> 的装配段：约 18 行 → 3 行</li>
+<li>新增 <code>kyagent/runtime.py</code> 约 60 行（含 docstring）</li>
+<li>净增约 30 行，但消除了"字面级别一字不差的复制"漂移点</li>
+</ul>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-21 Runtime 不持有 cfg</span>
+<div class="files"><code>kyagent/runtime.py</code></div>
+<p>考虑过让 Runtime 持有 cfg 字段（调用方只需接一个对象），未采用。理由：
+cfg 是"配置"，Runtime 是"装配出的对象图"，二者职责不同。让 Runtime 持 cfg
+会让"Runtime 是什么"这个问题变模糊。当前两个调用方各自独立持 cfg，不构成不便。</p>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-21 registry._tools 私有访问保留</span>
+<div class="files"><code>kyagent/runtime.py · kyagent/mcp/tools/base.py</code></div>
+<p>原代码两处都直接动 <code>registry._tools = {...}</code> 做白名单过滤，破坏封装。
+本次抽 build_runtime 后，这层 hack 已收敛到一处。NOTE 注释里标了将来引入
+<code>ToolRegistry.with_whitelist(keep)</code> 公共方法的改进点；本次重构刻意不动签名，
+避免触发更大的改动面（base.py / 所有测试）。</p>
+</div>
+
+<div class="entry resolved">
+<span class="tag R">已解决</span><span class="ts">2026-05-21 git add runtime.py</span>
+<div class="files"><code>kyagent/runtime.py</code></div>
+<p>新文件立即 <code>git add</code>，避免重蹈 confirm.py / pipeline.py untracked 覆辙。</p>
+</div>
+
+<div class="entry resolved">
+<span class="tag R">已解决</span><span class="ts">2026-05-21 测试 189 passed</span>
+<div class="files">pytest 全套</div>
+<p>测试不直接构造 SandboxConfig，全部从 <code>Agent.from_config(cfg)</code> 入口走，所以
+本次重构对测试零改动。</p>
+</div>
+
+<h2>2026-05-21 — 工具调用流水线抽取（消除 Agent/MCP 行为漂移）</h2>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-21 抽 ToolInvocationPipeline（小版）</span>
+<div class="files">新增 <code>kyagent/mcp/tools/pipeline.py</code>；改动
+<code>kyagent/agent/core.py · kyagent/mcp/server.py</code></div>
+<p><strong>问题</strong>：reviewer 指出 Agent <code>core.py:_handle_tool_use</code> 与 MCP
+<code>server.py:_call_tool</code> 各自实现一套 validate → build_argv → guardrail → execute →
+format 流水线，导致行为漂移：
+PERCEPTION 事件只在 Agent 落、输出 6KB 截断只在 Agent 做、stderr 拼接只在 Agent 做。</p>
+<p><strong>方案</strong>：抽出 <em>真重复</em> 的 3 个阶段函数，差异点（CONFIRM 通道行为、
+trace 生命周期、返回类型包装）保留在调用方，避免把 stdin / threading 这种
+Agent-only 细节漏到 MCP：</p>
+<ul>
+<li><code>prepare_call</code> — validate + build_argv + TOOL_REQUEST + 可选 PERCEPTION，
+返回 <code>PreparedCall</code> 或 <code>PipelineError</code>（早停且已落 ERROR 事件）</li>
+<li><code>check_safety</code> — guardrail + SAFETY_CHECK，<strong>不</strong>处理 CONFIRM
+决策（让通道自己定）</li>
+<li><code>execute_and_format</code> — EXECUTION + EXECUTION_RESULT + Tool.format_result +
+共享的 stderr 拼接 + 长度截断（<code>OUTPUT_CAP=6000</code>）</li>
+</ul>
+<p><strong>修复的具体漂移</strong>：MCP 通道现在也会落 PERCEPTION 事件、输出会被截断
+到 6KB、失败时 stderr 会拼进 content。审计 timeline 跨通道一致。</p>
+<p><strong>仍保留在调用方的差异（本质差异，不应抽）</strong>：</p>
+<ul>
+<li>CONFIRM 处理：Agent 调 <code>self.confirm</code> + 主线程兜底；MCP 直接 deny + 提示</li>
+<li>trace 生命周期：Agent per-ask；MCP per-call</li>
+<li>返回类型：Agent <code>ToolResultBlock</code>；MCP <code>dict{content, isError}</code></li>
+</ul>
+</div>
+
+<div class="entry tradeoff">
+<span class="tag T">权衡</span><span class="ts">2026-05-21 没抽 ToolInvocationRunner 单函数</span>
+<div class="files"><code>kyagent/mcp/tools/pipeline.py</code></div>
+<p>Reviewer 原建议是抽一个 channel-agnostic <code>ToolInvocationRunner</code>，由调用方
+注入 confirm policy / audit channel / 输出包装。考虑过该方案，未采用，原因：</p>
+<ul>
+<li><strong>接口会变成 7 参数神函数</strong>：要把 confirm_policy、trace_factory、
+result_packer、reply_audit_flag 等差异点全暴露成 callable，可读性下降</li>
+<li><strong>CONFIRM 通道差异不是 policy 能解释的</strong>：MCP 拒绝是因为通道本身没有用户
+（事实），不是策略偏好；把它建模为 policy 等于把通道事实伪装成偏好</li>
+<li><strong>"3 个数据点后再抽抽象"</strong>：目前只有 Agent 和 MCP 两个调用方，
+拆三段函数足够；等出现第三个通道（HTTP/WebSocket）再考虑 Runner</li>
+</ul>
+<p>取中庸路线：把"真重复"的部分抽出复用，"本质差异"留在调用方明确表达。
+Agent <code>_handle_tool_use</code> 从 90 行降到约 55 行；MCP <code>_call_tool</code>
+从 76 行降到约 50 行。</p>
+</div>
+
+<div class="entry resolved">
+<span class="tag R">已解决</span><span class="ts">2026-05-21 git add pipeline.py</span>
+<div class="files"><code>kyagent/mcp/tools/pipeline.py</code></div>
+<p>从 confirm.py untracked 教训中学到：本次新增文件立即 <code>git add</code>，确保干净
+checkout 下不会 ModuleNotFoundError。staging 状态 <code>A  kyagent/mcp/tools/pipeline.py</code>。</p>
+</div>
+
+<div class="entry resolved">
+<span class="tag R">已解决</span><span class="ts">2026-05-21 测试 189 passed</span>
+<div class="files">pytest 全套</div>
+<p>验证：<code>test_mcp.py · test_mcp_protocol.py · test_agent_parallel.py ·
+test_integration.py · test_safety.py · test_intent.py</code> 全绿，无回归。</p>
 </div>
 
 <h2>2026-05-21 — Confirm 渲染层解耦重构（修复 P2 #2，治本而非补丁）</h2>

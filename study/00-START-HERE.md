@@ -100,7 +100,7 @@ D:\race\long\
 │           └── package.py  # pkg_info / pkg_installed
 ├── configs/
 │   ├── default.yaml        # 默认配置（mock 后端）
-│   ├── openai.yaml         # OpenAI 协议兼容（DeepSeek/智谱/Ollama 都走这条）
+│   ├── openai.yaml         # OpenAI 协议兼容（架构示例；当前部署仅推 DeepSeek）
 │   ├── safety-rules.yaml   # 27 条危险命令规则
 │   └── sudoers.kyagent     # /etc/sudoers.d 白名单（NOPASSWD + 显式黑名单）
 ├── tests/                  # 99 个测试用例，2 个 POSIX-only skip 在 Windows

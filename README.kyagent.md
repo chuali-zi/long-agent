@@ -14,7 +14,7 @@ kyagent 是部署在麒麟操作系统上的智能运维 Agent，把"自然语�
 | ③ 安全意图校验器 — **双层** | **意图层（一次过滤 + 抗 Prompt Injection）**：中文词表 + Unicode 归一化 + 12 类注入正则<br>**argv 层（二次过滤）**：正则 + argv + 目标地板 + 工具声明 risk + 可选 LLM 复审 | `kyagent/safety/intent.py`，`configs/intent-rules.yaml`，`kyagent/safety/{guardrail,rules,patterns,policy}.py`，`configs/safety-rules.yaml` |
 | ④ 最小权限代理执行 | `ExecutionProxy` + `SandboxConfig` + sudoers 白名单。`forbid_root=true` 是"非必要不 root"，requires_root 工具走 sudoers；`forbid_root_strict=true` 才彻底拒绝 | `kyagent/executor/*.py`，`configs/sudoers.kyagent` |
 | ⑤ 推理链路溯源（**5 段闭环**） | `USER_INPUT → INTENT_CHECK → PERCEPTION → LLM_THOUGHT → TOOL_REQUEST → SAFETY_CHECK → EXECUTION → EXECUTION_RESULT → AGENT_REPLY`，SQLite + JSONL 双通道 | `kyagent/audit/*.py` |
-| **大模型选型**（赛题鼓励国产开源） | `OpenAIBackend.preset("deepseek")` / `.preset("qwen")` + 自动 fallback 到 Mock | `kyagent/agent/llm.py`，`configs/{deepseek,qwen}.yaml` |
+| **大模型选型**（赛题鼓励国产开源） | `OpenAIBackend.preset("deepseek")` + 自动 fallback 到 Mock | `kyagent/agent/llm.py`，`configs/deepseek.yaml` |
 
 ## 2. 架构总览
 
@@ -95,16 +95,12 @@ kyagent mcp serve
 
 ### 切到真实后端
 
-**国产开源（赛题鼓励）**：
+**当前推荐：DeepSeek（赛题鼓励的国产开源，OpenAI 协议兼容，国内可访问）**：
 
 ```bash
 # DeepSeek V4（推荐：tools 完整 + 性价比最高）
 export DEEPSEEK_API_KEY=sk-...
 KYAGENT_CONFIG=configs/deepseek.yaml kyagent ask "把最近一小时的 sshd 错误日志总结一下"
-
-# 通义千问 Qwen（DashScope OpenAI 兼容端点）
-export DASHSCOPE_API_KEY=sk-...
-KYAGENT_CONFIG=configs/qwen.yaml kyagent ask "查下哪个进程占内存最高"
 ```
 
 **国际 SaaS（对比测试用）**：
@@ -117,6 +113,12 @@ kyagent ask "..."
 
 > 无 key 时所有真实后端都会自动 fallback 到 mock（带 stderr warning），让 demo 能持续。
 > 生产部署可在 yaml 里设 `agent.fallback_to_mock: false`，缺 key 直接报错。
+
+> **关于其他 OpenAI 协议兼容后端**（Qwen / 智谱 GLM / vLLM / Ollama / Azure OpenAI 等）：
+> 代码层面 `OpenAIBackend` 已实现统一适配，`configs/openai.yaml`、`configs/qwen.yaml` 保留
+> 作为多后端架构示例；但**当前阶段（含龙芯部署）仅推 DeepSeek 一个真实后端**，其他后端不再
+> 推荐生产使用。龙芯部署 openai 依赖处理详见 `DEPLOYMENT-LOONGARCH.md` 第 9 步以及
+> `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目。
 
 ### 在 Kylin / Linux 上启用最小权限代理
 
@@ -293,11 +295,13 @@ pytest tests -q
 ```
 D:\race\long\
 ├── kyagent/                  # 本作品包（claude-a 分支）
-│   ├── agent/                # LLM + 主循环
-│   ├── mcp/                  # 工具基类 + 6 大类工具 + stdio 服务器
-│   ├── safety/               # 规则引擎 + 策略 + 流水线
+│   ├── agent/                # LLM + 主循环 + confirm_adapter
+│   ├── mcp/                  # 工具基类 + 6 大类工具 + stdio 服务器 + tools/pipeline
+│   ├── safety/               # 意图层 + argv 层 + 规则引擎 + 策略
 │   ├── executor/             # 沙箱 + 受限执行
 │   ├── audit/                # trace + SQLite + JSONL
+│   ├── runtime.py            # Composition root（build_runtime 装配通道无关基础设施）
+│   ├── confirm.py            # UI 契约 ConfirmRequest + ConfirmFn（跨通道复用）
 │   ├── cli.py                # Typer 子命令
 │   └── config.py             # Pydantic 配置
 ├── configs/

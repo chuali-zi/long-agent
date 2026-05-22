@@ -264,24 +264,17 @@ mcp:
 用法：
 
 ```bash
-# OpenAI 官方
-export OPENAI_API_KEY=sk-...
-export KYAGENT_CONFIG=$(pwd)/configs/openai.yaml
+# 当前部署唯一推荐：DeepSeek（建议直接用 configs/deepseek.yaml，不必走 openai.yaml）
+export DEEPSEEK_API_KEY=sk-...
+export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
 kyagent ask "查 80 端口"
-
-# DeepSeek
-export OPENAI_API_KEY=sk-deepseek-...
-export KYAGENT_OPENAI_BASE_URL=https://api.deepseek.com/v1
-export KYAGENT_OPENAI_MODEL=deepseek-chat
-export KYAGENT_CONFIG=$(pwd)/configs/openai.yaml
-kyagent ask "..."
-
-# vLLM / Ollama 本地
-export OPENAI_API_KEY=local
-export KYAGENT_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
-export KYAGENT_OPENAI_MODEL=qwen2.5:14b
-export KYAGENT_CONFIG=$(pwd)/configs/openai.yaml
 ```
+
+> **关于其他 OpenAI 协议兼容端点**（OpenAI 官方 / vLLM / Ollama / Azure / 智谱 GLM / 通义千问 等）：
+> 代码层 `OpenAIBackend` 协议适配是通的，`configs/openai.yaml` / `configs/qwen.yaml`
+> 保留作为多后端架构示例；但**当前阶段生产部署只推 DeepSeek**，其他后端不再推广。
+> 龙芯（LoongArch Old World）下 `pip install openai` 还存在 jiter Rust 编译问题，
+> 详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目（status: pending）。
 
 ---
 

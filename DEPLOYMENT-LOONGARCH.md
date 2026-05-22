@@ -280,12 +280,21 @@ sudo -u kyagent -n /usr/bin/systemctl is-active sshd  # 应该输出 active/inac
 cd /opt/kyagent
 source .venv/bin/activate
 
+# 把审计目录指向第 7 步 setup-sudoers.sh 创建的可写目录。
+# 默认配置写 ./var/audit.* 会解析到 /opt/kyagent/var/，
+# 该目录归 root/部署用户所有，kyagent 账户写不进去 → 启动即 PermissionError。
+export KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
+export KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
+
 # 默认就是 mock 后端
-sudo -u kyagent --preserve-env=PATH \
+sudo -u kyagent \
+    --preserve-env=PATH,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL \
     .venv/bin/kyagent ask "查 80 端口被谁占了"
 ```
 
 **预期输出**：会看到 mock LLM 路由 + 真的 `lsof -nP -i TCP:80` 命令执行（不是 `[mock][win32]` 提示，那是 Windows 才会有的）。
+
+**如果看到 `PermissionError: [Errno 13] ... '/opt/kyagent/var'`** → 上面两个 `KYAGENT_AUDIT_*` 环境变量没设置或没穿透给 kyagent 账户。检查 `--preserve-env` 列表。
 
 **如果看到 `ImportError: cannot import name 'resource'`** → 你的 Python 是不是用了奇怪的精简版？`resource` 是 Python 标准库 POSIX 部分，正常应该有。
 
@@ -295,17 +304,44 @@ sudo -u kyagent --preserve-env=PATH \
 
 ## 9. 接真实 LLM 后端
 
-国产模型推荐 DeepSeek 或 Qwen（兼容性好、有国内访问）：
+> ✅ **P-OPENAI-DEPS 已解决（2026-05-22）**：龙芯 Old World 部署可通过 `HttpxBackend`（纯 httpx 实现、零 openai SDK 依赖、不触发 jiter Rust 编译）对接 DeepSeek。
+>
+> 切换开关：环境变量 `KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx`（仅在 deepseek.yaml 生效，其它 yaml 不受影响）。
+>
+> 详细决策：`implementation-notes.html` "2026-05-22 HttpxBackend 实现 P-OPENAI-DEPS resolved" 条目。
+>
+> 其他真实后端的状态：
+> - **anthropic** 已在第 6.4 节装好，可立即用，但 Anthropic API 在国内访问受限，仅参考对照
+> - **Qwen / 智谱 GLM / vLLM / Ollama / Azure OpenAI** 等 OpenAI 协议兼容服务：代码层 `OpenAIBackend` / `HttpxBackend` 都能跑，**当前阶段不在推广范围**；如需启用请参考 `configs/qwen.yaml` 顶部注释，把 `llm_backend` 改成 `qwen_httpx` 即可（同样零 openai SDK 依赖）
+
+当前阶段唯一推广的国产真实后端是 **DeepSeek**（OpenAI 协议兼容，国内可访问）：
 
 ```bash
-# 9.1 申请 key 后导出
+# 9.1 申请 key 后导出（https://platform.deepseek.com）
 export DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
 export KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml
 
+# 龙芯 Old World 关键开关：把 DeepSeek 切到 httpx 传输路径，避开 openai SDK + jiter Rust 编译
+export KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+
+# audit 路径：默认相对路径会落到 /opt/kyagent/var/，kyagent 账户无写权限；必须显式指向可写目录
+export KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
+export KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
+
 # 9.2 跑（注意要把环境变量穿透给 kyagent 账户）
 sudo -u kyagent \
-    --preserve-env=DEEPSEEK_API_KEY,KYAGENT_CONFIG,PATH \
+    --preserve-env=DEEPSEEK_API_KEY,KYAGENT_CONFIG,KYAGENT_DEEPSEEK_TRANSPORT,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL,PATH \
     .venv/bin/kyagent ask "查 80 端口被谁占了"
+```
+
+**自检**（启动 banner 应显示 backend = `httpx(DeepSeek (V4 Flash))` 而非 `openai(...)`）：
+
+```bash
+sudo -u kyagent \
+    --preserve-env=DEEPSEEK_API_KEY,KYAGENT_CONFIG,KYAGENT_DEEPSEEK_TRANSPORT,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL,PATH \
+    .venv/bin/kyagent ask "ping"
+# 若 banner 显示 backend=openai(...) → 说明 KYAGENT_DEEPSEEK_TRANSPORT 没穿透给 kyagent 账户，
+# 检查 --preserve-env 列表。
 ```
 
 **API key 的安全存放**（生产环境）：
@@ -320,6 +356,12 @@ sudo install -m 0600 -o kyagent -g kyagent /dev/null /etc/kyagent/env
 sudo tee /etc/kyagent/env > /dev/null <<'EOF'
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
 KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml
+# 龙芯 Old World 必须显式切到 httpx 传输；不写会回落到默认 deepseek（用 openai SDK）→ 启动即 ModuleNotFoundError
+KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+# audit 路径必须显式指向 setup-sudoers.sh 创建的可写目录；
+# 不写会落到 /opt/kyagent/var/，kyagent 账户无权限，首次启动即报错
+KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
+KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
 EOF
 ```
 
@@ -412,7 +454,7 @@ sudo journalctl -u kyagent-mcp -f
 - [ ] 5. `pip install -e .` 成功：耗时 _____ 分钟（重点关注 pydantic-core / jiter 编译耗时）
 - [ ] 6. `setup-sudoers.sh` 跑过：`id kyagent` ok — _____ 分钟
 - [ ] 7. mock 跑通：`kyagent ask "..."` 看到合理输出 — _____ 分钟
-- [ ] 8. 真实 LLM 跑通：DeepSeek/Qwen 实际调用成功 — _____ 分钟
+- [ ] 8. 真实 LLM 跑通：DeepSeek 实际调用成功（`KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx`） — _____ 分钟
 
 **遇到本文档没覆盖的问题**：把完整命令 + 完整报错贴回来，我帮你诊断并更新本文档。
 

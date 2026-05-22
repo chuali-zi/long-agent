@@ -9,15 +9,24 @@
 # 不设 DEEPSEEK_API_KEY 时会自动降级到 mock（CLI 启动 banner 会提示）；
 # 想禁掉降级（生产/CI），把 agent.fallback_to_mock 改成 false。
 #
+# 两条传输路径（2026-05-22 起，由 KYAGENT_DEEPSEEK_TRANSPORT 切换）：
+#   - deepseek         (默认)：走 OpenAIBackend，依赖 openai SDK
+#                              适用：Windows / macOS / x86_64 Linux 等能正常 pip install openai 的平台
+#   - deepseek_httpx          ：走 HttpxBackend，零 openai SDK 依赖，纯 httpx 直发 HTTP
+#                              适用：龙芯 LoongArch Old World 等装不上 jiter Rust 的平台
+#                              详见 implementation-notes.html "P-OPENAI-DEPS 已解决方案"
+# 两条路径在协议层完全等价；切换不影响 Agent.core / tools 行为。
+#
 # 2026-05 验证信息：
-#   - 官方走 OpenAI 协议兼容，无独立 SDK（用 pip install openai 即可）
+#   - 官方走 OpenAI 协议兼容（无独立 SDK；可选 pip install openai，或走 httpx）
 #   - base_url:  https://api.deepseek.com  （/v1 是兼容别名，不必加）
 #   - 模型 ID:   deepseek-v4-flash  / deepseek-v4-pro
 #   - tools/function calling 与 OpenAI 完全一致（response.tool_calls）
 #   - 注意：legacy 别名 deepseek-chat / deepseek-reasoner 在 2026-07-24 退役
 agent:
   name: kyagent
-  llm_backend: deepseek
+  # 默认走 SDK 路径；龙芯部署在环境里 export KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx 切到 httpx
+  llm_backend: ${KYAGENT_DEEPSEEK_TRANSPORT:-deepseek}
   fallback_to_mock: true
   deepseek:
     # deepseek-v4-flash：tools 完整支持、$0.14/M in、推荐主力
@@ -52,8 +61,10 @@ safety:
   llm_review: false
 
 audit:
-  database: ./var/audit.db
-  jsonl_file: ./var/audit.jsonl
+  # 生产部署：通过 KYAGENT_AUDIT_DB / KYAGENT_AUDIT_JSONL 覆盖到 /var/lib/kyagent、/var/log/kyagent
+  # （这两个目录由 setup-sudoers.sh 创建并归属 kyagent 账户，可直接写入）。
+  database: ${KYAGENT_AUDIT_DB:-./var/audit.db}
+  jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   retain_days: 90
 
 mcp:

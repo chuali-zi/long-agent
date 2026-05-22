@@ -39,10 +39,15 @@ safety:
   llm_review: false
 
 audit:
-  # SQLite 审计数据库路径
-  database: ./var/audit.db
-  # 是否同时输出 JSONL 日志（便于外部 SIEM 抽取）
-  jsonl_file: ./var/audit.jsonl
+  # SQLite 审计数据库路径。
+  # 默认走 ./var/audit.db（开发环境写在项目根的 var/）；
+  # 部署到 /opt/kyagent 后由非特权 kyagent 账户运行时，相对路径会落到 /opt/kyagent/var/，
+  # 该目录由 root/部署用户持有，kyagent 写不进去；
+  # 此时在 /etc/kyagent/env 或 systemd EnvironmentFile 里设置 KYAGENT_AUDIT_DB 覆盖为绝对路径
+  # （建议 /var/lib/kyagent/audit.db，setup-sudoers.sh 已创建并归属 kyagent）。
+  database: ${KYAGENT_AUDIT_DB:-./var/audit.db}
+  # 是否同时输出 JSONL 日志（便于外部 SIEM 抽取）；同上，可用 KYAGENT_AUDIT_JSONL 覆盖
+  jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   # 保留事件天数
   retain_days: 90
 

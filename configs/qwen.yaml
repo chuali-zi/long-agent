@@ -1,5 +1,11 @@
 # kyagent —— 通义千问（Qwen / DashScope）后端配置
 #
+# ⚠️ 部署说明（2026-05-22）：
+#   本文件保留作为「OpenAI 协议兼容层 + Qwen preset」的多后端架构示例。
+#   **当前阶段生产部署不推荐 Qwen 后端**；唯一推广的国产真实后端是 DeepSeek
+#   （见 configs/deepseek.yaml）。本文件可用于离线 / 自研环境的能力验证，
+#   不要在评测演示路径上推。详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目。
+#
 # 用法：
 #   1. 申请 key：https://bailian.console.aliyun.com  （国内）
 #                或 https://modelstudio.console.alibabacloud.com  （海外）
@@ -55,8 +61,10 @@ safety:
   llm_review: false
 
 audit:
-  database: ./var/audit.db
-  jsonl_file: ./var/audit.jsonl
+  # 生产部署：通过 KYAGENT_AUDIT_DB / KYAGENT_AUDIT_JSONL 覆盖到 /var/lib/kyagent、/var/log/kyagent
+  # （这两个目录由 setup-sudoers.sh 创建并归属 kyagent 账户，可直接写入）。
+  database: ${KYAGENT_AUDIT_DB:-./var/audit.db}
+  jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   retain_days: 90
 
 mcp:

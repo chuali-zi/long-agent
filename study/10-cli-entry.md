@@ -65,27 +65,44 @@ Windows 控制台默认 GBK 编码，输出中文 / emoji 会 `UnicodeEncodeErro
 
 ---
 
-## 4. CLI confirm 回调（cli.py:57）
+## 4. CLI confirm 回调
 
 ```python
-def _cli_confirm(tool_name, argv, verdict) -> bool:
-    console.rule(f"[yellow]需要用户确认 — {tool_name}[/yellow]")
+from kyagent.confirm import ConfirmRequest
+
+def _cli_confirm(req: ConfirmRequest) -> bool:
+    """统一的交互式 confirm 渲染器。
+
+    与具体 verdict 类型解耦：任何 verdict 只要被 confirm_adapter
+    翻译成 ConfirmRequest 都能复用同一份 UI。
+    """
+    console.rule(f"[yellow]需要用户确认 — {req.title}[/yellow]")
+    lines = [f"[bold]风险等级[/]: {req.risk}"]
+    if req.body:
+        lines.append(f"[bold]详情[/]: {req.body}")
+    if req.summary_lines:
+        lines.append("[bold]命中规则[/]:")
+        lines.extend(f"  - {s}" for s in req.summary_lines)
     console.print(Panel.fit(
-        f"[bold]风险等级[/]: {verdict['risk']}\n"
-        f"[bold]待执行 argv[/]: {' '.join(argv)}\n"
-        f"[bold]命中规则[/]:\n" + "\n".join(
-            f"  - {h['rule_id']} ({h['risk']}): {h['description']}"
-            for h in verdict["hits"]
-        ),
+        "\n".join(lines),
         title="安全审查", border_style="yellow",
     ))
     ans = Prompt.ask("[bold]是否放行？[/]", choices=["y","n"], default="n")
     return ans.lower() == "y"
 ```
 
-把 verdict 用 Rich Panel 渲染（黄框），列出风险等级 + 完整 argv + 命中规则。`Prompt.ask` 限制只能输 y/n，**默认 n**（即用户回车 = 拒绝）。
+把 `ConfirmRequest`（一个 UI 数据契约，住在 `kyagent/confirm.py`）用 Rich Panel
+渲染（黄框）：title 直接来自 req，body 是 argv 或 rationale 等，summary_lines 是
+命中规则的字符串化清单。`Prompt.ask` 限制只能输 y/n，**默认 n**（即用户回车 = 拒绝）。
 
-这是 Agent.ConfirmFn 的具体实现。chat 模式注入它，ask 模式不注入（用 lambda 直接拒绝）。
+这是 `ConfirmFn = Callable[[ConfirmRequest], bool]` 的具体实现——签名只看
+ConfirmRequest，与具体 Verdict/IntentVerdict 类型解耦。chat 模式注入它，ask 模式
+不注入（用 `lambda *a, **k: False` 直接拒绝）。
+
+`Verdict → ConfirmRequest` 的翻译由 `kyagent/agent/confirm_adapter.py` 负责：
+`for_tool_call(verdict, tool_name, argv)` 用于 argv 层裁决；
+`for_intent(verdict)` 用于意图层裁决。adapter 是 safety domain 与 UI 契约
+**唯一的接触面**，CLI 端无需知道 verdict 内部字段。
 
 ---
 
@@ -381,8 +398,8 @@ kyagent audit show trace-1f2e3d4567
 # 7. 启动 MCP server（被 Claude Desktop 调用）
 kyagent mcp serve
 
-# 8. 显式指定配置
-kyagent ask "查 80 端口" --config configs/openai.yaml
+# 8. 显式指定配置（当前推荐 DeepSeek）
+kyagent ask "查 80 端口" --config configs/deepseek.yaml
 ```
 
 ---

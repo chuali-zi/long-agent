@@ -1,17 +1,19 @@
-# kyagent —— OpenAI / OpenAI 协议兼容 后端配置示例
+# kyagent —— OpenAI 协议兼容 后端配置示例
 #
-# 用法：
+# ⚠️ 部署说明（2026-05-22）：
+#   本文件保留作为「OpenAI 协议兼容层」的多后端架构示例，方便未来扩展。
+#   **当前阶段生产部署仅推荐 DeepSeek 一个真实后端**（见 configs/deepseek.yaml）。
+#   其他 OpenAI 协议兼容服务（智谱 GLM / 通义千问 / vLLM / Ollama / Azure OpenAI 等）
+#   代码协议层面能跑，但**不在当前推广范围内**。
+#   龙芯（LoongArch Old World）部署下 `pip install openai` 仍存在 jiter Rust 编译问题，
+#   详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目（status: pending）。
+#
+# 用法（OpenAI 官方端点）：
 #   export OPENAI_API_KEY=sk-...
 #   export KYAGENT_CONFIG=$(pwd)/configs/openai.yaml
 #   kyagent ask "哪个进程 CPU 占用最高？"
 #
-# 兼容范围：任何遵循 OpenAI Chat Completions 协议的服务都能直接对接
-#   - OpenAI 官方：留空 base_url 即可
-#   - DeepSeek    base_url=https://api.deepseek.com/v1                model=deepseek-chat
-#   - 智谱 GLM    base_url=https://open.bigmodel.cn/api/paas/v4       model=glm-4-plus
-#   - 通义千问    base_url=https://dashscope.aliyuncs.com/compatible-mode/v1  model=qwen-plus
-#   - vLLM/Ollama base_url=http://127.0.0.1:11434/v1                  model=qwen2.5:14b
-#   - Azure OpenAI 见专用 SDK，可改用 OPENAI_API_KEY + 自定义 base_url
+# 接 DeepSeek 请直接用 `configs/deepseek.yaml`，无需通过这个文件。
 agent:
   name: kyagent
   llm_backend: openai
@@ -49,8 +51,10 @@ safety:
   llm_review: false
 
 audit:
-  database: ./var/audit.db
-  jsonl_file: ./var/audit.jsonl
+  # 生产部署：通过 KYAGENT_AUDIT_DB / KYAGENT_AUDIT_JSONL 覆盖到 /var/lib/kyagent、/var/log/kyagent
+  # （这两个目录由 setup-sudoers.sh 创建并归属 kyagent 账户，可直接写入）。
+  database: ${KYAGENT_AUDIT_DB:-./var/audit.db}
+  jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   retain_days: 90
 
 mcp:
