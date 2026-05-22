@@ -69,6 +69,39 @@
 <p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
 </div>
 
+<h2>2026-05-23 — DeepSeek 事实校对（reviewer 触发）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-23 reviewer 引用 api-docs.deepseek.com 触发复核</span>
+<div class="files">configs/deepseek.yaml、implementation-notes.html（2026-05-22 模型选择条目）</div>
+<p><strong>触发</strong>：P1+P2 commit (f442601) 之后 reviewer 复审，结论「<code>pytest -q → 213 passed, 2 skipped</code> / <code>python -m compileall -q kyagent → OK</code> / 工作区还有未提交的 runtime/confirm/pipeline 重构，不在本次 httpx 提交范围内但全测亦过」，引用 source 为 <a href="https://api-docs.deepseek.com/zh-cn">api-docs.deepseek.com/zh-cn</a>。用户认可 review，要求复核 DeepSeek 相关陈述与官方文档的偏差。</p>
+<p><strong>核对方法</strong>：本机用 WebFetch 拉官方主页 + <code>quick_start/pricing</code> 子页 + <code>guides/tool_calls</code> 子页。<strong>主动避开</strong>第三方 SEO 内容农场（如 framia.pro、codersera.com 之类"V4 API 教程"博客）—— 同一轮另一个调研 agent 曾把这些次级源当事实援引，输出"模型 ID / 价格都对"的结论，本次自验证否决了那个 agent 的结论（除价格外其它陈述确实一致，但价格被错过）。</p>
+<p><strong>核对结果</strong>：</p>
+<table>
+<tr><th>事实点</th><th>原陈述</th><th>官方实际</th><th>结论</th></tr>
+<tr><td>主力模型 ID</td><td><code>deepseek-v4-flash</code></td><td><code>deepseek-v4-flash</code></td><td>✅ 一致</td></tr>
+<tr><td>推理模型 ID</td><td><code>deepseek-v4-pro</code></td><td><code>deepseek-v4-pro</code></td><td>✅ 一致</td></tr>
+<tr><td>legacy 别名</td><td><code>deepseek-chat</code> / <code>deepseek-reasoner</code>，2026-07-24 退役</td><td>同上（兼容映射到 v4-flash 非思考 / 思考模式）</td><td>✅ 一致</td></tr>
+<tr><td>base_url</td><td><code>https://api.deepseek.com</code>（<code>/v1</code> 可省）</td><td>同上（<code>/v1</code> 是 OpenAI SDK 兼容路径）</td><td>✅ 一致</td></tr>
+<tr><td>tools / function calling</td><td>与 OpenAI 完全一致，response 走 <code>tool_calls</code></td><td>同上（V3.2 起还支持思考模式下的 tool 调用）</td><td>✅ 一致</td></tr>
+<tr><td>API key 头</td><td><code>Authorization: Bearer</code>，env=<code>DEEPSEEK_API_KEY</code></td><td>同上</td><td>✅ 一致</td></tr>
+<tr><td><strong>v4-flash 定价</strong></td><td><code>$0.14/M in</code></td><td>¥1/M input(cache miss) / ¥0.02/M input(cache hit) / ¥2/M output</td><td>❌ <strong>错</strong>：单位（美元→人民币）、数字、缺 cache hit/miss 区分</td></tr>
+</table>
+<p><strong>修正</strong>：</p>
+<ul>
+  <li><code>configs/deepseek.yaml</code> v4-flash / v4-pro 注释展开为完整人民币定价 + cache hit/miss 区分 + 加官方 pricing 页链接</li>
+  <li><code>implementation-notes.html</code> 2026-05-22 模型选择条目：原 <code>$0.14/M in</code> 改为完整人民币定价；末尾加修正注脚指向本条目</li>
+</ul>
+<p><strong>没改的</strong>：</p>
+<ul>
+  <li>代码（<code>kyagent/agent/llm.py</code> <code>_PRESETS</code>、<code>HttpxBackend</code> defaults、<code>config.py</code> defaults）—— 不含价格陈述，仅含模型 ID 与 base_url，两者均一致</li>
+  <li>测试（<code>tests/test_httpx_backend.py</code>、<code>tests/test_openai_backend.py</code>）—— 不依赖价格事实，模型 ID 与 base_url 已对齐官方</li>
+  <li><code>DEPLOYMENT-LOONGARCH.md</code>、<code>README.kyagent.md</code>、<code>study/*</code> —— 无价格陈述</li>
+</ul>
+<p><strong>溢出建议（today 不做）</strong>：DeepSeek docs 提到 V3.2+ 起两个 OpenAI 协议外扩展 ——「思考模式下工具调用」+「<code>strict: true</code> JSON Schema 严格模式」。<code>HttpxBackend</code> 当前未对接（v4-pro 思考模式由服务端默认启用，无需客户端字段；v4-flash 默认非思考）。若未来需要显式控制思考开关或 JSON Schema 强制，需在 <code>HttpxBackend.chat()</code> 加 <code>thinking</code> / <code>strict</code> payload 字段 + <code>cfg.agent.deepseek</code> 配置位。</p>
+<p><strong>方法论教训</strong>：调研型 subagent 的结论必须验证其引用源的权威性（区分 docs / GitHub 原始仓库 vs SEO 博客 / LLM 生成内容农场）。同一轮 jiter 调研三 agent 都明确引用了 PyPI / 官方 GitHub，结论可信；本次 DeepSeek 复核 agent 把 framia.pro/codersera.com 当事实源，结论失真。今后对外部事实做关键决策（含定价、合规、退役日期）时，正例：WebFetch 官方一级源；反例：subagent 二手转述未经一级源 cross-check。</p>
+</div>
+
 <h2>2026-05-22 — HttpxBackend 实现：P-OPENAI-DEPS resolved（方案 B）</h2>
 
 <div class="entry fact">
@@ -875,8 +908,9 @@ test_integration.py · test_safety.py · test_intent.py</code> 全绿，无回�
 <div class="entry tradeoff">
 <span class="tag T">权衡</span><span class="ts">2026-05-20 deepseek model id 选哪个</span>
 <div class="files">configs/deepseek.yaml</div>
-候选：(a) <code>deepseek-chat</code> 兼容别名 — 2026-07-24 退役；(b) <code>deepseek-v4-flash</code> — 当前主力，便宜（$0.14/M in），tools 支持；(c) <code>deepseek-v4-pro</code> — 强推理但慢且贵。
+候选：(a) <code>deepseek-chat</code> 兼容别名 — 2026-07-24 退役；(b) <code>deepseek-v4-flash</code> — 当前主力，便宜（¥1/M input cache miss、¥0.02/M cache hit、¥2/M output），tools 支持；(c) <code>deepseek-v4-pro</code> — 强推理但慢且贵（¥3/M in、¥6/M out，含 2.5 折优惠）。
 <br>选 (b) <code>deepseek-v4-flash</code>。理由：tools/function calling 全支持、价格最低、对 ops 工单类问答推理深度足够；用户可改 yaml 切换。<strong>不用别名 (a)</strong>，因为赛题答辩可能在 7 月后，避免到时候挂掉。
+<br><em>2026-05-23 事实修正</em>：本条目最初写的 <code>$0.14/M in</code> 价格单位是错的（混了美元符号 + 不准确的数字），实际是人民币定价；同步修正了 <code>configs/deepseek.yaml</code> 的注释，详见下方 "2026-05-23 DeepSeek 事实校对" 条目。
 </div>
 
 <div class="entry tradeoff">

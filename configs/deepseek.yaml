@@ -29,8 +29,12 @@ agent:
   llm_backend: ${KYAGENT_DEEPSEEK_TRANSPORT:-deepseek}
   fallback_to_mock: true
   deepseek:
-    # deepseek-v4-flash：tools 完整支持、$0.14/M in、推荐主力
-    # deepseek-v4-pro：强推理（thinking 模式），价格更高
+    # 定价（2026-05 官方 pricing 页核对，单位：每 1M tokens 人民币）：
+    #   deepseek-v4-flash：tools 完整支持、推荐主力
+    #     input ¥1（cache miss）/ ¥0.02（cache hit）；output ¥2
+    #   deepseek-v4-pro：强推理（thinking 模式默认开启），价格更高
+    #     input ¥3（cache miss，2.5 折）/ ¥0.025（cache hit，2.5 折）；output ¥6
+    # 完整价格 & 优惠详见 https://api-docs.deepseek.com/zh-cn/quick_start/pricing
     model: ${KYAGENT_DEEPSEEK_MODEL:-deepseek-v4-flash}
     max_tokens: 4096
     temperature: 0.2
