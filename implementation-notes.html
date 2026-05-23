@@ -69,6 +69,55 @@
 <p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
 </div>
 
+<h2>2026-05-23 — requirements.txt 漂移修复（reviewer 第六次复审）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-23 reviewer 实测验证</span>
+<div class="files">requirements.txt（重写）、implementation-notes.html（本条目）</div>
+<p><strong>触发</strong>：httpx 清洁度 commit (6086f1a) 之后 reviewer 第六次复审，指出：</p>
+<blockquote>"P1 requirements.txt 仍然会把 LoongArch 安装路径带回坏依赖。L6 还保留 <code>anthropic==0.39.0</code>，但 pyproject.toml L28 已经把 anthropic 移到 optional extra；同时 requirements.txt 没有列 httpx，PyYAML 下限也还是 <code>&gt;=6.0</code>。如果用户或部署脚本走 <code>pip install -r requirements.txt</code>，仍会默认拉 anthropic → jiter，LoongArch 上会失败。<strong>我实际用 LoongArch wheel 约束验证过：<code>anthropic==0.39.0</code> 无法解析到 jiter 的 LoongArch wheel。</strong>"</blockquote>
+<p><strong>事实复核</strong>：</p>
+<table>
+<tr><th>requirements.txt 行</th><th>当前</th><th>pyproject 主依赖</th><th>一致</th></tr>
+<tr><td>L2</td><td><code>pydantic&gt;=1.10.13,&lt;2</code></td><td>同</td><td>✅</td></tr>
+<tr><td>L3</td><td><code>PyYAML&gt;=6.0,&lt;7</code></td><td><code>&gt;=6.0.1,&lt;7</code>（5f29b53 修）</td><td>❌</td></tr>
+<tr><td>L4</td><td><code>typer&gt;=0.12</code></td><td>同</td><td>✅</td></tr>
+<tr><td>L5</td><td><code>rich&gt;=13.7</code></td><td>同</td><td>✅</td></tr>
+<tr><td>L6</td><td><code>anthropic==0.39.0</code></td><td><strong>已移到 optional</strong>（5b465cd 改）</td><td>❌</td></tr>
+<tr><td>—</td><td>缺 httpx</td><td><code>httpx&gt;=0.23.0,&lt;1</code>（5b465cd 加）</td><td>❌</td></tr>
+</table>
+<p><strong>原因分析</strong>：前面 5b465cd（通用入口防护 = anthropic → optional + httpx → main）和 5f29b53（PyYAML 6.0.1）都聚焦在 pyproject.toml + scripts/install.sh + README.md + DEPLOYMENT-LOONGARCH.md + requirements-loongarch.txt，<strong>独立漏掉了 requirements.txt 这个入口</strong>。reviewer 指出的"P1 通用入口审计 checklist"项目（5b465cd 的方法论教训第 3 条）我自己也没执行到位 —— 那条 checklist 写的是"grep setup.py / install.sh / Dockerfile / README"，**漏了 requirements.txt**。这是教训没消化的反例。</p>
+<p>同时 reviewer 真实做了 LoongArch wheel 解析验证 —— 不是事后推演，是实测过 <code>anthropic==0.39.0</code> 在 LoongArch 上 jiter 解析失败。证据链完整。</p>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-23 让 requirements.txt 严格镜像 pyproject 主依赖</span>
+<div class="files">requirements.txt（重写）</div>
+<p><strong>选择</strong>：把 requirements.txt 改成 pyproject.toml <code>[project.dependencies]</code> 的<strong>逐字镜像副本</strong>，并在文件顶部明示"改动本文件必须同步改 pyproject.toml"。</p>
+<p><strong>具体改动</strong>：</p>
+<ul>
+  <li><strong>删除</strong> <code>anthropic==0.39.0</code> 主依赖行 —— 与 pyproject 一致；同时在文件末尾"可选 LLM 后端"段落列出 <code>anthropic==0.39.0</code> 注释行 + 警示"不能直接打开 —— pip 解析依赖图会拉 jiter，LoongArch 必走 DEPLOYMENT 第 6.4 节 --no-deps 路径"</li>
+  <li><strong>新增</strong> <code>httpx&gt;=0.23.0,&lt;1</code> 主依赖行 —— HttpxBackend 用，纯 Python 零 Rust</li>
+  <li><strong>修正</strong> <code>PyYAML&gt;=6.0,&lt;7</code> → <code>PyYAML&gt;=6.0.1,&lt;7</code> —— 避开 6.0.0 Cython 3.x sdist 构建 bug（PyYAML issue #736）</li>
+  <li>顶部说明文档化"两文件同步约束"，避免未来再漂移</li>
+  <li>可选 LLM 后端段（anthropic / openai / mcp）放在末尾注释，附逐项警示</li>
+</ul>
+<p><strong>验证</strong>：</p>
+<ul>
+  <li>自动一致性检查（Python tomllib + 字符串归一化对比）确认 requirements.txt 的 active 行与 pyproject <code>[project.dependencies]</code> <strong>完全相同</strong>（5 项一一对应，无差异）</li>
+  <li><code>pytest tests/</code> → 237 passed, 2 skipped（POSIX-only，与 6086f1a 一致）</li>
+  <li><code>python -m compileall -q kyagent</code> → 静默通过</li>
+</ul>
+
+<p><strong>方法论教训</strong>：</p>
+<ol>
+  <li><strong>"通用入口审计 checklist"必须显式枚举所有入口文件</strong>。我之前 5b465cd 教训第 3 条写的"grep 所有 setup.py / install.sh / Dockerfile / README"，<strong>没列 requirements.txt</strong> —— 这就是 checklist 漏项的反面教材。下次教训写：「grep 所有 setup.py / install.sh / Dockerfile / README / requirements*.txt / Makefile / .github/workflows/ / pre-commit hooks」，并对每一种文件类型查项目实际存不存在</li>
+  <li><strong>同一份依赖列表声明在两个地方就一定会漂移</strong>。pyproject + requirements.txt 是经典反模式。<strong>缓解</strong>方案（当前采纳）：在 requirements.txt 顶部明示"必须同步 pyproject"+ 加自动一致性检查脚本（可选未来加 pre-commit hook）。<strong>根治</strong>方案（未来可考虑）：要么用 <code>pip-tools</code> 从 pyproject 自动生成 requirements.txt，要么删除 requirements.txt 让 pyproject 是唯一真相源</li>
+  <li><strong>reviewer 实测的事实证据比推演结论权重高得多</strong>。reviewer 这次明说"我实际用 LoongArch wheel 约束验证过：anthropic==0.39.0 无法解析到 jiter 的 LoongArch wheel" —— 这是可复现的真实测试，远比"我推测在 LoongArch 上会失败"有说服力。我前面所有 jiter 相关论断都基于 PyPI 元数据 + 上游 issue 调研，没有实际跑 pip resolver 在 LoongArch wheel 约束下验证一次。如果有条件应该补这一步</li>
+  <li><strong>"已修过同类问题"不等于"全部修完"</strong>。5b465cd 已经把 anthropic 移到 optional，6086f1a 又做了 httpx 清洁度，但这些都没覆盖 requirements.txt。<strong>修过同类问题之后，必须再扫一遍是否还有"同形态但不同文件"的漏网之鱼。</strong>这次连续 6 次 reviewer 复审中，至少 2 次（5b465cd / 6086f1a / 本次）都是"前一次修了类似问题但漏了某个入口"</li>
+</ol>
+</div>
+
 <h2>2026-05-23 — httpx 主依赖落地清洁度（reviewer 触发，延伸 5b465cd）</h2>
 
 <div class="entry fact">

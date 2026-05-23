@@ -1,11 +1,37 @@
-# 2026-05-22 龙芯（LoongArch64 Old World）部署兼容：见 requirements-loongarch.txt
+# kyagent 主运行依赖 — pyproject.toml [project.dependencies] 的镜像副本
+#
+# 推荐安装：pip install -e .（pyproject 是单一真相源；本文件保留是为了兼容
+# 喜欢用 `pip install -r requirements.txt` 的部署流水线 / CI / Docker）。
+#
+# **改动本文件时必须同步改 pyproject.toml**，反之亦然 —— 两边漂移会让
+# 不同入口装出不同依赖组合（历史教训：参见 implementation-notes.html
+# "2026-05-23 requirements.txt 漂移修复"条目）。
+#
+# 2026-05-23 关键变更（修复 P1 漂移）：
+#   - anthropic 已从主依赖移到 pyproject [project.optional-dependencies]
+#     不再列在此文件 → 通用入口不会拉 jiter(Rust) → LoongArch 安全
+#   - httpx 已提升到主依赖（HttpxBackend 用，纯 Python 零 Rust）
+#   - PyYAML 下限抬到 6.0.1，避开 6.0.0 在 Cython 3.x 下的 sdist 构建 bug
+#
+# 龙芯部署（LoongArch64 Old World，麒麟 V10）：用 requirements-loongarch.txt
+# 它在本清单基础上提供 `pip install --no-binary PyYAML` 等强制 sdist 步骤。
+
 pydantic>=1.10.13,<2
-PyYAML>=6.0,<7
+# PyYAML 最低 6.0.1：6.0.0 sdist build 在 Cython 3.x 下失败（PyYAML issue #736）
+PyYAML>=6.0.1,<7
 typer>=0.12
 rich>=13.7
-anthropic==0.39.0
-# 可选：OpenAI SDK（用 configs/openai.yaml 接 OpenAI / DeepSeek / 智谱 / vLLM 等兼容服务）
-# openai>=1.30
-# 可选：官方 MCP SDK（在需要把 kyagent-mcp 接到 Claude Desktop / Cursor 时安装）
-# 注意：mcp>=1.0 依赖 pydantic v2，在龙芯老世界上需要 pydantic-core Rust 编译，不建议安装
-# mcp>=1.0
+# httpx 是 HttpxBackend 用的（DeepSeek/Qwen/OpenAI 兼容协议走 deepseek_httpx）
+# 2026-05-23 起从 anthropic 的 transitive 提升到主依赖
+httpx>=0.23.0,<1
+
+# === 可选 LLM 后端（不在主依赖；按需取消注释或用 pip install -e '.[<extra>]'）===
+# anthropic==0.39.0    # Anthropic Claude 后端。含 jiter(Rust)。
+#                      # LoongArch Old World 必须走 DEPLOYMENT-LOONGARCH.md 第 6.4
+#                      # 节 --no-deps 路径，不能在此处直接打开 —— pip 解析依赖图
+#                      # 会把 jiter 拉回来，LoongArch 上无 wheel 必触发 Rust 编译。
+# openai>=1.30         # OpenAI SDK 路径。openai>=1.40 含 jiter(Rust)；
+#                      # LoongArch 推荐用 HttpxBackend（KYAGENT_DEEPSEEK_TRANSPORT=
+#                      # deepseek_httpx）替代，零 SDK 依赖。
+# mcp>=1.0             # 官方 MCP SDK（把 kyagent-mcp 接到 Claude Desktop / Cursor）。
+#                      # 依赖 pydantic v2 → pydantic-core Rust，不能装在龙芯 Old World。
