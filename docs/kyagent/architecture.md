@@ -98,7 +98,7 @@ configs/default.yaml ──(YAML + ${VAR:-default} 展开)──▶ Pydantic Con
 | LLM 让我们用 `find -exec rm` 绕过 rm 规则 | `fs_find` 工具不传 `-exec` 参数 |
 | 用户在 confirm 时被诱导按 yes | 仍要过 sudoers 白名单，不在白名单里直接失败 |
 | 进程内核态提权 | rlimit + 干净 env + PATH 白名单 + 非 root 账户 |
-| 输出体爆破 | output_cap 64K + truncated 标记 |
+| 输出体爆破 | sandbox output_cap 64K/流 + truncated 标记；tool 返回再统一截到 6KB（pipeline.OUTPUT_CAP） |
 | 死循环消耗 CPU | timeout 30s + SIGTERM/SIGKILL pgrp |
 | 删本机审计 | 审计落 SQLite + JSONL；JSONL 可外送 SIEM |
 

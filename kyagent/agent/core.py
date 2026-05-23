@@ -19,37 +19,22 @@ from kyagent.agent.llm import (
 )
 from kyagent.agent.prompt import SYSTEM_PROMPT
 from kyagent.audit.logger import AuditLogger
-from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind, Trace
 from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
-from kyagent.executor.sandbox import SandboxConfig
-from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
-from kyagent.safety.confirm import ConfirmFn, auto_deny
+from kyagent.mcp.tools.pipeline import (
+    PipelineError,
+    check_safety,
+    execute_and_format,
+    prepare_call,
+)
+from kyagent.agent import confirm_adapter
+from kyagent.confirm import ConfirmFn, auto_deny
+from kyagent.runtime import build_runtime
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.intent import IntentGuard, IntentVerdict
-from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.policy import Decision
-
-
-# 把工具名映射成"感知类别"，便于审计 timeline 一眼看出感知的是什么
-_SNAPSHOT_PREFIXES = {
-    "process_": "进程",
-    "lsof_":    "进程/句柄",
-    "net_":     "网络",
-    "log_":     "日志",
-    "svc_":     "服务",
-    "fs_":      "文件系统",
-    "pkg_":     "软件包",
-}
-
-
-def _snapshot_kind(tool_name: str) -> str:
-    for prefix, kind in _SNAPSHOT_PREFIXES.items():
-        if tool_name.startswith(prefix):
-            return kind
-    return "其它"
 
 
 # Confirm 回调：单参 ConfirmRequest → True 表示用户同意继续。
@@ -109,28 +94,12 @@ class Agent:
 
     @classmethod
     def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny) -> "Agent":
-        sandbox = SandboxConfig(
-            account=cfg.executor.account,
-            timeout=cfg.executor.timeout,
-            output_cap=cfg.executor.output_cap,
-            path_whitelist=tuple(cfg.executor.path) if cfg.executor.path else (
-                "/usr/local/bin", "/usr/bin", "/bin",
-            ),
-            forbid_root=cfg.executor.forbid_root,
-            forbid_root_strict=cfg.executor.forbid_root_strict,
-        )
-        executor = ExecutionProxy(sandbox)
-        guardrail = Guardrail.from_config(cfg)
-        store = AuditStore(cfg.resolve(cfg.audit.database))
-        jsonl = cfg.resolve(cfg.audit.jsonl_file) if cfg.audit.jsonl_file else None
-        audit = AuditLogger(store, jsonl_file=jsonl)
-        registry = default_registry()
-        if cfg.mcp.enable_tools:
-            keep = set(cfg.mcp.enable_tools)
-            registry._tools = {n: t for n, t in registry._tools.items() if n in keep}
+        # 通道无关基础设施统一从 composition root 装配
+        rt = build_runtime(cfg)
+        # 通道特定（LLM 后端、NL 意图层）在这里组合
         llm = build_backend(cfg)
         intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
-        return cls(cfg, llm, registry, guardrail, executor, audit, confirm,
+        return cls(cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
                    intent_guard=intent_guard)
 
     # ---- 主入口 --------------------------------------------------------
@@ -176,7 +145,7 @@ class Agent:
             if intent_verdict.decision is Decision.CONFIRM:
                 approved = False
                 try:
-                    approved = self.confirm(intent_verdict.to_confirm_request())
+                    approved = self.confirm(confirm_adapter.for_intent(intent_verdict))
                 except Exception:
                     approved = False
                 if not approved:
@@ -324,36 +293,13 @@ class Agent:
             return ToolResultBlock(tool_use_id=tu.id, is_error=True,
                                    content=f"未知工具：{tu.name}")
 
-        # 1. 参数校验 + argv 构造
-        try:
-            cleaned = tool.validate(tu.input or {})
-            argv = tool.build_argv(cleaned)
-        except ToolError as e:
-            self.audit.event(trace, EventKind.ERROR,
-                             {"reason": "tool_arg_error", "tool": tu.name, "detail": str(e)})
-            return ToolResultBlock(tool_use_id=tu.id, is_error=True,
-                                   content=f"工具参数非法：{e}")
-
-        self.audit.event(trace, EventKind.TOOL_REQUEST, {
-            "tool": tu.name, "argv": argv, "args": cleaned,
-            "risk": tool.risk_level.value, "requires_root": tool.requires_root,
-        })
-
-        # 赛题第 1/5 条：5 段闭环里的"感知环境"段。
-        # 当 LLM 调用的是只读 + 低风险工具时，落一条 PERCEPTION 事件，
-        # 明确标注本次 tool_use 的目的是"为决策收集系统真实状态"，区别于变更类操作。
-        # 这让审计 timeline 与赛题"接收指令→感知环境→推理决策→安全校验→执行结果"对齐。
-        if tool.read_only and tool.risk_level is RiskLevel.LOW:
-            self.audit.event(trace, EventKind.PERCEPTION, {
-                "tool": tu.name,
-                "purpose": "环境感知",
-                "snapshot_kind": _snapshot_kind(tu.name),
-                "argv_preview": " ".join(argv[:4]),
-            })
+        # 1. validate + build_argv + TOOL_REQUEST + PERCEPTION（共享流水线）
+        prep = prepare_call(tool, tu.input or {}, trace=trace, audit=self.audit)
+        if isinstance(prep, PipelineError):
+            return ToolResultBlock(tool_use_id=tu.id, is_error=True, content=prep.detail)
 
         # 2. 安全护栏（即便是 read_only 工具也过一遍，防止参数注入）
-        verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
-        self.audit.event(trace, EventKind.SAFETY_CHECK, verdict.to_dict())
+        verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
 
         if verdict.decision is Decision.DENY:
             notes.append(f"已拦截 {tu.name}: {verdict.risk.value}")
@@ -380,7 +326,9 @@ class Agent:
                 )
             approved = False
             try:
-                approved = self.confirm(verdict.to_confirm_request(tu.name, argv))
+                approved = self.confirm(
+                    confirm_adapter.for_tool_call(verdict, tu.name, prep.argv)
+                )
             except Exception:
                 approved = False
             if not approved:
@@ -394,16 +342,11 @@ class Agent:
             self.audit.event(trace, EventKind.SAFETY_CHECK,
                              {"user_confirmed": True, "tool": tu.name})
 
-        # 3. 落地执行
-        self.audit.event(trace, EventKind.EXECUTION,
-                         {"argv": argv, "requires_root": tool.requires_root})
-        exec_result = self.executor.run(argv, requires_root=tool.requires_root)
-        self.audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
-
-        # 4. 格式化
-        out = tool.format_result(exec_result)
-        content = out.content if out.ok else f"{out.content}\n---\n[stderr]\n{out.error or ''}"
-        return ToolResultBlock(tool_use_id=tu.id, is_error=not out.ok, content=content[:6000])
+        # 3. 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
+        _, formatted, content = execute_and_format(
+            prep, trace=trace, audit=self.audit, executor=self.executor,
+        )
+        return ToolResultBlock(tool_use_id=tu.id, is_error=not formatted.ok, content=content)
 
     @staticmethod
     def _blocks_to_dict(am: AssistantMessage) -> list[dict]:

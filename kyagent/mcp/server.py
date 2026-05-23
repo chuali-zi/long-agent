@@ -21,13 +21,17 @@ import sys
 from typing import Any
 
 from kyagent.audit.logger import AuditLogger
-from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind, Trace
 from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
-from kyagent.executor.sandbox import SandboxConfig
-from kyagent.mcp.tools import default_registry
-from kyagent.mcp.tools.base import ToolError, ToolRegistry
+from kyagent.mcp.tools.base import ToolRegistry
+from kyagent.mcp.tools.pipeline import (
+    PipelineError,
+    check_safety,
+    execute_and_format,
+    prepare_call,
+)
+from kyagent.runtime import build_runtime
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.policy import Decision
 
@@ -180,26 +184,13 @@ class McpServer:
                 "isError": True,
             }
 
-        try:
-            cleaned = tool.validate(args)
-        except ToolError as e:
-            self.audit.event(trace, EventKind.ERROR, {"reason": "invalid_args", "detail": str(e)})
+        # validate + build_argv + TOOL_REQUEST + PERCEPTION（共享流水线）
+        prep = prepare_call(tool, args, trace=trace, audit=self.audit)
+        if isinstance(prep, PipelineError):
             self.audit.close(trace)
-            return {"content": [{"type": "text", "text": f"参数错误: {e}"}], "isError": True}
+            return {"content": [{"type": "text", "text": prep.detail}], "isError": True}
 
-        try:
-            argv = tool.build_argv(cleaned)
-        except ToolError as e:
-            self.audit.event(trace, EventKind.ERROR, {"reason": "build_argv", "detail": str(e)})
-            self.audit.close(trace)
-            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
-
-        self.audit.event(trace, EventKind.TOOL_REQUEST,
-                         {"tool": tool.name, "argv": argv, "args": cleaned,
-                          "risk": tool.risk_level.value, "requires_root": tool.requires_root})
-
-        verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
-        self.audit.event(trace, EventKind.SAFETY_CHECK, verdict.to_dict())
+        verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
 
         if verdict.decision is Decision.DENY:
             self.audit.close(trace)
@@ -212,8 +203,7 @@ class McpServer:
             }
         if verdict.decision is Decision.CONFIRM:
             # 通过 MCP 协议无法发起用户确认，按"拒绝"返回，并提示需走交互模式
-            self.audit.event(trace, EventKind.ERROR,
-                             {"reason": "needs_confirm_via_mcp"})
+            self.audit.event(trace, EventKind.ERROR, {"reason": "needs_confirm_via_mcp"})
             self.audit.close(trace)
             return {
                 "content": [{
@@ -224,19 +214,18 @@ class McpServer:
                 "isError": True,
             }
 
-        self.audit.event(trace, EventKind.EXECUTION,
-                         {"argv": argv, "requires_root": tool.requires_root})
-        result = self.executor.run(argv, requires_root=tool.requires_root)
-        self.audit.event(trace, EventKind.EXECUTION_RESULT, result.to_dict())
-
-        out = tool.format_result(result)
+        # 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
+        _, formatted, content = execute_and_format(
+            prep, trace=trace, audit=self.audit, executor=self.executor,
+        )
         self.audit.event(trace, EventKind.AGENT_REPLY,
-                         {"ok": out.ok, "len": len(out.content), "error": out.error})
+                         {"ok": formatted.ok, "len": len(formatted.content),
+                          "error": formatted.error})
         self.audit.close(trace)
 
         return {
-            "content": [{"type": "text", "text": out.content or (out.error or "")}],
-            "isError": not out.ok,
+            "content": [{"type": "text", "text": content or (formatted.error or "")}],
+            "isError": not formatted.ok,
         }
 
 
@@ -245,28 +234,8 @@ class McpServer:
 
 def main() -> None:
     cfg = load_config()
-    sandbox = SandboxConfig(
-        account=cfg.executor.account,
-        timeout=cfg.executor.timeout,
-        output_cap=cfg.executor.output_cap,
-        path_whitelist=tuple(cfg.executor.path) if cfg.executor.path else (
-            "/usr/local/bin", "/usr/bin", "/bin",
-        ),
-        forbid_root=cfg.executor.forbid_root,
-        forbid_root_strict=cfg.executor.forbid_root_strict,
-    )
-    executor = ExecutionProxy(sandbox)
-    guardrail = Guardrail.from_config(cfg)
-    store = AuditStore(cfg.resolve(cfg.audit.database))
-    audit = AuditLogger(store, jsonl_file=cfg.resolve(cfg.audit.jsonl_file) if cfg.audit.jsonl_file else None)
-
-    registry = default_registry()
-    # 白名单过滤
-    if cfg.mcp.enable_tools:
-        keep = set(cfg.mcp.enable_tools)
-        registry._tools = {n: t for n, t in registry._tools.items() if n in keep}
-
-    server = McpServer(cfg, registry, guardrail, executor, audit)
+    rt = build_runtime(cfg)
+    server = McpServer(cfg, rt.registry, rt.guardrail, rt.executor, rt.audit)
     server.serve()
 
 

@@ -35,7 +35,7 @@ from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import load_config
 from kyagent.mcp.tools import default_registry
-from kyagent.safety.confirm import ConfirmRequest
+from kyagent.confirm import ConfirmRequest
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.policy import Decision
 

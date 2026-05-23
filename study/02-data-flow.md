@@ -91,62 +91,61 @@ kyagent ask "查 80 端口" --json
 │ return AgentRunResult(trace, final_text, ...)                │
 └─────────────────────────────────────────────────────────────┘
 
-────────── _handle_tool_use 放大（agent/core.py:236） ──────────
+────────── _handle_tool_use 放大（共享流水线 pipeline.py） ──────────
 
   tool = self.registry.get("lsof_port")
-  ┌─ tool.validate({"port":80})            ── JSON Schema 校验
-  │   ─ required=["port"] 满足
-  │   ─ type=integer，80 已经是 int，原样返回
-  │   → cleaned = {"port": 80}
+  ┌─ pipeline.prepare_call(tool, {"port":80}, trace, audit)
+  │   ├─ tool.validate({"port":80})            ── JSON Schema 校验
+  │   │   → cleaned = {"port": 80}
+  │   ├─ tool.build_argv(cleaned)              ── 受控 argv
+  │   │   → ["lsof", "-nP", "-i", "TCP:80"]
+  │   ├─ audit.event(TOOL_REQUEST,
+  │   │              {"tool":"lsof_port",
+  │   │               "argv":["lsof","-nP","-i","TCP:80"],
+  │   │               "args":{"port":80},
+  │   │               "risk":"low",
+  │   │               "requires_root": False})
+  │   ├─ (read_only + LOW) → audit.event(PERCEPTION, {...})
+  │   │     ── MCP / Agent 两条通道现在都会落这条
+  │   └─ return PreparedCall(tool, cleaned, argv)
   │
-  ├─ tool.build_argv(cleaned)              ── 受控 argv
-  │   → ["lsof", "-nP", "-i", "TCP:80"]
-  │
-  ├─ audit.event(TOOL_REQUEST,
-  │              {"tool":"lsof_port",
-  │               "argv":["lsof","-nP","-i","TCP:80"],
-  │               "args":{"port":80},
-  │               "risk":"low",
-  │               "requires_root": False})
-  │
-  ├─ verdict = guardrail.check_argv(argv, declared_risk=LOW)
-  │   ─ engine.scan_cmdline("lsof -nP -i TCP:80")
-  │     ─ 命中 0 条规则
-  │     ─ risk = LOW
-  │   ─ declared_risk = LOW 不抬升
-  │   ─ policy.decide(LOW) → Decision.ALLOW
+  ├─ pipeline.check_safety(prep, trace, audit, guardrail)
+  │   ─ guardrail.check_argv(argv, declared_risk=LOW)
+  │     ─ engine.scan_cmdline("lsof -nP -i TCP:80")
+  │       ─ 命中 0 条规则
+  │       ─ risk = LOW
+  │     ─ declared_risk = LOW 不抬升
+  │     ─ policy.decide(LOW) → Decision.ALLOW
+  │   ─ audit.event(SAFETY_CHECK, verdict.to_dict())
   │   → Verdict(decision=ALLOW, risk=LOW, hits=[])
-  │
-  ├─ audit.event(SAFETY_CHECK, verdict.to_dict())
   │
   ├─ decision != DENY/CONFIRM → 直接落地
   │
-  ├─ audit.event(EXECUTION, {"argv":[...], "requires_root":False})
-  │
-  ├─ exec_result = self.executor.run(argv, requires_root=False)
-  │   ┌── ExecutionProxy.run()  (executor/proxy.py:81)
-  │   │   sys.platform == "win32" → _run_windows_mock()
-  │   │   返回 ExecutionResult(returncode=0, stdout="[mock]...",
-  │   │                       skipped_reason="windows_mock")
-  │   │
-  │   │   (在 Linux 上则进入 _run_posix：
-  │   │    1. _wrap_privilege 决定是否 sudo 包裹
-  │   │    2. _resolve_command 走 PATH 白名单
-  │   │    3. build_clean_env 干净 env
-  │   │    4. Popen with preexec_fn(setpgid, RLIMIT_*)
-  │   │    5. communicate(timeout=30s)
-  │   │    6. 输出截断 + 解码 + 返回)
-  │   └──
-  │
-  ├─ audit.event(EXECUTION_RESULT, exec_result.to_dict())
-  │
-  ├─ out = tool.format_result(exec_result)    ── 默认实现：stdout / stderr
-  │   ─ windows_mock 走 ok=True，content=stdout
-  │   → ToolResult(ok=True, content="[mock][win32] would execute: lsof ...")
+  ├─ pipeline.execute_and_format(prep, trace, audit, executor)
+  │   ├─ audit.event(EXECUTION, {"argv":[...], "requires_root":False})
+  │   ├─ exec_result = executor.run(argv, requires_root=False)
+  │   │   ┌── ExecutionProxy.run()
+  │   │   │   sys.platform == "win32" → _run_windows_mock()
+  │   │   │   返回 ExecutionResult(returncode=0, stdout="[mock]...",
+  │   │   │                       skipped_reason="windows_mock")
+  │   │   │
+  │   │   │   (在 Linux 上则进入 _run_posix：
+  │   │   │    1. _wrap_privilege 决定是否 sudo 包裹
+  │   │   │    2. _resolve_command 走 PATH 白名单
+  │   │   │    3. build_clean_env 干净 env
+  │   │   │    4. Popen with preexec_fn(setpgid, RLIMIT_*)
+  │   │   │    5. communicate(timeout=30s)
+  │   │   │    6. 输出截断 + 解码 + 返回)
+  │   │   └──
+  │   ├─ audit.event(EXECUTION_RESULT, exec_result.to_dict())
+  │   ├─ formatted = tool.format_result(exec_result)   ── 默认实现
+  │   │   → ToolResult(ok=True, content="[mock][win32] would execute: lsof ...")
+  │   └─ content = formatted.content (失败时拼 stderr)
+  │              ，统一截到 OUTPUT_CAP = 6000
   │
   └─ return ToolResultBlock(tool_use_id=tu.id,
-                            is_error=False,
-                            content=out.content[:6000])
+                            is_error=not formatted.ok,
+                            content=content)
 ```
 
 ---
@@ -216,8 +215,9 @@ LLM 调 `svc_restart` 传 `unit = "nginx"`：
 - `audit.event(SAFETY_CHECK, {decision:"confirm", risk:"high", ...})`
 - 主循环看到 CONFIRM：
   - 检查当前线程是不是 main_thread（C2 修复）
-  - 是 → 调 `self.confirm(tu.name, argv, verdict)`
-  - 在 `kyagent ask` 模式下 confirm 是 `lambda *a: False` → 返回 False
+  - 是 → 调 `self.confirm(confirm_adapter.for_tool_call(verdict, tu.name, prep.argv))`
+    （`ConfirmFn` 只收一个 `ConfirmRequest`，Verdict→UI 契约的翻译由 adapter 做）
+  - 在 `kyagent ask` 模式下 confirm 是 `lambda *a, **k: False` → 返回 False
   - 写 `EventKind.ERROR{"reason":"user_denied_confirm"}`
   - 返回 ToolResultBlock(is_error=True, content="[denied] 用户拒绝执行")
 - LLM 拿到 [denied] 结果，会改话术（"你拒绝了我，那我只能告诉你..."）
@@ -253,16 +253,16 @@ Claude Desktop                      kyagent mcp serve
              "arguments":{"port":80}}} ─▶ McpServer._call_tool()
                                             trace = Trace(user="mcp-client")
                                             audit.open(trace)
-                                            ┌─ 同 Agent 主循环里的处理：
-                                            │   validate → build_argv
-                                            │   audit.event(TOOL_REQUEST)
-                                            │   guardrail.check_argv
-                                            │   audit.event(SAFETY_CHECK)
+                                            ┌─ 与 Agent 共享同一流水线（pipeline.py）：
+                                            │   pipeline.prepare_call(...)
+                                            │     → TOOL_REQUEST + 可选 PERCEPTION
+                                            │   pipeline.check_safety(...)
+                                            │     → SAFETY_CHECK
                                             │   if DENY → 返回 isError
                                             │   if CONFIRM → MCP 通道默认 deny
-                                            │   audit.event(EXECUTION)
-                                            │   executor.run(argv)
-                                            │   audit.event(EXECUTION_RESULT)
+                                            │   pipeline.execute_and_format(...)
+                                            │     → EXECUTION / EXECUTION_RESULT
+                                            │     + stderr 拼接 + OUTPUT_CAP 6KB
                                             │   audit.event(AGENT_REPLY)
                                             │   audit.close(trace)
                                             └─
@@ -270,7 +270,7 @@ Claude Desktop                      kyagent mcp serve
                                                         "isError":false}}
 ```
 
-**关键差异**：MCP 通道没有 LLM 推理（推理在 Claude Desktop 那边），所以没有 LLM_THOUGHT 事件，但 USER_INPUT 也被省了（因为请求本身就是 tool_call）。`mcp/server.py:_call_tool` 里没有 USER_INPUT，直接 TOOL_REQUEST 开始。
+**关键差异**：MCP 通道没有 LLM 推理（推理在 Claude Desktop 那边），所以没有 LLM_THOUGHT 事件，也没有 USER_INPUT（请求本身就是 tool_call）；`_call_tool` 直接从 `pipeline.prepare_call` 开始落 TOOL_REQUEST（read_only+LOW 时同样会落 PERCEPTION，与 Agent 通道一致）。CONFIRM 在 MCP 通道下没有交互通道，按 deny 处理并返回 `isError=True`。
 
 ---
 

@@ -1,7 +1,7 @@
 # 03 · Agent 主循环深读
 
-> 这一份对应文件：`kyagent/agent/core.py`（318 行）
-> 配套阅读：`kyagent/agent/prompt.py`（SYSTEM_PROMPT）
+> 这一份对应文件：`kyagent/agent/core.py`
+> 配套阅读：`kyagent/agent/prompt.py`（SYSTEM_PROMPT）、`kyagent/agent/confirm_adapter.py`、`kyagent/runtime.py`
 
 ---
 
@@ -9,38 +9,57 @@
 
 ```
 agent/core.py
-├── ConfirmFn 类型别名      # CLI 注入的回调
-├── _auto_deny()            # 默认 confirm = 拒绝
-├── AgentRunResult dataclass # ask() 返回值
+├── _auto_deny 别名           # 指向 kyagent.confirm.auto_deny（向后兼容）
+├── AgentRunResult dataclass   # ask() 返回值
 ├── Agent class
-│   ├── __init__               # 注入依赖
+│   ├── __init__               # 注入依赖（含 intent_guard）
 │   ├── _ensure_pool / shutdown  # ThreadPool 生命周期
-│   ├── from_config            # 工厂方法
-│   ├── ask                    # ★ 主入口
+│   ├── from_config            # 工厂：调 build_runtime + 装通道特定层
+│   ├── ask                    # ★ 主入口（含意图层）
 │   ├── _executor_supports_parallel_tools  # 并行 gate-1
 │   ├── _is_parallel_safe      # 并行 gate-2
-│   ├── _handle_tool_use       # 单个工具调用的处理
+│   ├── _handle_tool_use       # 单个工具调用（走 pipeline）
 │   └── _blocks_to_dict        # 序列化 LLM 输出
 └── build_agent()              # load_config + Agent.from_config
 ```
+
+`ConfirmFn` 类型与 `ConfirmRequest` 数据类不住在 `agent/core.py`，它们在顶层
+`kyagent/confirm.py`——这是跨层契约（CLI、Agent、未来 web UI 都要用，但谁都不
+应该反过来依赖 safety 包）。Verdict → ConfirmRequest 的翻译由
+`kyagent/agent/confirm_adapter.py` 负责（`for_tool_call` / `for_intent`）。
 
 ---
 
 ## 2. ConfirmFn 与依赖注入
 
 ```python
-# core.py:34
-ConfirmFn = Callable[[str, list[str], dict], bool]
+# kyagent/confirm.py
+@dataclass(frozen=True)
+class ConfirmRequest:
+    title: str                          # "tool rm" / "自然语言意图审查"
+    risk: str                           # "low" / "medium" / "high" / "critical"
+    summary_lines: list[str] = ...      # 命中规则列表
+    body: str | None = None             # argv / rationale
 
-def _auto_deny(name: str, argv: list[str], verdict: dict) -> bool:
+ConfirmFn = Callable[[ConfirmRequest], bool]
+
+def auto_deny(_req: ConfirmRequest) -> bool:
     return False
 ```
 
-Agent 不知道 CLI 长什么样，也不知道 stdin 是什么。它只接收一个回调：给定 tool name + argv + verdict，返回是否放行。具体怎么问用户（弹 Rich Panel？发邮件？）是上层的事。
+Agent 不知道 CLI 长什么样，也不知道 stdin 是什么。它只接收一个回调：给一份
+`ConfirmRequest`（已经 stringify 好），返回是否放行。具体怎么问用户（弹 Rich
+Panel？发邮件？）由调用方自定义。Verdict → ConfirmRequest 的翻译由
+`confirm_adapter.for_tool_call(verdict, tool_name, argv)` 与
+`confirm_adapter.for_intent(verdict)` 做——这一层是 safety domain 和 UI 契约
+**唯一的接触面**，避免 safety 反过来依赖 UI。
 
-CLI 端的实现（`cli.py:57 _cli_confirm`）：用 Rich Panel 把 verdict 渲染出来，Prompt.ask 读 y/n。MCP 端：不存在交互通道，直接当 deny 处理（`mcp/server.py:174`）。
+CLI 端的实现（`cli._cli_confirm`）：用 Rich Panel 把 `ConfirmRequest` 渲染出来，
+Prompt.ask 读 y/n。MCP 端：不存在交互通道，直接当 deny 处理（在
+`mcp/server.py:_call_tool` 的 CONFIRM 分支返回 isError）。
 
-这就是经典的 **依赖反转**：核心库（Agent）不依赖具体 IO 形态，由调用方注入。
+这就是经典的 **依赖反转**：核心库（Agent / safety）不依赖具体 IO 形态，由调用
+方注入；UI 契约（`ConfirmRequest`）住在顶层，谁都不会被反向拖累。
 
 ---
 
@@ -68,13 +87,13 @@ class AgentRunResult:
 ## 4. Agent.__init__ 与 from_config
 
 ```python
-# core.py:54
 def __init__(self, cfg, llm, registry, guardrail, executor, audit,
-             confirm=_auto_deny):
+             confirm=_auto_deny, intent_guard: IntentGuard | None = None):
     self.cfg = cfg
     self.llm = llm
     self.registry = registry
     self.guardrail = guardrail
+    self.intent_guard = intent_guard   # 赛题第 3 条：NL 意图层（None 则跳过）
     self.executor = executor
     self.audit = audit
     self.confirm = confirm
@@ -87,32 +106,36 @@ def __init__(self, cfg, llm, registry, guardrail, executor, audit,
 - `cfg` — 配置（让 ask() 知道 max_iterations 等）
 - `llm` — 已构造好的 `LlmBackend`
 - `registry` — `ToolRegistry`，含工具实例
-- `guardrail` — 已构造好的 `Guardrail`
+- `guardrail` — 已构造好的 `Guardrail`（argv 层二次过滤）
 - `executor` — `ExecutionProxy`
 - `audit` — `AuditLogger`
-- `confirm` — 回调（默认 _auto_deny）
+- `confirm` — `ConfirmFn` 回调（默认 `auto_deny`）
+- `intent_guard` — `IntentGuard | None`，意图层一次过滤；None 表示禁用该层
 
-**单元测试友好**：`test_agent_parallel.py` 直接 new 一个 `Agent` 然后替换 `agent.executor = RecordingExecutor(...)` 就能验证调度逻辑（test_agent_parallel.py:75）。
+**单元测试友好**：`test_agent_parallel.py` 直接 new 一个 `Agent` 然后替换
+`agent.executor = RecordingExecutor(...)` 就能验证调度逻辑。
 
-`from_config` 是工厂方法，把 `Config` 解析成所有依赖：
+`from_config` 是工厂方法，把 `Config` 解析成所有依赖。本身已经收敛得很瘦——
+通道无关的基础设施（sandbox / executor / guardrail / audit / registry）都由
+`kyagent/runtime.py:build_runtime` 统一装配，避免 `McpServer.main` 重复一份：
 
 ```python
-# core.py:89
 @classmethod
-def from_config(cls, cfg, confirm=_auto_deny):
-    sandbox = SandboxConfig(account=cfg.executor.account, ...)
-    executor = ExecutionProxy(sandbox)
-    guardrail = Guardrail.from_config(cfg)
-    store = AuditStore(cfg.resolve(cfg.audit.database))
-    jsonl = cfg.resolve(cfg.audit.jsonl_file) if cfg.audit.jsonl_file else None
-    audit = AuditLogger(store, jsonl_file=jsonl)
-    registry = default_registry()
-    if cfg.mcp.enable_tools:
-        keep = set(cfg.mcp.enable_tools)
-        registry._tools = {n: t for n, t in registry._tools.items() if n in keep}
+def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny) -> "Agent":
+    # 通道无关基础设施统一从 composition root 装配
+    rt = build_runtime(cfg)
+    # 通道特定（LLM 后端、NL 意图层）在这里组合
     llm = build_backend(cfg)
-    return cls(cfg, llm, registry, guardrail, executor, audit, confirm)
+    intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
+    return cls(cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
+               intent_guard=intent_guard)
 ```
+
+`build_runtime` 内部做了：SandboxConfig 装配（含 path_whitelist fallback）、
+ExecutionProxy、Guardrail.from_config、AuditStore/AuditLogger（含可选 JSONL）、
+default_registry（含 `cfg.mcp.enable_tools` 白名单过滤）。Agent 这边只剩"LLM
+后端 + 意图层"两个通道特定品；MCP 服务器入口（`McpServer.main`）同样直接拿
+`rt.registry/guardrail/executor/audit`，两条通道行为永远对齐。
 
 注意 `cfg.mcp.enable_tools` 当作白名单：留空时全部启用；非空时过滤 registry。这让运维方能在生产配置里只放白名单工具（例如完全禁掉 `svc_restart` 这类高危）。
 
@@ -143,23 +166,39 @@ def shutdown(self):
 
 ## 6. ask() —— 主循环逐行解读
 
-### 6.1 起手三连
+### 6.1 起手三连 + 意图层
 
 ```python
-# core.py:114
 def ask(self, user_input: str, user: str = "anonymous") -> AgentRunResult:
     trace = Trace(user=user)
     self.audit.open(trace)
     trace.metadata.update({"backend": self.llm.name})
 
     self.audit.event(trace, EventKind.USER_INPUT, {"text": user_input})
-    self.messages.append({"role": "user", "content": user_input})
+
+    # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
+    # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
+    # 之后的"二次过滤"，两者互补缺一不可。
+    effective_input = user_input
+    if self.intent_guard is not None:
+        intent_verdict = self.intent_guard.evaluate(user_input, context={"user": user})
+        self.audit.event(trace, EventKind.INTENT_CHECK, intent_verdict.to_dict())
+        # DENY → 直接 blocked_at=intent，根本不进 LLM
+        # CONFIRM → 调 self.confirm(confirm_adapter.for_intent(verdict))
+        # 通过则净化零宽字符后 effective_input 送 LLM
+        ...
+
+    self.messages.append({"role": "user", "content": effective_input})
 ```
 
 - 新建 `Trace`（自动分配 trace_id = `trace-{uuid hex[:12]}`）
 - `audit.open()` 在 SQLite 写一条 traces 表记录
-- metadata 写后端名（"mock" / "anthropic" / "openai"），后续 `kyagent audit list` 可以按通道筛选
+- metadata 写后端名（"mock" / "anthropic" / "openai" / "deepseek" / "qwen"），后续 `kyagent audit list` 可以按通道筛选
 - 把"用户说的话"写为 USER_INPUT 事件
+- **意图层**（赛题第 3 条）：在 user_input 进入 LLM 之前先过 `IntentGuard`，命中
+  DENY 直接终止 trace（写 `AGENT_REPLY{blocked_at:"intent"}`）；命中 CONFIRM 通过
+  `confirm_adapter.for_intent(verdict)` 翻成 `ConfirmRequest` 交给上层；通过则把
+  净化后的 `sanitized_text`（剥零宽字符）送进 LLM，原文保留在 USER_INPUT 事件里
 - 加进 `self.messages`，作为后续 LLM 的输入
 
 ### 6.2 主循环开始
@@ -377,17 +416,18 @@ def _is_parallel_safe(self, tu: ToolUseBlock) -> bool:
 
 ## 8. _handle_tool_use —— 一个工具调用的全生命周期
 
-这是 ask() 主循环里调用最多的方法，也是审计链事件的真正生产者。
+这是 ask() 主循环里调用最多的方法，也是审计链事件的真正生产者。它的"真重复"
+三段（validate+build_argv+request、guardrail、execute+format）已经抽到
+`kyagent/mcp/tools/pipeline.py`，Agent 与 MCP 共享同一份流水线，差异点（CONFIRM
+处理、trace 生命周期、返回类型）留在调用方。
 
 ```python
-# core.py:236
 def _handle_tool_use(self, trace, tu, notes) -> ToolResultBlock:
 ```
 
 ### 8.1 工具不存在 → ERROR 兜底
 
 ```python
-# core.py:238
 tool = self.registry.get(tu.name)
 if tool is None:
     self.audit.event(trace, EventKind.ERROR,
@@ -398,50 +438,33 @@ if tool is None:
 
 LLM 提议调用一个不存在的工具（理论上不该发生，工具表是 LLM 看到的）。审计记错，返回错误，让 LLM 自己改话术。
 
-### 8.2 参数校验
+### 8.2 prepare_call（参数校验 + argv 构造 + TOOL_REQUEST + 可选 PERCEPTION）
 
 ```python
-# core.py:246
-try:
-    cleaned = tool.validate(tu.input or {})
-    argv = tool.build_argv(cleaned)
-except ToolError as e:
-    self.audit.event(trace, EventKind.ERROR,
-                     {"reason": "tool_arg_error", "tool": tu.name, "detail": str(e)})
-    return ToolResultBlock(tool_use_id=tu.id, is_error=True,
-                           content=f"工具参数非法：{e}")
+prep = prepare_call(tool, tu.input or {}, trace=trace, audit=self.audit)
+if isinstance(prep, PipelineError):
+    return ToolResultBlock(tool_use_id=tu.id, is_error=True, content=prep.detail)
 ```
 
-- `Tool.validate` 做轻量 JSON Schema 校验（type/required）—— mcp/tools/base.py:59
-- `Tool.build_argv` 把 cleaned args 翻译成 argv，里面带工具自己的参数清洗（如 `_safe_path`、`_validate_unit`、shell 元字符黑名单）
-- 任何一步抛 `ToolError` 都被捕获，写 ERROR 事件，返回错误结果
+`pipeline.prepare_call` 内部做：
+- `tool.validate(args)`：JSON Schema 校验（required/type/enum/min/max/pattern）。失败抛 `ToolError`，pipeline 写 ERROR 事件并返回 `PipelineError("invalid_args", ...)`
+- `tool.build_argv(cleaned)`：argv 构造（含 `_safe_path`、`_validate_unit`、shell 元字符黑名单）。失败同上，`PipelineError("build_argv", ...)`
+- 落 `TOOL_REQUEST` 事件（含 tool/argv/args/risk/requires_root）
+- 若 `tool.read_only and risk_level == LOW`，再落一条 `PERCEPTION` 事件标注"被动信息收集"——MCP 与 Agent 共用这条逻辑后，两条通道的 timeline 不再漂移
 
-### 8.3 TOOL_REQUEST 事件
+调用方拿到 `PipelineError` 就直接打包返回；拿到 `PreparedCall` 就继续走 guardrail。
+
+### 8.3 check_safety（guardrail + SAFETY_CHECK）
 
 ```python
-# core.py:255
-self.audit.event(trace, EventKind.TOOL_REQUEST, {
-    "tool": tu.name, "argv": argv, "args": cleaned,
-    "risk": tool.risk_level.value, "requires_root": tool.requires_root,
-})
+verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
 ```
 
-最详细的一条事件：工具名、argv、cleaned args、声明 risk、是否 root。后续审计回看主要看这一条。
+`pipeline.check_safety` 调 `guardrail.check_argv(argv, declared_risk=tool.risk_level)` 并把 verdict 落 `SAFETY_CHECK` 事件。**它不处理 DENY/CONFIRM**——调用方按通道特性自决。工具声明的 `risk_level` 作为下限传进去：例如 `process_list` 声明 LOW，规则里也没命中，最终 risk=LOW；`svc_restart` 声明 HIGH，规则里命中 0 条，但 declared_risk 抬升 → final risk=HIGH。
 
-### 8.4 安全护栏
-
-```python
-# core.py:261
-verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
-self.audit.event(trace, EventKind.SAFETY_CHECK, verdict.to_dict())
-```
-
-工具声明的 `risk_level` 作为下限传进去。例如 `process_list` 声明 LOW，规则里也没命中，最终 risk=LOW；`svc_restart` 声明 HIGH，规则里命中 0 条，但 declared_risk 抬升 → final risk=HIGH。
-
-### 8.5 DENY 分支
+### 8.4 DENY 分支
 
 ```python
-# core.py:264
 if verdict.decision is Decision.DENY:
     notes.append(f"已拦截 {tu.name}: {verdict.risk.value}")
     return ToolResultBlock(
@@ -454,10 +477,9 @@ if verdict.decision is Decision.DENY:
 
 直接返回 `[denied]` 前缀的错误结果，让 LLM 看到并改方案。不写新的 ERROR 事件——SAFETY_CHECK 已经记录了。
 
-### 8.6 CONFIRM 分支（含 C2 第二道防线）
+### 8.5 CONFIRM 分支（含 C2 第二道防线）
 
 ```python
-# core.py:273
 if verdict.decision is Decision.CONFIRM:
     # C2 第二道防线
     if threading.current_thread() is not threading.main_thread():
@@ -471,7 +493,9 @@ if verdict.decision is Decision.CONFIRM:
         )
     approved = False
     try:
-        approved = self.confirm(tu.name, argv, verdict.to_dict())
+        approved = self.confirm(
+            confirm_adapter.for_tool_call(verdict, tu.name, prep.argv)
+        )
     except Exception:
         approved = False
     if not approved:
@@ -490,34 +514,27 @@ if verdict.decision is Decision.CONFIRM:
 - **第一道**（`_is_parallel_safe`）：理论上 CONFIRM 路径不会进 worker，因为预检就把所有 confirm-required 工具排除了并行
 - **第二道**（这里）：兜底——如果第一道因为 `llm_reviewer` 非确定性失守，worker 线程在内检拿到 CONFIRM 也立刻 deny
 
+`self.confirm` 是 `ConfirmFn` 类型——只接收一个 `ConfirmRequest`，调用方通过
+`confirm_adapter.for_tool_call(verdict, tu.name, prep.argv)` 把"裁决 + 调用上下文"
+翻译成 UI 契约。Agent 自己不感知 ConfirmRequest 内部字段；CLI 也不感知 Verdict。
 `try/except` 把 confirm 回调里的任何异常都视为"未批准"，防御性编程。
 
-### 8.7 落地执行
+### 8.6 execute_and_format（落地执行 + 共享格式化）
 
 ```python
-# core.py:290
-self.audit.event(trace, EventKind.EXECUTION,
-                 {"argv": argv, "requires_root": tool.requires_root})
-exec_result = self.executor.run(argv, requires_root=tool.requires_root)
-self.audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
+_, formatted, content = execute_and_format(
+    prep, trace=trace, audit=self.audit, executor=self.executor,
+)
+return ToolResultBlock(tool_use_id=tu.id, is_error=not formatted.ok, content=content)
 ```
 
-- EXECUTION 事件先写（"即将执行"）
-- 真正调 `executor.run()`，POSIX 上会 fork + sudo + preexec_fn + Popen + communicate
-- EXECUTION_RESULT 事件写完整结果（含 stdout/stderr/rc/duration/timed_out）
-
-### 8.8 格式化返回
-
-```python
-# core.py:296
-out = tool.format_result(exec_result)
-content = out.content if out.ok else f"{out.content}\n---\n[stderr]\n{out.error or ''}"
-return ToolResultBlock(tool_use_id=tu.id, is_error=not out.ok, content=content[:6000])
-```
-
-- `tool.format_result` 默认实现把 ExecutionResult 转成 ToolResult（成功取 stdout，失败带 stderr）
-- 失败时把 error 一起拼到 content 里，方便 LLM 解读
-- 截 6000 字防止单条 tool_result 撑爆 LLM 输入
+`pipeline.execute_and_format` 内部做：
+- 落 `EXECUTION` 事件（含 argv/requires_root）
+- 调 `executor.run(argv, requires_root=tool.requires_root)`；POSIX 上会 fork + sudo + preexec_fn + Popen + communicate
+- 落 `EXECUTION_RESULT` 事件（含 stdout/stderr/rc/duration/timed_out）
+- `tool.format_result(exec_result)` 默认实现把 ExecutionResult 转成 ToolResult（成功取 stdout，失败带 stderr）
+- 失败时把 stderr 拼进 content（共享逻辑，与 MCP 通道一致）
+- 统一截到 `OUTPUT_CAP = 6000`（pipeline 模块顶级常量），防止单条 tool_result 撑爆 LLM 输入或 MCP 响应
 
 ---
 

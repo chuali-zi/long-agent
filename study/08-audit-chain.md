@@ -26,12 +26,13 @@
 
 ---
 
-## 2. EventKind（trace.py:12）
+## 2. EventKind
 
 ```python
 class EventKind(str, Enum):
     USER_INPUT = "user_input"           # 1. 接收指令
-    PERCEPTION = "perception"           # 2. 感知环境（暂未用）
+    INTENT_CHECK = "intent_check"       # 1b. NL 意图层裁决（赛题第 3 条）
+    PERCEPTION = "perception"           # 2. 感知环境（read_only + LOW 工具落此事件）
     LLM_THOUGHT = "llm_thought"         # 3. 推理决策（LLM 文本输出）
     TOOL_REQUEST = "tool_request"       # 3b. LLM 提议调工具
     SAFETY_CHECK = "safety_check"       # 4. 安全校验 + verdict
@@ -41,7 +42,19 @@ class EventKind(str, Enum):
     ERROR = "error"
 ```
 
-正常一次 ask() 的 7 段事件就是除了 PERCEPTION 和 ERROR 之外的 7 个 kind。PERCEPTION 是保留位（暂未使用），ERROR 是兜底（LLM 报错 / 工具参数错 / max_iterations / user_denied_confirm / confirm_in_worker_denied 等等）。
+正常一次带工具调用的 ask() 闭环事件依次是：USER_INPUT → (INTENT_CHECK 若启用) →
+LLM_THOUGHT → TOOL_REQUEST → (PERCEPTION 若工具 read_only+LOW) → SAFETY_CHECK →
+EXECUTION → EXECUTION_RESULT → AGENT_REPLY。
+
+PERCEPTION 不再是保留位：`kyagent/mcp/tools/pipeline.py:prepare_call` 对所有
+`read_only and risk_level == LOW` 的工具落一条 PERCEPTION 事件，标注"被动信息
+收集"——Agent 与 MCP 共用该流水线，两条通道现在都会落这条事件，对齐审计 timeline。
+
+INTENT_CHECK 由 `Agent.ask()` 在 LLM 调用之前写入（前提是 `cfg.safety.intent_check=true`
+且 `IntentGuard` 已注入）；payload 含 risk / decision / hits / rationale / sanitized_text 等。
+
+ERROR 是兜底（LLM 报错 / 工具参数错 / max_iterations / user_denied_confirm /
+confirm_in_worker_denied / needs_confirm_via_mcp 等等）。
 
 ---
 

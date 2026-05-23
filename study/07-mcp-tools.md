@@ -405,6 +405,10 @@ def _initialize(self, params):
 
 ### 5.6 \_call_tool —— 核心方法
 
+`_call_tool` 已经把"真重复"的三段委托给共享流水线
+`kyagent/mcp/tools/pipeline.py`，剩下的差异（CONFIRM 通道行为、trace 生命周期、
+返回类型包装）才留在这里。
+
 ```python
 def _call_tool(self, params):
     name = params.get("name")
@@ -418,28 +422,15 @@ def _call_tool(self, params):
     if tool is None:
         self.audit.event(trace, EventKind.ERROR, {"reason":"unknown_tool", "name":name})
         self.audit.close(trace)
-        return {"content":[{"type":"text", "text":f"unknown tool: {name}"}], "isError":True}
+        return {"content":[{"type":"text","text":f"unknown tool: {name}"}], "isError":True}
 
-    try:
-        cleaned = tool.validate(args)
-    except ToolError as e:
-        self.audit.event(trace, EventKind.ERROR, {"reason":"invalid_args","detail":str(e)})
+    # validate + build_argv + TOOL_REQUEST + 可选 PERCEPTION（共享流水线）
+    prep = prepare_call(tool, args, trace=trace, audit=self.audit)
+    if isinstance(prep, PipelineError):
         self.audit.close(trace)
-        return {"content":[{"type":"text","text":f"参数错误: {e}"}], "isError":True}
+        return {"content":[{"type":"text","text":prep.detail}], "isError":True}
 
-    try:
-        argv = tool.build_argv(cleaned)
-    except ToolError as e:
-        self.audit.event(trace, EventKind.ERROR, {"reason":"build_argv","detail":str(e)})
-        self.audit.close(trace)
-        return {"content":[{"type":"text","text":str(e)}], "isError":True}
-
-    self.audit.event(trace, EventKind.TOOL_REQUEST, {
-        "tool":tool.name, "argv":argv, "args":cleaned,
-        "risk":tool.risk_level.value, "requires_root":tool.requires_root})
-
-    verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
-    self.audit.event(trace, EventKind.SAFETY_CHECK, verdict.to_dict())
+    verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
 
     if verdict.decision is Decision.DENY:
         self.audit.close(trace)
@@ -451,47 +442,56 @@ def _call_tool(self, params):
         self.audit.event(trace, EventKind.ERROR, {"reason":"needs_confirm_via_mcp"})
         self.audit.close(trace)
         return {"content":[{"type":"text",
-            "text":f"需用户确认才能执行（risk={verdict.risk.value}）；通过 MCP 通道默认不发起确认。请改走 kyagent chat。"}],
+            "text":(f"需用户确认才能执行（risk={verdict.risk.value}）；"
+                    "通过 MCP 通道默认不发起确认。请改走 kyagent chat。")}],
             "isError":True}
 
-    self.audit.event(trace, EventKind.EXECUTION, {"argv":argv, "requires_root":tool.requires_root})
-    result = self.executor.run(argv, requires_root=tool.requires_root)
-    self.audit.event(trace, EventKind.EXECUTION_RESULT, result.to_dict())
-
-    out = tool.format_result(result)
+    # 落地执行 + 格式化（共享流水线，含 stderr 拼接 + OUTPUT_CAP 截断）
+    _, formatted, content = execute_and_format(
+        prep, trace=trace, audit=self.audit, executor=self.executor,
+    )
     self.audit.event(trace, EventKind.AGENT_REPLY,
-                     {"ok":out.ok, "len":len(out.content), "error":out.error})
+                     {"ok":formatted.ok, "len":len(formatted.content),
+                      "error":formatted.error})
     self.audit.close(trace)
 
-    return {"content":[{"type":"text","text":out.content or (out.error or "")}],
-            "isError":not out.ok}
+    return {"content":[{"type":"text","text": content or (formatted.error or "")}],
+            "isError": not formatted.ok}
 ```
 
-关键差异 vs Agent 主循环：
+`prepare_call` / `check_safety` / `execute_and_format` 的内部行为见 03-agent-core
+的「8. _handle_tool_use」一节——MCP 与 Agent 共用这三个函数，所以现在两条通道：
+- 都会落 `PERCEPTION` 事件（read_only + LOW 时）——以前只在 Agent 通道落
+- 都会把 stderr 拼进 content（失败时）
+- 都会按 `OUTPUT_CAP = 6000` 截断输出
+
+历史上这三件事曾经只在 Agent 通道做，导致审计 timeline 跨通道漂移。统一到
+pipeline 之后，"两条通道行为一致"成为模块约束。
+
+关键差异 vs Agent 主循环（本质差异，刻意不抽进 pipeline）：
 1. **不走 LLM**：MCP 调用方就是 LLM 自己，没有"再请 LLM 决策"环节
-2. **CONFIRM = DENY**：MCP 通道没法发起交互式 confirm，默认拒绝
-3. **每条 tools/call 起一条 trace**：每个工具调用都是独立审计单元
+2. **CONFIRM = DENY**：MCP 没法发起交互式 confirm，pipeline.check_safety
+   不处理决策，由 _call_tool 自己 deny
+3. **每条 tools/call 起一条 trace**：每个工具调用都是独立审计单元（Agent 是
+   per-ask 一条 trace、内含多次工具）
 
 ### 5.7 main 入口
 
 ```python
 def main():
     cfg = load_config()
-    sandbox = SandboxConfig(account=cfg.executor.account, ...)
-    executor = ExecutionProxy(sandbox)
-    guardrail = Guardrail.from_config(cfg)
-    store = AuditStore(cfg.resolve(cfg.audit.database))
-    audit = AuditLogger(store, jsonl_file=cfg.resolve(cfg.audit.jsonl_file) if cfg.audit.jsonl_file else None)
-    registry = default_registry()
-    if cfg.mcp.enable_tools:
-        keep = set(cfg.mcp.enable_tools)
-        registry._tools = {n: t for n, t in registry._tools.items() if n in keep}
-
-    server = McpServer(cfg, registry, guardrail, executor, audit)
+    rt = build_runtime(cfg)   # 通道无关的基础设施装配（与 Agent.from_config 共享）
+    server = McpServer(cfg, rt.registry, rt.guardrail, rt.executor, rt.audit)
     server.serve()
 ```
 
-被 `kyagent mcp serve` 子命令调用（cli.py:283）。也可以通过 `python -m kyagent.mcp.server` 直接启动。
+`kyagent/runtime.py` 是 composition root，把 SandboxConfig / ExecutionProxy /
+Guardrail / AuditStore+AuditLogger / default_registry（含 `enable_tools` 白名单
+过滤）装配成一个 `Runtime` dataclass。Agent.from_config 也调它，这样两条通道用
+的执行器 / 护栏 / 审计 / 工具注册表是同一组配置出来的，杜绝"字面级一字不差的
+复制"漂移点。
+
+被 `kyagent mcp serve` 子命令调用。也可以通过 `python -m kyagent.mcp.server` 直接启动。
 
 ### 5.8 挂到 Claude Desktop
 

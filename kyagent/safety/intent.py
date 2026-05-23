@@ -26,7 +26,6 @@ from typing import Any
 
 import yaml
 
-from kyagent.safety.confirm import ConfirmRequest
 from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.policy import Decision, Policy
 
@@ -135,22 +134,6 @@ class IntentVerdict:
             "text_preview": self.text[:200],
             "sanitized": self.sanitized_text is not None,
         }
-
-    def to_confirm_request(self) -> ConfirmRequest:
-        """把意图层裁决翻译成 UI 层认识的 ConfirmRequest。
-
-        每条 IntentHit 没有 description 字段（intent 规则的 description 在 IntentRule
-        上而非 hit 上），所以这里展示 category + matched token，足以让用户判断。
-        """
-        return ConfirmRequest(
-            title="自然语言意图审查",
-            risk=self.risk.value,
-            summary_lines=[
-                f"{h.rule_id} ({h.risk.value}, {h.category}): matched={h.matched!r}"
-                for h in self.hits
-            ],
-            body="\n".join(self.rationale) if self.rationale else None,
-        )
 
     def is_blocked(self) -> bool:
         return self.decision is Decision.DENY
