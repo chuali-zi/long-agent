@@ -69,6 +69,73 @@
 <p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
 </div>
 
+<h2>2026-05-23 — httpx 主依赖落地清洁度（reviewer 触发，延伸 5b465cd）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-23 reviewer 第五次复审</span>
+<div class="files">kyagent/agent/llm.py（顶部 import + HttpxBackend dead-code 清理）、tests/test_httpx_backend.py（14 处 mock 改写）、requirements-loongarch.txt（anthropic optional deps 精简）、DEPLOYMENT-LOONGARCH.md（6.4 可选 anthropic 步骤精简）、pyproject.toml 注释（无功能改动）</div>
+<p><strong>触发</strong>：通用入口防护 commit (5b465cd) 之后 reviewer 第五次复审，指出：</p>
+<blockquote>"P2 httpx 是项目直接运行依赖，但主包元数据没有直接声明。llm.py L453 的 HttpxBackend 直接 <code>import httpx</code>；LoongArch 清单列了它，但 pyproject.toml L15 主依赖只靠 anthropic/openai 间接带出。现在能跑是因为 LoongArch 文档手动装了 httpx，但包声明不够干净。"</blockquote>
+<p><strong>事实复核</strong>：</p>
+<ul>
+  <li>review 主张的「httpx 没在主依赖直接声明」<strong>在 5b465cd 已经解决</strong> —— 该 commit 把 <code>httpx&gt;=0.23.0,&lt;1</code> 加入了 <code>[project.dependencies]</code>。<code>python -c "import tomllib; ..."</code> 解析 pyproject 确认主依赖 = [pydantic, PyYAML, typer, rich, httpx]</li>
+  <li>但 reviewer 的精神（"包声明不够干净"）仍指向<strong>三处遗留不对称</strong>：
+    <ol>
+      <li><code>llm.py</code> 顶部没有 <code>import httpx</code>；HttpxBackend 内部仍是 <code>try: import httpx; except ImportError: raise RuntimeError("缺少依赖")</code> 的 lazy + 兜底写法。这是 optional 依赖的写法 —— 但 httpx 现在是<strong>主依赖</strong>，永远装着，<code>ImportError</code> 分支是 dead code，且跟 AnthropicBackend / OpenAIBackend（真正 optional）的写法形似容易误导读者</li>
+      <li><code>_post_with_retry</code> 里的 <code>try: import httpx; ... except ImportError: retry_exc_types = ()</code> 同样 dead code；每次重试调用都重新构造异常类型元组也是 unnecessary work</li>
+      <li><code>requirements-loongarch.txt</code> 把 anyio / sniffio / typing-extensions 列在「Anthropic optional deps」段，并加注脚说"重复列出"。实际上它们是 httpx 的 transitive，pip 装 httpx 时已自动带，<code>anthropic --no-deps</code> 时根本不需要补 —— 只有 distro 是 anthropic 专属</li>
+    </ol>
+  </li>
+</ul>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-23 三处清洁度同步修复</span>
+<div class="files">kyagent/agent/llm.py（顶部 +1 import；HttpxBackend.__init__ -3 lines；_post_with_retry -10 lines；新类常量 _RETRY_EXC_TYPES）、tests/test_httpx_backend.py（14 处 mock 改写，-1026 chars net deletion）、requirements-loongarch.txt（optional 段 -3 行 + 注脚精确化）、DEPLOYMENT-LOONGARCH.md 6.4（可选 anthropic 段简化为单行 distro 补装）</div>
+
+<p><strong>1. <code>llm.py</code> import 拓扑对称化</strong>：</p>
+<ul>
+  <li>模块顶部新增 <code>import httpx</code>，注释明示"主依赖"</li>
+  <li><code>HttpxBackend.__init__</code> 删除 <code>try: import httpx except ImportError: raise RuntimeError</code>，直接用顶部已 import 的 httpx 名字。<code>RuntimeError("缺少依赖 httpx")</code> 这条路径现在不可达（httpx 是主依赖；缺包代表打包失败，不是用户错误）</li>
+  <li><code>_post_with_retry</code> 删除函数内的 <code>try: import httpx; except ImportError: retry_exc_types = ()</code>。重试异常类型元组提升到类常量 <code>_RETRY_EXC_TYPES</code>（也避免每次调用重新构造），与既有 <code>_RETRY_STATUS</code> / <code>_BACKOFF_MAX</code> / <code>_RETRY_AFTER_MAX</code> 类常量整齐对称</li>
+  <li>三个 backend 现在写法一致清晰：<code>AnthropicBackend.__init__</code> + <code>OpenAIBackend.__init__</code> lazy import + ImportError 兜底（optional 依赖的标准写法）；<code>HttpxBackend.__init__</code> 直接用顶部 import（主依赖的标准写法）</li>
+</ul>
+
+<p><strong>2. 测试 mock 拓扑同步</strong>：</p>
+<ul>
+  <li>原 14 处 <code>monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(Client=X))</code> —— 这种 mock 依赖 lazy import 才能生效（顶部 import 后 module-level <code>httpx</code> 名字已绑定，再改 sys.modules 不影响）</li>
+  <li>批量改写为 <code>monkeypatch.setattr("kyagent.agent.llm.httpx.Client", X)</code> —— 只 mock <code>httpx.Client</code> 一个类，其它 httpx 属性（异常类型等）仍用真 httpx。语义更精确</li>
+  <li>用 Python regex 一次性替换（pat_a 多行版 + pat_b 单行版），人工对照 git diff 确认 14 处全部正确</li>
+  <li>48 个 HttpxBackend 测试零回归通过</li>
+</ul>
+
+<p><strong>3. requirements-loongarch.txt + DEPLOYMENT 6.4 精简</strong>：</p>
+<ul>
+  <li>anthropic 0.39.0 的 Requires-Dist 减去 jiter 是：anyio / distro / httpx / pydantic / sniffio / typing-extensions</li>
+  <li>对比主依赖：httpx / pydantic 已直接列；anyio / sniffio / typing-extensions 是 httpx 的 transitive，pip 装 httpx 时自动带</li>
+  <li>剩下只有 <strong>distro</strong> 是 anthropic 专属，需要 <code>pip install --no-deps anthropic==0.39.0</code> 之后单独补</li>
+  <li><code>requirements-loongarch.txt</code> Anthropic optional 段从 4 行（anyio + distro + sniffio + typing-extensions）瘦身为 1 行（distro），并加 5 行注释解释为何 3 项可以省</li>
+  <li><code>DEPLOYMENT-LOONGARCH.md</code> 6.4 节可选 anthropic 步骤从 <code>pip install \\ anyio \\ distro \\ sniffio \\ typing-extensions</code> 精简为 <code>pip install "distro>=1.7.0,&lt;2"</code></li>
+</ul>
+
+<p><strong>验证</strong>：</p>
+<ul>
+  <li><code>pytest tests/</code> → 237 passed, 2 skipped（POSIX-only，与 5b465cd 一致）</li>
+  <li><code>python -m compileall -q kyagent</code> → 静默通过</li>
+  <li>llm.py diff: +1 顶部 import +9 类常量 -3 init lazy -10 retry lazy（净 -3 行）</li>
+  <li>test_httpx_backend.py diff: 14 处 mock 改写 = -1026 chars 净删除（更简洁）</li>
+  <li>requirements-loongarch.txt optional 段: -3 packages + 5 行注释解释</li>
+</ul>
+
+<p><strong>方法论教训</strong>：</p>
+<ol>
+  <li><strong>"主依赖 vs optional 依赖"在代码里要有对称的 import 模式</strong>：optional 依赖 lazy import + ImportError → RuntimeError 兜底；主依赖顶部 import 直接用。两种模式混用（特别是主依赖用 lazy + 兜底）会让读者误以为该依赖是 optional，损害代码自文档性</li>
+  <li><strong>类常量胜过函数局部常量</strong>：当一个 tuple 在每次方法调用都重新构造（如 <code>_post_with_retry</code> 的 retry_exc_types），且其内容是常量时，提到类常量更好。既避免每次构造的 overhead，又让调试时 grep 该常量名能直接找到所有引用</li>
+  <li><strong>transitive dep 不要在 optional 段重复声明</strong>：pip 会自动装。重复声明只是注释上的"显式化"，实际是冗余。要么相信 transitive 解析（清洁），要么 vendor 锁全部版本（防御性，但麻烦）。中间路径（部分 transitive 显式 + 部分省略）是最坏的，因为引入不一致</li>
+  <li><strong>reviewer 指出"已解决"的问题时，要往深处看精神而不是字面</strong>：reviewer 这次的字面指控"主依赖没列 httpx"是过时的（5b465cd 已修），但精神"包声明不够干净"指向了三处真实的清洁度残留。如果只反驳 reviewer 的字面错误而不去看精神，就错失了真正的修复机会</li>
+</ol>
+</div>
+
 <h2>2026-05-23 — 通用入口防护：anthropic 移成 optional + httpx 进主依赖（reviewer 触发）</h2>
 
 <div class="entry fact">

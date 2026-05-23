@@ -36,10 +36,12 @@ rich>=13.7
 httpx>=0.23.0,<1
 
 # === Anthropic backend optional deps（仅当装了 --no-deps anthropic==0.39.0 时补齐）===
-# 这些是 `anthropic==0.39.0` 的 Requires-Dist 减去 jiter 后的纯 Python 子集，全 py3-none-any。
-# 注：httpx 已在主依赖段，不在这里重复；anyio / sniffio / typing-extensions 是 httpx
-# 的 transitive 依赖（pip 装 httpx 时已带），重复列出是为了显式声明 anthropic 也需要它们。
-anyio>=3.5.0,<5
+# anthropic 0.39.0 的 Requires-Dist 减去 jiter (Rust) 之后，只有 distro 不在
+# 主依赖的覆盖范围里：
+#   - httpx        → 主依赖（pyproject 直接列出，零 Rust）
+#   - pydantic     → 主依赖（v1，零 Rust）
+#   - anyio        → httpx 的 transitive dep（pip 装 httpx 时自动带）
+#   - sniffio      → httpx 的 transitive dep
+#   - typing-extensions → httpx 的 transitive dep（也是 pydantic v1 的 transitive）
+# 所以这里只需要补 distro 一项。
 distro>=1.7.0,<2
-sniffio
-typing-extensions>=4.7,<5

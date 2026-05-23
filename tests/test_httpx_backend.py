@@ -124,9 +124,7 @@ def test_construct_real_client_normalizes_base_url(monkeypatch):
             captured["headers"] = headers
             captured["timeout"] = timeout
 
-    import types
-    fake_httpx = types.SimpleNamespace(Client=_CaptureClient)
-    monkeypatch.setitem(__import__("sys").modules, "httpx", fake_httpx)
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
 
     HttpxBackend(
@@ -147,9 +145,7 @@ def test_construct_with_trailing_slash_idempotent(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
 
     HttpxBackend(
@@ -167,9 +163,7 @@ def test_construct_default_base_url_for_openai(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
 
     HttpxBackend(model="m", max_tokens=10, api_key_env="OPENAI_API_KEY", base_url=None)
@@ -178,9 +172,7 @@ def test_construct_default_base_url_for_openai(monkeypatch):
 
 def test_missing_key_raises_runtime_error(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=lambda **_: None))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
     with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
         HttpxBackend(model="m", max_tokens=10, api_key_env="DEEPSEEK_API_KEY")
 
@@ -354,9 +346,7 @@ def test_preset_deepseek_uses_official_endpoint(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
 
     be = HttpxBackend.preset("deepseek")
@@ -371,9 +361,7 @@ def test_preset_qwen_uses_dashscope_endpoint(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-q")
 
     be = HttpxBackend.preset("qwen")
@@ -398,9 +386,7 @@ def test_build_backend_deepseek_httpx(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
 
     cfg = Config()
@@ -419,9 +405,7 @@ def test_build_backend_qwen_httpx(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-q")
 
     cfg = Config()
@@ -441,9 +425,7 @@ def test_build_backend_openai_httpx(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-o")
 
     cfg = Config()
@@ -464,9 +446,7 @@ def test_build_backend_deepseek_httpx_user_override(monkeypatch):
         def __init__(self, base_url, **_):
             captured["base_url"] = base_url
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
 
     cfg = Config()
@@ -482,9 +462,7 @@ def test_build_backend_deepseek_httpx_user_override(monkeypatch):
 def test_build_backend_deepseek_httpx_missing_key_falls_back(monkeypatch):
     """缺 key 应降级到 mock，与 deepseek 路径行为完全一致。"""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=lambda **_: None))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
     cfg = Config()
     cfg.agent.llm_backend = "deepseek_httpx"
 
@@ -496,9 +474,7 @@ def test_build_backend_deepseek_httpx_missing_key_falls_back(monkeypatch):
 
 def test_build_backend_deepseek_httpx_missing_key_raises_in_strict(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=lambda **_: None))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
     cfg = Config()
     cfg.agent.llm_backend = "deepseek_httpx"
     cfg.agent.fallback_to_mock = False
@@ -590,9 +566,7 @@ def test_real_client_uses_default_timeout(monkeypatch):
         def __init__(self, base_url, headers, timeout):
             captured["timeout"] = timeout
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
 
     HttpxBackend(model="m", max_tokens=10, api_key_env="DEEPSEEK_API_KEY")
@@ -606,9 +580,7 @@ def test_real_client_respects_explicit_timeout(monkeypatch):
         def __init__(self, base_url, headers, timeout):
             captured["timeout"] = timeout
 
-    import types
-    monkeypatch.setitem(__import__("sys").modules, "httpx",
-                        types.SimpleNamespace(Client=_CaptureClient))
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-x")
 
     HttpxBackend(model="m", max_tokens=10, api_key_env="DEEPSEEK_API_KEY", timeout=30.0)

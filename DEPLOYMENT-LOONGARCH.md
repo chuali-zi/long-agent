@@ -235,14 +235,11 @@ pip install "typer>=0.12" "rich>=13.7" "httpx>=0.23.0,<1"
 pip install -e .
 
 # ---- 可选：仅当你需要 Anthropic Claude 后端时才做（默认推 DeepSeek 走 HttpxBackend）----
-# anthropic 0.39 的 Requires-Dist 含 jiter(Rust)；用 --no-deps 跳过 + 手补纯 Python 依赖
+# anthropic 0.39 的 Requires-Dist 含 jiter(Rust)；用 --no-deps 跳过，再补 distro 一项。
+# （anthropic 的其它运行时依赖 —— httpx / pydantic / anyio / sniffio / typing-extensions
+#   —— 全部已经在主依赖步骤 1-3 装上，或者作为 httpx 的 transitive 自动随 pip 装上）
 # pip install --no-deps "anthropic==0.39.0"
-# pip install \
-#     "anyio>=3.5.0,<5" \
-#     "distro>=1.7.0,<2" \
-#     sniffio \
-#     "typing-extensions>=4.7,<5"
-# # （httpx 已在主依赖步骤 3，不重复装）
+# pip install "distro>=1.7.0,<2"
 #
 # 不要用 pip install -e '.[anthropic]'：那会让 pip 解析 anthropic 完整依赖图 → 拉 jiter
 # → 在 LoongArch Old World 上触发 Rust 现场编译。必须走上面的 --no-deps 路径。

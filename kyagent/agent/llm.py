@@ -26,6 +26,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx  # 主依赖（pyproject.toml [project.dependencies]）—— HttpxBackend 用
+
 logger = logging.getLogger("kyagent.llm")
 
 
@@ -458,6 +460,15 @@ class HttpxBackend(LlmBackend):
     DEFAULT_MAX_RETRIES: int = 2
     # 触发重试的 HTTP 状态码集合（5xx 单独判断）
     _RETRY_STATUS: frozenset[int] = frozenset({408, 409, 429})
+    # 触发重试的 httpx 异常类型（连接 / 超时类）
+    _RETRY_EXC_TYPES: tuple[type[BaseException], ...] = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        httpx.RemoteProtocolError,
+    )
     # 退避上限与 Retry-After 上限（秒）
     _BACKOFF_MAX: float = 8.0
     _RETRY_AFTER_MAX: float = 60.0
@@ -483,10 +494,6 @@ class HttpxBackend(LlmBackend):
 
         # client 参数是测试 / 高级用法的注入口；正常用 None 让我们自己造
         if client is None:
-            try:
-                import httpx
-            except ImportError as e:
-                raise RuntimeError("缺少依赖：pip install httpx") from e
             key = os.environ.get(api_key_env)
             if not key:
                 raise RuntimeError(f"环境变量 {api_key_env} 未设置")
@@ -565,29 +572,14 @@ class HttpxBackend(LlmBackend):
 
         共 max_retries + 1 次尝试（默认 3 次）。重试触发：
           - HTTP 408 / 409 / 429 / 5xx 响应
-          - httpx 的连接 / 超时类异常
+          - httpx 的连接 / 超时类异常（见 _RETRY_EXC_TYPES）
         4xx 非重试码 + JSON 解析失败一次性 fail-fast。
         """
-        # httpx 异常类型 lazy import，避开测试场景里 httpx 未真正安装的情况
-        try:
-            import httpx
-            retry_exc_types: tuple[type[BaseException], ...] = (
-                httpx.ConnectError,
-                httpx.ConnectTimeout,
-                httpx.ReadTimeout,
-                httpx.WriteTimeout,
-                httpx.PoolTimeout,
-                httpx.RemoteProtocolError,
-            )
-        except ImportError:
-            # 测试场景或缺包：用空 tuple，重试只对 HTTP 状态码生效
-            retry_exc_types = ()
-
         attempt = 0
         while True:
             try:
                 resp = self._client.post("chat/completions", json=payload)
-            except retry_exc_types as exc:
+            except self._RETRY_EXC_TYPES as exc:
                 if attempt >= self.max_retries:
                     raise RuntimeError(
                         f"HttpxBackend network error after {attempt} retries: "
