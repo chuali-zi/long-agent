@@ -204,6 +204,14 @@ pip install --upgrade "pip>=23" setuptools wheel
 
 # 6.4 装项目依赖（2026-05-23 校对：无 Rust 编译；PyYAML 的 _yaml C 扩展会尝试编译，
 #                 失败时 setup.py 自动回落纯 Python，install 仍成功，详见步骤 1）
+#
+# 2026-05-23 起，pyproject.toml 主依赖已经过 LoongArch 安全审计：
+#   - 主依赖 = pydantic v1 + PyYAML + typer + rich + httpx (HttpxBackend 用)
+#   - anthropic / openai SDK 已移到 [project.optional-dependencies]，不会被
+#     `pip install -e .` 默认拉取 → 这是"普通入口"在 LoongArch 上的核心防护
+#
+# 推荐部署：默认 4 步装完，用 HttpxBackend (llm_backend=deepseek_httpx) 跑 DeepSeek，
+# 完全零 Rust 编译依赖。Anthropic backend 是可选附加项（含 jiter Rust，详见末尾）。
 
 # 1) PyYAML：显式强制走 sdist（LoongArch 上 PyPI 没有预编译 wheel，pip 默认也会回落
 #    sdist；--no-binary 让这个事实显式化）。最低版本 6.0.1 —— 6.0.0 的 pyproject.toml
@@ -220,39 +228,41 @@ pip install --no-binary PyYAML "PyYAML>=6.0.1,<7"
 # 2) pydantic v1：纯 Python wheel（py3-none-any）
 pip install "pydantic>=1.10.13,<2"
 
-# 3) anthropic：--no-deps 跳过 jiter（Rust）和 pydantic 重新解析
-pip install --no-deps "anthropic==0.39.0"
+# 3) 其余主依赖：typer / rich / httpx —— httpx 是 HttpxBackend 用的（DeepSeek/Qwen 走它）
+pip install "typer>=0.12" "rich>=13.7" "httpx>=0.23.0,<1"
 
-# 4) anthropic 运行时依赖手动补齐（全部 py3-none-any）
-pip install \
-    "anyio>=3.5.0,<5" \
-    "distro>=1.7.0,<2" \
-    "httpx>=0.23.0,<1" \
-    sniffio \
-    "typing-extensions>=4.7,<5"
+# 4) 装 kyagent 本身（默认入口，pyproject 主依赖已审计过 → 不会拉 jiter / openai / anthropic）
+pip install -e .
 
-# 5) 其余主依赖
-pip install "typer>=0.12" "rich>=13.7"
-
-# 6) 装 kyagent 本身（--no-deps 防止 pip 重新拉新版 anthropic 把 jiter 拉回来）
-pip install -e . --no-deps
-
-# ---- 替代写法：一次性用清单 ----
-# pip install --no-binary PyYAML -r requirements-loongarch.txt
+# ---- 可选：仅当你需要 Anthropic Claude 后端时才做（默认推 DeepSeek 走 HttpxBackend）----
+# anthropic 0.39 的 Requires-Dist 含 jiter(Rust)；用 --no-deps 跳过 + 手补纯 Python 依赖
 # pip install --no-deps "anthropic==0.39.0"
-# pip install -e . --no-deps
+# pip install \
+#     "anyio>=3.5.0,<5" \
+#     "distro>=1.7.0,<2" \
+#     sniffio \
+#     "typing-extensions>=4.7,<5"
+# # （httpx 已在主依赖步骤 3，不重复装）
+#
+# 不要用 pip install -e '.[anthropic]'：那会让 pip 解析 anthropic 完整依赖图 → 拉 jiter
+# → 在 LoongArch Old World 上触发 Rust 现场编译。必须走上面的 --no-deps 路径。
 
 # 6.5 自检（确认最终 import 路径正确；libyaml=True/False 都合法）
-python -c "import pydantic, anthropic, yaml, kyagent; \
+python -c "import pydantic, yaml, httpx, kyagent; \
 print('pydantic', pydantic.VERSION); \
 print('yaml libyaml=', yaml.__with_libyaml__); \
-print('anthropic', anthropic.__version__)"
+print('httpx', httpx.__version__); \
+print('kyagent OK')"
+# 如果装了 anthropic 可选项，加测：
+# python -c "import anthropic; print('anthropic', anthropic.__version__)"
 ```
 
-**预期**：步骤 1-6 **无 Rust 编译**。PyYAML 步骤（步骤 1）的 `_yaml` C 扩展若 libyaml-devel
+**预期**：步骤 1-4 **无 Rust 编译**。PyYAML 步骤（步骤 1）的 `_yaml` C 扩展若 libyaml-devel
 缺失会**尝试编译并失败**，setup.py 捕获后自动回落纯 Python（install 仍成功，pip 日志含
 一行 `fatal error: yaml.h: No such file or directory` —— **这是 fallback 路径的标志，不是
 终止错误**）。整体 < 2 分钟（取决于网络）。
+
+可选 anthropic 步骤额外耗时 < 30 秒，仍无 Rust 编译（因为走 `--no-deps`）。
 
 **安装日志中可能看到的"看似报错实则正常"的行**：
 - `fatal error: yaml.h: No such file or directory` 后跟 `compilation terminated.` → PyYAML
@@ -260,13 +270,17 @@ print('anthropic', anthropic.__version__)"
   `Successfully installed PyYAML-6.0.x` 就是正常的。想消除该日志：第 4 节装 libyaml-devel。
 
 **真正会让安装中断的报错**：
-- `error: can't find Rust compiler` → 说明 anthropic 没用 `--no-deps`，pip 在拉 jiter。检查步骤 3 命令。
+- `error: can't find Rust compiler` 或 `error: Microsoft Visual C++ ... is required` →
+  你大概率走了 `pip install -e '.[anthropic]'` 或 `.[openai]` 让 pip 解析了完整依赖图，
+  把 jiter 拉了进来。**回到上面"可选 anthropic 步骤"，必须用 `pip install --no-deps`。**
 - `AttributeError: cython_sources` 或 `Cython` 相关 sdist 构建错误 → PyYAML 锁版本不对，
   6.0.0 sdist 在 Cython 3.x 下直接构建失败（PyYAML issue #736）。必须用 `PyYAML>=6.0.1`，
   检查步骤 1 命令。
 - `Could not find a version that satisfies the requirement pydantic-core` → 不应该出现；
   如果出现说明 pydantic 没正确锁到 <2，检查步骤 2。
-- `error: Microsoft Visual C++ ... is required` → 不可能在 Linux 出现，说明你在 Windows 上跑这步了
+- `ModuleNotFoundError: No module named 'anthropic'` 当你跑 `llm_backend=anthropic` → 你
+  没装可选 anthropic 步骤。要么走上面 --no-deps 路径装，要么改用 `llm_backend=deepseek_httpx`
+  （HttpxBackend，零 anthropic 依赖）。
 
 ---
 

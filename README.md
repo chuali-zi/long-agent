@@ -14,6 +14,22 @@ python -m kyagent safety test "rm -rf /"
 python -m kyagent ask "查下 CPU 占用最高的进程"
 ```
 
+默认安装走 **mock LLM 后端**（零外部 LLM 依赖、零 Rust 编译，所有架构通用包括 LoongArch64）。
+真实 LLM 后端**按需选装**。**LoongArch64 用户必读** [DEPLOYMENT-LOONGARCH.md](DEPLOYMENT-LOONGARCH.md)
+后再装可选依赖：
+
+```powershell
+# DeepSeek（推荐；HttpxBackend 路径，零 Rust 依赖，所有架构包括 LoongArch64）
+# 主依赖里的 httpx 就够了，不用装额外包；只需设 KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+# 详见 configs/deepseek.yaml 顶部注释
+
+# DeepSeek / Qwen / OpenAI 通过官方 openai SDK（备选 — 含 jiter Rust）
+python -m pip install -e ".[openai]"
+
+# Anthropic Claude（海外参考对照；含 jiter Rust）
+python -m pip install -e ".[anthropic]"
+```
+
 ## 赛题要求映射
 
 | 要求 | 实现位置 |

@@ -69,6 +69,70 @@
 <p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
 </div>
 
+<h2>2026-05-23 — 通用入口防护：anthropic 移成 optional + httpx 进主依赖（reviewer 触发）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-23 reviewer 第四次复审</span>
+<div class="files">pyproject.toml、scripts/install.sh、README.md、DEPLOYMENT-LOONGARCH.md（第 6.4 节）、requirements-loongarch.txt、implementation-notes.html（本条目 + 旧 2026-05-22 方案 A 条目注脚追加）</div>
+<p><strong>触发</strong>：PyYAML 文档纠偏 commit (5f29b53) 之后 reviewer 第四次复审，明确指出：</p>
+<blockquote>"P1 通用安装路径仍会在 LoongArch 上拉回高风险依赖。scripts/install.sh L15 的 <code>pip install -e .</code>、README.md L10 的普通安装、以及 pyproject.toml L24 的 <code>anthropic==0.39.0</code> 都会让 pip 正常解析 anthropic 依赖，从而拉 jiter。LoongArch 文档里的 anthropic <code>--no-deps</code> 路径能绕开，但普通入口没有防护。"</blockquote>
+<p><strong>事实复核</strong>：</p>
+<ul>
+  <li><code>pyproject.toml</code> 主依赖含 <code>anthropic==0.39.0</code>，<code>pip install -e .</code> 会让 pip 解析其完整 Requires-Dist → 拉 <code>jiter</code>(Rust)（anthropic 0.39 之前的版本还会拉 <code>tokenizers</code>(Rust)，已避开）</li>
+  <li>jiter 在 x86_64 / aarch64 有官方预编译 wheel，普通平台 install 不出错；LoongArch 无 wheel → 源码编译 → 触发 Rust 工具链需求 + Old World ABI 冲突（详见 jiter 调研条目）</li>
+  <li><code>scripts/install.sh</code> / <code>README.md</code> 的 <code>pip install -e .</code> 都没有平台保护逻辑</li>
+  <li>结论：reviewer 完全正确，通用入口对 LoongArch 是"未防护雷区"。DEPLOYMENT-LOONGARCH.md 的 <code>--no-deps</code> 路径只对照着部署文档走的人有效，对随手 install 的人零防护</li>
+</ul>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-23 anthropic → optional + httpx 提升主依赖</span>
+<div class="files">pyproject.toml（dependencies / optional-dependencies 重构）、scripts/install.sh（输出加可选 backend 提示块）、README.md（快速开始段补 backend 选择说明 + LoongArch 链接）、DEPLOYMENT-LOONGARCH.md 6.4 节（步骤数 6 → 4 必装 + 可选 anthropic 段；去掉最后 <code>pip install -e . --no-deps</code> 的 <code>--no-deps</code>）、requirements-loongarch.txt（拆分"主依赖"和"Anthropic optional deps"两段）</div>
+<p><strong>核心改动</strong>：<code>anthropic==0.39.0</code> 从 <code>[project.dependencies]</code> 移到 <code>[project.optional-dependencies]</code>。同时 <code>httpx&gt;=0.23.0,&lt;1</code> 从 anthropic 的 transitive 提升到主依赖（HttpxBackend 需要；纯 Python，零 Rust）。</p>
+
+<p><strong>backend × 安装方式可用性矩阵</strong>：</p>
+<table>
+<tr><th>backend</th><th><code>pip install -e .</code><br>（默认 / 通用入口）</th><th><code>+ [anthropic]</code></th><th><code>+ [openai]</code></th></tr>
+<tr><td>mock</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>anthropic</td><td>❌ 缺包 RuntimeError</td><td>✅（jiter Rust）</td><td>❌ 缺包</td></tr>
+<tr><td>openai / deepseek / qwen (SDK 路径)</td><td>❌ 缺包 RuntimeError</td><td>❌ 缺包</td><td>✅（≥1.40 含 jiter Rust）</td></tr>
+<tr><td><strong>deepseek_httpx / qwen_httpx / openai_httpx (HttpxBackend)</strong></td><td><strong>✅ 零 Rust</strong></td><td>✅</td><td>✅</td></tr>
+</table>
+
+<p><strong>关键防护点</strong>：</p>
+<ol>
+  <li><strong>通用 <code>pip install -e .</code> 现在 LoongArch 安全</strong>：主依赖只有 pydantic v1 + PyYAML + typer + rich + httpx，全部 LoongArch 上零 Rust。即使有人不看 DEPLOYMENT-LOONGARCH.md 直接 install，也不会触发 jiter 编译</li>
+  <li><strong>HttpxBackend 在默认入口就能用</strong>：deepseek/qwen/openai_httpx 三个 backend 不需要任何可选包，配 KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx 即跑</li>
+  <li><strong>显式 opt-in 才会触发风险</strong>：要 <code>pip install -e '.[anthropic]'</code> 或 <code>.[openai]</code> 才会拉 jiter。这是用户主动选择，README + install.sh + DEPLOYMENT 都警示了 LoongArch 上不要直接走这条</li>
+  <li><strong>LoongArch 部署文档第 6.4 节简化</strong>：必装步骤从 6 → 4；最后一步 <code>pip install -e .</code> 去掉 <code>--no-deps</code>（因为主依赖已经全部 LoongArch 安全，不存在"pip 重新拉新版 anthropic 把 jiter 拉回来"的风险）。anthropic 步骤显式标记为"可选附加项"</li>
+</ol>
+
+<p><strong>具体改动文件</strong>：</p>
+<ul>
+  <li><code>pyproject.toml</code>：<code>anthropic==0.39.0</code> 移到 <code>[project.optional-dependencies]</code>；<code>httpx&gt;=0.23.0,&lt;1</code> 加入 <code>[project.dependencies]</code>；注释明确每个依赖的 LoongArch 兼容理由</li>
+  <li><code>scripts/install.sh</code>：默认 install 后输出加 "可选 LLM 后端" 提示块，列出三种 backend 路径（HttpxBackend 推荐 / openai SDK / anthropic），LoongArch 专项警示</li>
+  <li><code>README.md</code>：快速开始段补充"默认 mock backend、按需选可选 backend、LoongArch64 必读 DEPLOYMENT-LOONGARCH.md"</li>
+  <li><code>DEPLOYMENT-LOONGARCH.md</code> 6.4 节：步骤从 6 步重排为"4 步必装 + 可选 anthropic 段"；步骤 6 的 <code>--no-deps</code> 去掉；6.5 自检删 <code>import anthropic</code>（改为可选行）；常见报错章新增 <code>ModuleNotFoundError: No module named 'anthropic'</code> 条目（提示走可选段或换 deepseek_httpx）</li>
+  <li><code>requirements-loongarch.txt</code>：顶部安装方式说明拆"默认 / 可选"两节；列表分"主依赖"和"Anthropic backend optional deps"两段，httpx 提到主依赖，distro 留在可选段</li>
+</ul>
+
+<p><strong>验证</strong>：</p>
+<ul>
+  <li><code>tests/</code> 完全无 anthropic / AnthropicBackend 测试（已 grep 确认），改动零回归</li>
+  <li><code>pytest tests/</code> → 237 passed, 2 skipped（与 5f29b53 一致）</li>
+  <li><code>python -m compileall -q kyagent</code> → 静默通过</li>
+  <li>backend 构造行为：缺 anthropic 包时 <code>llm_backend=anthropic</code> 路径仍按既有 <code>AnthropicBackend.__init__</code> 抛 <code>RuntimeError("缺少依赖：pip install anthropic")</code>；缺 key 时仍走 <code>_MissingKeyError</code> → 降级 mock。这两条都不变</li>
+</ul>
+
+<p><strong>方法论教训</strong>：</p>
+<ol>
+  <li><strong>"安全部署路径"和"通用安装路径"必须分别审计</strong>。前者覆盖到的事，后者没覆盖就是零防护。reviewer 这次正中这个缺口 — DEPLOYMENT-LOONGARCH.md 整个文档都在防 jiter，但 <code>pip install -e .</code> 直接绕过整个文档</li>
+  <li><strong>主依赖必须是"全平台零 Rust 编译需求"的最小集合</strong>，平台/特性专属依赖统一进 <code>optional-dependencies</code>。Python 生态标准做法。我之前因为 "anthropic 是项目主要演示后端" 把它放主依赖 — 这是赛题驱动的非工程考虑，pragmatic 但错位</li>
+  <li><strong>每个 PR 完成后做"通用入口审计"</strong>：grep 所有 setup.py / install.sh / Dockerfile / README / Makefile 里的 install 命令 + 检查是否触发主依赖之外的高风险下载。这个 checklist 应该写到 implementation-notes 验证清单里</li>
+  <li><strong>把"零编译"承诺验证的边界从"按文档走"扩到"按文档 + 按通用入口走"</strong>。任何 install 路径都不该让 LoongArch 用户掉到 Rust 编译坑里。今后任何加新依赖（无论主 / optional）都要看是否含 Rust / C 扩展 + 有无 LoongArch wheel</li>
+</ol>
+</div>
+
 <h2>2026-05-23 — PyYAML sdist 行为纠偏（reviewer 触发）</h2>
 
 <div class="entry fact">
