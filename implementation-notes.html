@@ -64,9 +64,53 @@
 <ul>
   <li>P-VM-TEST：sudo / sudoers / systemd 部分无法在 Windows 本机验证；代码层 + 单元测试已就绪，需要在麒麟实机/Linux VM 上跑 <code>tests/test_executor.py::test_posix_*</code> 那两个被 skip 的用例</li>
   <li>P-PARALLEL-DORMANT：并行工具调度仍是 dormant（preexec_fn + threading 风险）— 与本轮赛题贴合度修复无关，留下次性能轮做</li>
-  <li>P-LOONGARCH-VERIFY-VM：龙芯依赖替换方案 A 已实施（2026-05-22），但仍未在真实龙芯硬件上端到端跑通；需在麒麟 V10 LoongArch64 VM 上跑 V1-V9 验证清单确认零编译</li>
+  <li>P-LOONGARCH-VERIFY-VM：龙芯依赖替换方案 A 已实施（2026-05-22）+ PyYAML 行为纠偏（2026-05-23），仍未在真实龙芯硬件上端到端跑通；需在麒麟 V10 LoongArch64 VM 上跑 V1-V9 验证清单实测：(1) 无 Rust 编译；(2) PyYAML 缺 libyaml-devel 时 _yaml C 扩展编译失败 + setup.py 自动回落 + install 成功 + yaml.__with_libyaml__=False</li>
 </ul>
 <p style="color:#1e8e3e;margin-top:8px;"><strong>✅ P-OPENAI-DEPS 已解决（2026-05-22）</strong>：通过新增 <code>HttpxBackend</code>（纯 httpx 实现 OpenAI 协议，零 openai SDK 依赖）取代 SDK 路径，规避 jiter Rust 编译。详见下方 "2026-05-22 HttpxBackend 实现" 条目。</p>
+</div>
+
+<h2>2026-05-23 — PyYAML sdist 行为纠偏（reviewer 触发）</h2>
+
+<div class="entry fact">
+<span class="tag F">事实记录</span><span class="ts">2026-05-23 reviewer 第三次复审</span>
+<div class="files">DEPLOYMENT-LOONGARCH.md（第 4 节 libyaml-devel 说明、第 6.4 节 PyYAML 步骤、预期 + 常见报错）、requirements-loongarch.txt（顶部注释 + PyYAML 版本约束）</div>
+<p><strong>触发</strong>：HttpxBackend retry 补完 commit (deba888) 之后，reviewer 第三次复审，明确指出：</p>
+<blockquote>"P1 LoongArch 文档对 PyYAML 的'零 C 编译'承诺不成立。DEPLOYMENT-LOONGARCH.md L207 使用 <code>pip install --no-binary PyYAML</code>，这会强制走 sdist；PyYAML 6.0.x sdist 有 Cython build requirement，并默认尝试可选 libyaml C 扩展。失败后通常可回落纯 Python，但这不是'零 C 编译'。L242 和 requirements-loongarch.txt L11 的'全程零编译'也不稳；L246 对 yaml.h 错误的解释也反了方向。"</blockquote>
+<p><strong>事实复核</strong>（subagent 调研 + 我核对 PyYAML GitHub 与 PyPI 元数据）：</p>
+<table>
+<tr><th>事实点</th><th>结论</th></tr>
+<tr><td>PyYAML 6.0.x sdist build-system 依赖</td><td><code>setuptools, wheel, Cython</code>（Cython 是纯 Python）。<strong>6.0.0</strong> 没给 Cython 上限 → Cython 3.x 下 sdist 直接构建失败（<code>AttributeError: cython_sources</code>，issue #736）。<strong>6.0.1</strong> 才加 <code>Cython&lt;3.0</code>。<strong>6.0.2</strong> Python &lt;3.13 用 <code>Cython</code>，≥3.13 用 <code>Cython&gt;=3.0</code></td></tr>
+<tr><td><code>--no-binary PyYAML</code> 实际行为</td><td>强制走 sdist；build env 装 Cython+setuptools+wheel（纯 Python）；调 setup.py build_ext；setup.py 默认**尝试**编译 <code>_yaml</code> libyaml C 扩展</td></tr>
+<tr><td>fallback 机制</td><td>PyYAML setup.py 中 <code>try: build_extension(ext) except (CompileError, LinkError): ... log.warn("falling back to pure Python")</code>。前提是 <code>with_ext is None</code>（用户没传 <code>--with-libyaml</code> 也没设 <code>PYYAML_FORCE_LIBYAML=1</code>）—— 默认就是 None，所以 fallback 默认启用</td></tr>
+<tr><td><code>fatal error: yaml.h</code> 触发条件</td><td>用了 <code>--no-binary</code> + 没装 libyaml-devel → sdist 安装中 cc 编译 <code>_yaml.c</code> 时找不到 yaml.h 头文件 → CompileError → fallback 触发。<strong>这一行是 pip 日志里的标志，install 仍成功，不是终止错误</strong></td></tr>
+<tr><td>"严格零 C 编译尝试" 方法</td><td>没有 <code>PYYAML_FORCE_LIBYAML=0</code> 这种禁用环境变量（只有正向 <code>=1</code>）。官方途径：<code>pip install --no-binary PyYAML --config-settings="--build-option=--without-libyaml" "PyYAML>=6.0.1,<7"</code>，但 build backend 转发支持有局限。当前部署不引入此复杂度</td></tr>
+</table>
+</div>
+
+<div class="entry decision">
+<span class="tag D">设计决策</span><span class="ts">2026-05-23 文档纠偏 + PyYAML 版本下限提升</span>
+<div class="files">DEPLOYMENT-LOONGARCH.md（4 处 hunk）、requirements-loongarch.txt（顶部注释 + PyYAML 版本）、implementation-notes.html（本条目 + 原 "2026-05-22 方案 A" 条目末尾加纠偏注脚 + nav-pending P-LOONGARCH-VERIFY-VM 措辞更新）</div>
+<p><strong>不换依赖</strong>（按用户要求）。只做文档纠偏 + 版本约束精确化：</p>
+<ol>
+  <li><strong>"零 C 编译" → "无 Rust 编译；PyYAML _yaml C 扩展会尝试编译，失败时 setup.py 自动回落纯 Python，install 仍成功"</strong>。这是事实精确化，承诺范围缩小到诚实可验证</li>
+  <li><strong><code>PyYAML&gt;=6.0,&lt;7</code> → <code>&gt;=6.0.1,&lt;7</code></strong>。避开 6.0.0 的 Cython 上限缺失 bug（issue #736）。这是真实功能修复，否则在 Cython 3.x 环境下首次 install 直接 sdist 构建失败</li>
+  <li><strong><code>fatal error: yaml.h</code> 解释方向修正</strong>：从"PyYAML 没用 <code>--no-binary</code> 才出现"（错的、反方向）→ 改成"用了 <code>--no-binary</code> + 没装 libyaml-devel 时出现，但这是 fallback 路径的标志日志，不是终止错误"。同时把这行从"常见报错"挪到"看似报错实则正常"分类</li>
+  <li><strong>第 4 节 libyaml-devel 措辞</strong>：从"2026-05-22 起不再需要"（误导）→ "可选；装与不装的差异 + pip 日志现象"诚实陈述</li>
+  <li><strong>新增 <code>AttributeError: cython_sources</code> 报错条目</strong>：解释为 PyYAML 6.0.0 + Cython 3.x 的已知冲突，引导用户升级到 6.0.1</li>
+</ol>
+<p><strong>没改的</strong>：代码（<code>kyagent/</code>、<code>tests/</code>）、其它 yaml 配置、其它部署步骤 —— 这是纯文档 + 一行版本约束修正。</p>
+<p><strong>验证</strong>：</p>
+<ul>
+  <li><code>pytest tests/</code> → 237 passed, 2 skipped（与 deba888 一致，零回归）</li>
+  <li><code>python -m compileall -q kyagent</code> → 静默通过</li>
+  <li>文档自洽性人工核对：4 处修订前后描述一致；版本下限 6.0.1 与 pyproject.toml 主依赖兼容（>=1.10.13 / >=6.0.1 / >=0.12 / >=13.7 全部 PyPI 仍维护中）</li>
+</ul>
+<p><strong>方法论教训</strong>：</p>
+<ul>
+  <li>"零编译"这类强语义承诺在文档里必须配套验证脚本（pip 日志 grep `cc -c` / `gcc -c`），否则像 PyYAML 这种"默认 try 编译 + 失败 fallback"路径会让承诺看着对其实错</li>
+  <li>报错的"原因解释"必须从触发条件**正向**推导（"用了 X 才会出现 Y"），而非从"修复方法"反推（"没用 X 才会出现 Y" 大概率反方向）。我之前那一行就是典型反例</li>
+  <li>版本下限不能用 <code>&gt;=major.minor</code> 这种宽约束，至少要 <code>&gt;=major.minor.patch</code> 把已知 sdist 构建 bug 的版本排除掉</li>
+</ul>
 </div>
 
 <h2>2026-05-23 — HttpxBackend 运行时可靠性补完（reviewer 触发）</h2>
@@ -301,6 +345,16 @@
 </ol>
 <p><strong>验证清单</strong>（V1-V9，Windows 本地可跑无需龙芯硬件）：见用户对话中的方案文档第 4 节。</p>
 <p><strong>状态</strong>：方案已产出，<strong>未执行任何修改</strong>，等用户审核（详见未决问题 P-LOONGARCH-PLAN 等 6 项）。</p>
+<p><em>2026-05-23 纠偏注脚</em>：上表 PyYAML 行的"<strong>零编译</strong>"+"sdist 自动只装纯 Python 部分"
++ 依据第 3 条的"C 加速本来就只是可选加速器"措辞<strong>不精确</strong>。reviewer 复审指出：
+<code>pip install --no-binary PyYAML</code> 强制走 sdist；PyYAML 6.0.x sdist 的 build-system
+依赖含 Cython（纯 Python，无 C 编译）；setup.py 默认会**尝试编译** <code>_yaml</code> libyaml C 扩展；
+缺 libyaml-devel 时 setup.py 捕获 <code>CompileError</code> 自动回落纯 Python <code>SafeLoader</code>，
+install 仍成功（pip 日志含 <code>fatal error: yaml.h: No such file or directory</code> warning 行，
+非终止错误）。精确措辞：「<strong>无 Rust 编译；PyYAML 的 _yaml C 扩展会尝试编译，失败时 setup.py
+自动回落纯 Python，install 仍成功</strong>」。另外 <code>PyYAML&gt;=6.0,&lt;7</code> 应改为
+<code>&gt;=6.0.1</code> 避开 6.0.0 在 Cython 3.x 下的 <code>cython_sources</code> sdist 构建失败
+（PyYAML issue #736）。详见顶部 <strong>2026-05-23 PyYAML sdist 行为纠偏</strong> 条目。</p>
 </div>
 
 <div class="entry tradeoff">

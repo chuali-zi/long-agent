@@ -148,15 +148,15 @@ sudo dnf install -y \
     openssl-devel libffi-devel \
     git lsof
 
-# 可选：仅当你坚持用 libyaml C 加速器（启动节省 < 5ms）时再装：
+# 可选（功能不依赖，但能消除一行编译告警）：libyaml C 扩展头文件
 # sudo dnf install -y libyaml-devel
 ```
 
 说明：
-- `gcc gcc-c++ make` → 某些 PyPI 传递依赖兜底（如 `cryptography` 在 wheel 缺失时回落源码）
+- `gcc gcc-c++ make` → PyYAML 的 `_yaml` libyaml C 扩展会**尝试编译**（见 6.4 步注释），以及某些 PyPI 传递依赖兜底（如 `cryptography` 在 wheel 缺失时回落源码）。注意：PyYAML sdist 编译失败时 setup.py 会自动回落纯 Python，install 仍成功
 - `openssl-devel libffi-devel` → 编 `cryptography` 等可能的传递依赖
 - `lsof` → kyagent 工具用，麒麟最小化安装可能没装
-- ~~`libyaml-devel`~~ → **2026-05-22 起不再需要**。kyagent 仅用 `yaml.safe_load`，默认走纯 Python `SafeLoader`
+- `libyaml-devel`（可选） → kyagent 仅用 `yaml.safe_load`，纯 Python `SafeLoader` 足够。**装了**：PyYAML `_yaml` C 扩展编译成功，`yaml.__with_libyaml__=True`，加载略快。**不装**：PyYAML sdist build 时尝试编译 `_yaml` 失败，setup.py 捕获 `CompileError` 自动回落纯 Python，install 仍成功，但 pip 日志会有一行 `fatal error: yaml.h: No such file or directory`（这是 fallback 路径的标志日志，**不是终止性错误**）
 
 ---
 
@@ -202,10 +202,20 @@ source .venv/bin/activate
 # 6.3 升级 pip / setuptools / wheel（pip 必须 >=23，老 pip 不识别新 wheel 标签）
 pip install --upgrade "pip>=23" setuptools wheel
 
-# 6.4 装项目依赖（2026-05-22 零编译路径，预计 < 2 分钟）
+# 6.4 装项目依赖（2026-05-23 校对：无 Rust 编译；PyYAML 的 _yaml C 扩展会尝试编译，
+#                 失败时 setup.py 自动回落纯 Python，install 仍成功，详见步骤 1）
 
-# 1) PyYAML：强制 sdist，缺 libyaml-devel 时自动回落纯 Python SafeLoader
-pip install --no-binary PyYAML "PyYAML>=6.0,<7"
+# 1) PyYAML：显式强制走 sdist（LoongArch 上 PyPI 没有预编译 wheel，pip 默认也会回落
+#    sdist；--no-binary 让这个事实显式化）。最低版本 6.0.1 —— 6.0.0 的 pyproject.toml
+#    没给 Cython 上限，Cython 3.x 下 sdist 构建会失败（PyYAML issue #736）。
+#    sdist build 依赖 setuptools + wheel + Cython，全是纯 Python（无 C/Rust 编译）。
+#    安装时 setup.py 默认会**尝试**编译 _yaml libyaml C 扩展：
+#      装了 libyaml-devel → 编译成功，yaml.__with_libyaml__=True
+#      没装 libyaml-devel → CompileError 被 setup.py 捕获，自动 fallback 到纯 Python，
+#                            yaml.__with_libyaml__=False，install 仍成功
+#    （pip 日志会看到一行 'fatal error: yaml.h: No such file or directory'，这是
+#     fallback 路径的标志日志，不是终止错误。详见第 4 节 libyaml-devel 说明。）
+pip install --no-binary PyYAML "PyYAML>=6.0.1,<7"
 
 # 2) pydantic v1：纯 Python wheel（py3-none-any）
 pip install "pydantic>=1.10.13,<2"
@@ -232,19 +242,30 @@ pip install -e . --no-deps
 # pip install --no-deps "anthropic==0.39.0"
 # pip install -e . --no-deps
 
-# 6.5 自检（不应触发任何编译）
+# 6.5 自检（确认最终 import 路径正确；libyaml=True/False 都合法）
 python -c "import pydantic, anthropic, yaml, kyagent; \
 print('pydantic', pydantic.VERSION); \
 print('yaml libyaml=', yaml.__with_libyaml__); \
 print('anthropic', anthropic.__version__)"
 ```
 
-**预期**：步骤 1-6 **全程零编译**（无 Rust，无 C），整体 < 2 分钟（取决于网络）。
+**预期**：步骤 1-6 **无 Rust 编译**。PyYAML 步骤（步骤 1）的 `_yaml` C 扩展若 libyaml-devel
+缺失会**尝试编译并失败**，setup.py 捕获后自动回落纯 Python（install 仍成功，pip 日志含
+一行 `fatal error: yaml.h: No such file or directory` —— **这是 fallback 路径的标志，不是
+终止错误**）。整体 < 2 分钟（取决于网络）。
 
-**常见报错**：
+**安装日志中可能看到的"看似报错实则正常"的行**：
+- `fatal error: yaml.h: No such file or directory` 后跟 `compilation terminated.` → PyYAML
+  尝试编译 `_yaml` C 扩展失败，setup.py 自动 fallback 到纯 Python；只要最终 pip 显示
+  `Successfully installed PyYAML-6.0.x` 就是正常的。想消除该日志：第 4 节装 libyaml-devel。
+
+**真正会让安装中断的报错**：
 - `error: can't find Rust compiler` → 说明 anthropic 没用 `--no-deps`，pip 在拉 jiter。检查步骤 3 命令。
-- `fatal error: yaml.h: No such file or directory` → 说明 PyYAML 没用 `--no-binary` 强制 sdist；或者 pip 旧到不认 `--no-binary`。先升 pip 到 23+。
-- `Could not find a version that satisfies the requirement pydantic-core` → 不应该出现；如果出现说明 pydantic 没正确锁到 <2，检查步骤 2。
+- `AttributeError: cython_sources` 或 `Cython` 相关 sdist 构建错误 → PyYAML 锁版本不对，
+  6.0.0 sdist 在 Cython 3.x 下直接构建失败（PyYAML issue #736）。必须用 `PyYAML>=6.0.1`，
+  检查步骤 1 命令。
+- `Could not find a version that satisfies the requirement pydantic-core` → 不应该出现；
+  如果出现说明 pydantic 没正确锁到 <2，检查步骤 2。
 - `error: Microsoft Visual C++ ... is required` → 不可能在 Linux 出现，说明你在 Windows 上跑这步了
 
 ---

@@ -1,6 +1,7 @@
 # 龙芯（LoongArch64 Old World，Kylin V10）专用依赖清单
 # 配合 DEPLOYMENT-LOONGARCH.md 第 6.4 节使用。
 # 设计依据：implementation-notes.html "2026-05-22 龙芯依赖替换方案 A"
+#         + "2026-05-23 PyYAML sdist 行为纠偏"
 #
 # 安装方式（必须按此顺序，否则 pip 会自动拉 jiter）：
 #   pip install --upgrade "pip>=23" setuptools wheel
@@ -8,11 +9,19 @@
 #   pip install --no-deps "anthropic==0.39.0"
 #   pip install -e . --no-deps
 #
-# 全程零 Rust 编译、零 C 编译。
+# 编译保证（2026-05-23 校对，精确措辞）：
+#   - 无 Rust 编译：anthropic --no-deps + pydantic v1 三件套绕开 jiter / pydantic-core
+#   - PyYAML 的 _yaml libyaml C 扩展"会被尝试编译"：sdist 安装时 setup.py 默认启该路径，
+#     缺 libyaml-devel 时 CompileError 被 setup.py 捕获 → 自动 fallback 到纯 Python SafeLoader，
+#     install 仍成功（pip 日志含 'fatal error: yaml.h' 警示行，非终止错误）。
+#     装了 libyaml-devel → C 扩展编译成功，yaml.__with_libyaml__=True，加载略快。
+#   - 严格说**不是绝对零 C 编译尝试**，但 PyYAML 的 fallback 机制保证 install 一定成功。
 
 # === 主依赖（pyproject.toml 同步）===
 pydantic>=1.10.13,<2
-PyYAML>=6.0,<7
+# PyYAML 最低 6.0.1：6.0.0 的 pyproject.toml 没给 Cython 上限，Cython 3.x 下 sdist
+# 构建会失败 (PyYAML issue #736: AttributeError: cython_sources)
+PyYAML>=6.0.1,<7
 typer>=0.12
 rich>=13.7
 
