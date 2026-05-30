@@ -1,9 +1,9 @@
 """Streaming progress events emitted by Agent and consumed by interactive UIs.
 
 The Agent main loop calls ``on_progress(ProgressEvent(...))`` at well-defined
-seams (LLM call start/end, tool call start/end, final answer, error). UIs that
-want a live display (TUI) subscribe; UIs that don't care (`ask`, `chat`) leave
-the callback as ``None`` and incur zero overhead.
+seams (LLM call start/end, token deltas, tool call start/end, final answer,
+error). UIs that want a live display (TUI) subscribe; UIs that don't care
+(`ask`, `chat`) leave the callback as ``None`` and incur zero overhead.
 
 The schema is intentionally narrow and stable so it can be serialized to JSON
 later (MCP streaming, web UI bridge) without churn.
@@ -17,9 +17,11 @@ from typing import Any, Callable, Literal
 ProgressKind = Literal[
     "agent_start",       # Agent.ask() entered; payload: text=user_input
     "thinking_start",    # LLM round-trip begins; payload: meta={"iteration": N}
+    "thinking_delta",    # LLM stream token chunk; payload: delta=chunk
     "thinking_end",      # LLM round-trip ends; payload: text=preview, meta={"tool_calls": [...]}
     "tool_call_start",   # About to invoke tool; payload: tool, argv
     "tool_call_end",     # Tool returned; payload: tool, text=truncated_output, meta={"ok": bool}
+    "user_choice",       # Agent asks the user to pick from options; payload: text=question, meta={"options": [...]}
     "agent_final",       # Final answer ready; payload: text=final_text
     "error",             # Any unrecoverable error; payload: text=detail, meta={"reason": code}
 ]
@@ -38,6 +40,7 @@ class ProgressEvent:
     text: str = ""
     tool: str | None = None
     argv: list[str] | None = None
+    delta: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
 

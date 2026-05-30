@@ -2,14 +2,16 @@
 
 提供以下后端：
   - AnthropicBackend：调用真实 Claude API（需 ANTHROPIC_API_KEY）
-  - OpenAIBackend：调用 OpenAI Chat Completions（需 OPENAI_API_KEY），同时兼容
-                   任何 OpenAI 协议（Azure OpenAI / vLLM / DeepSeek / 智谱 / Ollama …）
+  - OpenAIBackend：调用 OpenAI Chat Completions（需 OPENAI_API_KEY），同时适配
+                   常见 OpenAI 协议兼容端点（Azure OpenAI / vLLM / DeepSeek / 智谱 / Ollama …）
+  - HttpxBackend：纯 httpx 实现，支持 openai_httpx / deepseek_httpx / qwen_httpx，
+                  是 LoongArch Old World 推荐路径
   - MockBackend：纯规则路由，不需要任何外部依赖；可用于离线 demo / CI
 
-国产 LLM（赛题鼓励的 DeepSeek / Qwen）走 OpenAI 协议兼容路径，由
-build_backend 工厂识别 llm_backend 别名后转成 OpenAIBackend(base_url=预设)。
-2026-05 验证：DeepSeek 官方推荐 openai SDK + base_url=https://api.deepseek.com；
-DashScope 提供 compatible-mode/v1 端点。tools/tool_calls 协议与 OpenAI 完全一致。
+国产 LLM（赛题鼓励的 DeepSeek / Qwen）走 OpenAI Chat Completions 兼容路径，由
+build_backend 工厂识别 llm_backend 别名后转成 SDK 路径或纯 httpx 路径。
+2026-05-28 验证：DeepSeek 官方示例使用 OpenAI API 格式 + base_url=https://api.deepseek.com；
+DashScope 提供 compatible-mode/v1 端点。本仓库按已测试的 messages/tools/tool_calls 子集适配。
 
 每个后端实现统一的 chat(messages, tools) -> AssistantMessage。
 Agent.core 始终以 Anthropic 风格组装 messages/tools；OpenAIBackend 内部完成双向翻译。
@@ -24,7 +26,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx  # 主依赖（pyproject.toml [project.dependencies]）—— HttpxBackend 用
 
@@ -80,6 +82,27 @@ class LlmBackend:
     ) -> AssistantMessage:
         raise NotImplementedError
 
+    def chat_stream(
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        on_delta: Callable[[str], None],
+    ) -> AssistantMessage:
+        """流式聊天的默认实现：回退到 chat() 并把完整文本作为一次 delta 发出。
+
+        子类如有原生流式能力（OpenAI SSE、httpx SSE）应当 override。
+        on_delta 仅用于 text 增量，不应包含 tool_call JSON 片段。
+        """
+        result = self.chat(system, messages, tools)
+        full = "".join(b.text for b in result.blocks if isinstance(b, TextBlock))
+        if full:
+            try:
+                on_delta(full)
+            except Exception:  # noqa: BLE001 — 不让 UI 回调把后端结果搞掉
+                logger.debug("on_delta callback raised in default chat_stream", exc_info=True)
+        return result
+
 
 # ---- Anthropic 实现 -------------------------------------------------------
 
@@ -90,6 +113,7 @@ class AnthropicBackend(LlmBackend):
     # 龙芯（LoongArch64 Old World）部署用 `pip install --no-deps anthropic==0.39.0`，未装 jiter。
     # 切勿改用 messages.stream() / 任何 anthropic.lib.streaming.* — 会触发 ImportError: jiter。
     # 如需流式：要么先解决 LoongArch 上的 Rust 编译，要么改走 httpx 手打 SSE。
+    # 故 chat_stream 不在此类 override —— 直接走基类默认（chat() 一把梭 + 单条 delta）。
 
     def __init__(
         self,
@@ -198,6 +222,7 @@ class OpenAIBackend(LlmBackend):
         max_tokens: int,
         temperature: float = 0.2,
         api_key_env: str = "OPENAI_API_KEY",
+        api_key: str | None = None,
         base_url: str | None = None,
         organization: str | None = None,
         display_name: str | None = None,
@@ -208,7 +233,7 @@ class OpenAIBackend(LlmBackend):
             raise RuntimeError("缺少依赖：pip install openai") from e
         from openai import OpenAI
 
-        key = os.environ.get(api_key_env)
+        key = os.environ.get(api_key_env) or api_key
         if not key:
             raise RuntimeError(f"环境变量 {api_key_env} 未设置")
         client_kwargs: dict[str, Any] = {"api_key": key}
@@ -232,6 +257,7 @@ class OpenAIBackend(LlmBackend):
         max_tokens: int = 4096,
         temperature: float = 0.2,
         api_key_env: str | None = None,
+        api_key: str | None = None,
         base_url_override: str | None = None,
     ) -> OpenAIBackend:
         """国产 LLM 便捷构造：provider in {'deepseek', 'qwen'}。
@@ -250,6 +276,7 @@ class OpenAIBackend(LlmBackend):
             max_tokens=max_tokens,
             temperature=temperature,
             api_key_env=api_key_env or p["api_key_env"],
+            api_key=api_key,
             base_url=base_url_override or p["base_url"],
             display_name=p["display"],
         )
@@ -273,6 +300,88 @@ class OpenAIBackend(LlmBackend):
         resp = self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         return self._from_openai_choice(choice, raw=resp)
+
+    def chat_stream(self, system, messages, tools, on_delta):
+        """OpenAI SDK 原生 streaming：stream=True 后迭代 ChatCompletionChunk。
+
+        text 增量逐块经 on_delta 推出；tool_calls 增量按 index 累积，最后
+        组装成与 chat() 等价的 AssistantMessage（复用 _from_openai_dict 路径
+        以保证 stop_reason 映射 / tool_use_id 透传 / JSON args 解析全部一致）。
+        """
+        oai_messages = self._to_openai_messages(system, messages)
+        oai_tools = self._to_openai_tools(tools) if tools else None
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": oai_messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+        if oai_tools:
+            kwargs["tools"] = oai_tools
+            kwargs["tool_choice"] = "auto"
+
+        stream = self._client.chat.completions.create(**kwargs)
+
+        text_buf: list[str] = []
+        tool_acc: dict[int, dict[str, Any]] = {}
+        final_finish_reason: str | None = None
+
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            ch0 = choices[0]
+            delta = getattr(ch0, "delta", None)
+            fr = getattr(ch0, "finish_reason", None)
+            if fr:
+                final_finish_reason = fr
+            if delta is None:
+                continue
+
+            d_content = getattr(delta, "content", None)
+            if d_content:
+                text_buf.append(d_content)
+                try:
+                    on_delta(d_content)
+                except Exception:  # noqa: BLE001
+                    logger.debug("on_delta raised", exc_info=True)
+
+            d_tcs = getattr(delta, "tool_calls", None) or []
+            for tc in d_tcs:
+                idx = getattr(tc, "index", 0) or 0
+                entry = tool_acc.setdefault(idx, {"index": idx, "id": "", "name": "", "args": ""})
+                tc_id = getattr(tc, "id", None)
+                if tc_id:
+                    entry["id"] = tc_id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    fn_name = getattr(fn, "name", None)
+                    if fn_name:
+                        entry["name"] = fn_name
+                    fn_args = getattr(fn, "arguments", None)
+                    if fn_args:
+                        entry["args"] += fn_args
+
+        fake_dict = {
+            "choices": [{
+                "message": {
+                    "content": "".join(text_buf),
+                    "tool_calls": [
+                        {
+                            "id": t["id"],
+                            "type": "function",
+                            "function": {"name": t["name"], "arguments": t["args"]},
+                        }
+                        for t in sorted(tool_acc.values(), key=lambda x: x["index"])
+                    ],
+                },
+                "finish_reason": final_finish_reason or "stop",
+            }],
+        }
+        # 走 HttpxBackend._from_openai_dict 同一条解析路径，零行为漂移
+        return HttpxBackend._from_openai_dict(fake_dict)
 
     # ---- Anthropic → OpenAI 翻译 ---------------------------------------
 
@@ -479,6 +588,7 @@ class HttpxBackend(LlmBackend):
         max_tokens: int,
         temperature: float = 0.2,
         api_key_env: str = "OPENAI_API_KEY",
+        api_key: str | None = None,
         base_url: str | None = None,
         organization: str | None = None,
         display_name: str | None = None,
@@ -494,7 +604,7 @@ class HttpxBackend(LlmBackend):
 
         # client 参数是测试 / 高级用法的注入口；正常用 None 让我们自己造
         if client is None:
-            key = os.environ.get(api_key_env)
+            key = os.environ.get(api_key_env) or api_key
             if not key:
                 raise RuntimeError(f"环境变量 {api_key_env} 未设置")
             # 规范化 base_url：必须以 / 结尾，否则 httpx 的相对路径 join
@@ -526,6 +636,7 @@ class HttpxBackend(LlmBackend):
         max_tokens: int = 4096,
         temperature: float = 0.2,
         api_key_env: str | None = None,
+        api_key: str | None = None,
         base_url_override: str | None = None,
     ) -> HttpxBackend:
         """国产 LLM 便捷构造：provider in {'deepseek', 'qwen'}。
@@ -544,6 +655,7 @@ class HttpxBackend(LlmBackend):
             max_tokens=max_tokens,
             temperature=temperature,
             api_key_env=api_key_env or p["api_key_env"],
+            api_key=api_key,
             base_url=base_url_override or p["base_url"],
             display_name=p["display"],
         )
@@ -566,6 +678,140 @@ class HttpxBackend(LlmBackend):
             payload["tool_choice"] = "auto"
 
         return self._post_with_retry(payload)
+
+    def chat_stream(self, system, messages, tools, on_delta):
+        """SSE 流式聊天（OpenAI 协议 stream=True）。
+
+        - 在 chat_completions 上 POST stream=True，迭代 iter_lines 解析 SSE
+        - text 增量经 on_delta 实时推出；tool_calls 增量按 index 累积
+        - 流结束后构造伪 OpenAI 响应 dict 并复用 _from_openai_dict
+          以保证与 chat() 完全等价的 AssistantMessage 语义
+        - 网络异常（_RETRY_EXC_TYPES）整段重试，最多 max_retries 次；
+          重试前发一条 '[重试 LLM 流]\\n' 提示，UI 自行处理重发的 token
+        - 4xx 非重试码 / JSON 解析失败 / 重试用尽 → fail-fast，与 chat() 同语义
+        """
+        oai_messages = OpenAIBackend._to_openai_messages(system, messages)
+        oai_tools = OpenAIBackend._to_openai_tools(tools) if tools else None
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": oai_messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+        if oai_tools:
+            payload["tools"] = oai_tools
+            payload["tool_choice"] = "auto"
+
+        attempt = 0
+        while True:
+            try:
+                return self._stream_once(payload, on_delta)
+            except self._RETRY_EXC_TYPES as exc:
+                if attempt >= self.max_retries:
+                    raise RuntimeError(
+                        f"HttpxBackend stream network error after {attempt} retries: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                self._sleep(self._compute_backoff(attempt, None))
+                attempt += 1
+                try:
+                    on_delta("\n[重试 LLM 流]\n")
+                except Exception:  # noqa: BLE001
+                    logger.debug("on_delta raised on retry notice", exc_info=True)
+                continue
+
+    def _stream_once(
+        self,
+        payload: dict[str, Any],
+        on_delta: Callable[[str], None],
+    ) -> AssistantMessage:
+        """单次 SSE 流式调用；网络异常往外抛由 chat_stream 决定是否重试。"""
+        text_buf: list[str] = []
+        tool_acc: dict[int, dict[str, Any]] = {}
+        final_finish_reason: str | None = None
+
+        with self._client.stream("POST", "chat/completions", json=payload) as resp:
+            status = resp.status_code
+            if status >= 400:
+                # 读 body 用于错误信息；非重试 4xx 在外层不会被重试逻辑捕获，
+                # 5xx / 408 / 409 / 429 这里直接 raise（SSE 路径下不实现 HTTP
+                # 状态码级别的细粒度重试 —— 简化方案，符合任务要求）。
+                try:
+                    body = resp.read().decode("utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    body = ""
+                body_snippet = body[:500]
+                raise RuntimeError(
+                    f"HttpxBackend HTTP {status} from upstream (stream): {body_snippet}"
+                )
+
+            for line in resp.iter_lines():
+                # iter_lines 在 httpx 里产出 str（自动 utf-8 解码）
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    # 非 JSON 块（comment / keepalive 等）静默跳过
+                    continue
+
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                ch0 = choices[0]
+                delta = ch0.get("delta") or {}
+                fr = ch0.get("finish_reason")
+                if fr:
+                    final_finish_reason = fr
+
+                d_content = delta.get("content")
+                if d_content:
+                    text_buf.append(d_content)
+                    try:
+                        on_delta(d_content)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("on_delta raised", exc_info=True)
+
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0) or 0
+                    entry = tool_acc.setdefault(
+                        idx, {"index": idx, "id": "", "name": "", "args": ""}
+                    )
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        entry["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["args"] += fn["arguments"]
+
+        fake_dict = {
+            "choices": [{
+                "message": {
+                    "content": "".join(text_buf),
+                    "tool_calls": [
+                        {
+                            "id": t["id"],
+                            "type": "function",
+                            "function": {"name": t["name"], "arguments": t["args"]},
+                        }
+                        for t in sorted(tool_acc.values(), key=lambda x: x["index"])
+                    ],
+                },
+                "finish_reason": final_finish_reason or "stop",
+            }],
+        }
+        return self._from_openai_dict(fake_dict)
 
     def _post_with_retry(self, payload: dict[str, Any]) -> AssistantMessage:
         """带重试的 POST，对齐 openai SDK _base_client 的重试语义。
@@ -701,6 +947,45 @@ class MockBackend(LlmBackend):
 
     name = "mock"
 
+    # MockBackend 用的 sleep 间隔（秒）；测试可 monkeypatch 调低
+    _STREAM_CHUNK_DELAY: float = 0.01
+
+    def chat_stream(self, system, messages, tools, on_delta):
+        """把 chat() 返回的 text 块切成 5-10 段逐块 on_delta，加微小 sleep
+        以便 TUI 看见动画。tool_use 块不切，最终 AssistantMessage 与 chat() 同。
+        """
+        result = self.chat(system, messages, tools)
+        for blk in result.blocks:
+            if not isinstance(blk, TextBlock):
+                continue
+            words = blk.text.split(" ")
+            n = len(words)
+            if n <= 1:
+                chunks = [blk.text] if blk.text else []
+            else:
+                # 5-10 块；少于 5 个词的就按词分
+                target = max(1, min(10, max(5, n // 3)))
+                size = max(1, n // target)
+                chunks = []
+                i = 0
+                while i < n:
+                    piece = " ".join(words[i:i + size])
+                    # 除首段外补回前缀空格，保证拼接 == 原 text
+                    if i > 0:
+                        piece = " " + piece
+                    chunks.append(piece)
+                    i += size
+            for c in chunks:
+                if not c:
+                    continue
+                try:
+                    on_delta(c)
+                except Exception:  # noqa: BLE001
+                    logger.debug("on_delta raised in MockBackend", exc_info=True)
+                if self._STREAM_CHUNK_DELAY > 0:
+                    time.sleep(self._STREAM_CHUNK_DELAY)
+        return result
+
     def chat(self, system, messages, tools):
         last = messages[-1] if messages else None
         # 阶段二：上一轮 assistant 已发起 tool_use，user 在送 tool_result 进来
@@ -820,7 +1105,7 @@ class MockBackend(LlmBackend):
                     "```\n"
                     f"{snippet}\n"
                     "```\n"
-                    "（mock 后端不做推理总结，真实部署请配置 Anthropic 后端）"
+                    "（mock 后端不做推理总结，真实部署请配置真实 LLM 后端）"
                 )
         return AssistantMessage(
             blocks=[TextBlock(text="\n\n".join(parts) or "（无结果）")],
@@ -867,7 +1152,8 @@ def _construct_backend(cfg) -> LlmBackend:
         # 国产 LLM：走 OpenAI 协议兼容路径
         sub = getattr(cfg.agent, name)
         env = sub.api_key_env
-        if not os.environ.get(env):
+        api_key = getattr(sub, "api_key", None)
+        if not (os.environ.get(env) or api_key):
             raise _MissingKeyError(env)
         return OpenAIBackend.preset(
             provider=name,
@@ -875,6 +1161,7 @@ def _construct_backend(cfg) -> LlmBackend:
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,
             api_key_env=env,
+            api_key=api_key,
             base_url_override=sub.base_url or None,
         )
 
@@ -898,7 +1185,8 @@ def _construct_backend(cfg) -> LlmBackend:
             )
         sub = getattr(cfg.agent, provider)
         env = sub.api_key_env
-        if not os.environ.get(env):
+        api_key = getattr(sub, "api_key", None)
+        if not (os.environ.get(env) or api_key):
             raise _MissingKeyError(env)
         return HttpxBackend.preset(
             provider=provider,
@@ -906,6 +1194,7 @@ def _construct_backend(cfg) -> LlmBackend:
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,
             api_key_env=env,
+            api_key=api_key,
             base_url_override=sub.base_url or None,
         )
 
@@ -913,31 +1202,18 @@ def _construct_backend(cfg) -> LlmBackend:
 
 
 def build_backend(cfg) -> LlmBackend:
-    """根据配置构造后端；缺 key 时按 fallback_to_mock 策略降级到 Mock。
+    """根据配置构造后端；真实后端缺 API key 时直接报错。
 
-    降级规则（仅 key 缺失）：
-      - cfg.agent.fallback_to_mock = True（默认）：WARN + 返回 MockBackend
-      - cfg.agent.fallback_to_mock = False：直接 raise，用于 CI / 生产
-    其他错误（缺依赖包、配置非法）一律 raise，不被吞掉。
+    离线 demo / CI 如需 mock，必须显式设置 llm_backend=mock。其他错误
+    （缺依赖包、配置非法）同样不被吞掉。
     """
     name = (cfg.agent.llm_backend or "mock").lower()
     try:
         backend = _construct_backend(cfg)
     except _MissingKeyError as e:
         env_var = str(e)
-        if not getattr(cfg.agent, "fallback_to_mock", True):
-            raise RuntimeError(
-                f"LLM 后端 {name!r} 需要环境变量 {env_var}，但未设置；"
-                f"且 agent.fallback_to_mock=false 禁止降级。"
-            ) from e
-        logger.warning(
-            "LLM 后端 %r 缺少环境变量 %s，已自动降级到 mock。"
-            "设置该变量并重启即可启用真实后端。",
-            name, env_var,
-        )
-        mb = MockBackend()
-        # 把降级原因挂到实例上，CLI / 审计可读取
-        mb.fallback_from = name  # type: ignore[attr-defined]
-        mb.fallback_reason = f"环境变量 {env_var} 未设置"  # type: ignore[attr-defined]
-        return mb
+        raise RuntimeError(
+            f"LLM 后端 {name!r} 需要环境变量 {env_var}，但未设置；"
+            "如需离线 demo，请显式设置 llm_backend=mock。"
+        ) from e
     return backend

@@ -32,6 +32,12 @@ from kyagent.mcp.tools.pipeline import (
 )
 from kyagent.agent import confirm_adapter
 from kyagent.confirm import ConfirmFn, auto_deny
+from kyagent.interactive import (
+    UserChoice,
+    UserChoiceFn,
+    UserChoiceOption,
+    auto_cancel_choice,
+)
 from kyagent.runtime import build_runtime
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.intent import IntentGuard, IntentVerdict
@@ -67,6 +73,7 @@ class Agent:
         confirm: ConfirmFn = _auto_deny,
         intent_guard: IntentGuard | None = None,
         on_progress: ProgressCallback | None = None,
+        on_user_choice: UserChoiceFn | None = None,
     ):
         self.cfg = cfg
         self.llm = llm
@@ -78,6 +85,8 @@ class Agent:
         self.confirm = confirm
         # on_progress 一旦赋值不再变更：worker 线程读到的总是同一个 callable
         self.on_progress: ProgressCallback = on_progress or noop_progress
+        # ask_user_choice 工具的回调；UI 未注入时默认拒绝（保守）
+        self.on_user_choice: UserChoiceFn = on_user_choice or auto_cancel_choice
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
         # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
@@ -109,14 +118,16 @@ class Agent:
 
     @classmethod
     def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny,
-                    on_progress: ProgressCallback | None = None) -> "Agent":
+                    on_progress: ProgressCallback | None = None,
+                    on_user_choice: UserChoiceFn | None = None) -> "Agent":
         # 通道无关基础设施统一从 composition root 装配
         rt = build_runtime(cfg)
         # 通道特定（LLM 后端、NL 意图层）在这里组合
         llm = build_backend(cfg)
         intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
         return cls(cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
-                   intent_guard=intent_guard, on_progress=on_progress)
+                   intent_guard=intent_guard, on_progress=on_progress,
+                   on_user_choice=on_user_choice)
 
     # ---- 主入口 --------------------------------------------------------
 
@@ -194,8 +205,26 @@ class Agent:
                 meta={"iteration": iterations},
             ))
 
+            def _on_delta(chunk: str) -> None:
+                # 闭包捕获 self，给 TUI 推 token 级增量；空块直接跳过
+                if chunk:
+                    self._emit(ProgressEvent(kind="thinking_delta", delta=chunk))
+
             try:
-                assistant = self.llm.chat(self.system_prompt, self.messages, tools_for_llm)
+                # 所有后端要么实现 chat_stream（基类默认调 chat 再发一次完整 delta），
+                # 要么暂未升级（并行子代理在 llm.py 加）。getattr 兜底保证两侧都能跑。
+                stream_fn = getattr(self.llm, "chat_stream", None)
+                if callable(stream_fn):
+                    assistant = stream_fn(
+                        self.system_prompt, self.messages, tools_for_llm, _on_delta
+                    )
+                else:
+                    assistant = self.llm.chat(
+                        self.system_prompt, self.messages, tools_for_llm
+                    )
+                    # fallback：一次性把全部文本作为单条 delta 喷出，保持事件契约
+                    for _t in assistant.texts():
+                        _on_delta(_t)
             except Exception as e:  # noqa: BLE001
                 self.audit.event(trace, EventKind.ERROR,
                                  {"reason": "llm_error", "detail": str(e)})
@@ -345,6 +374,11 @@ class Agent:
 
     def _handle_tool_use_inner(self, trace: Trace, tu: ToolUseBlock,
                                notes: list[str]) -> ToolResultBlock:
+        # 特判：ask_user_choice 不走 ExecutionProxy / 安全护栏流水线，
+        # 它是纯逻辑工具（UI 交互），单独路由。
+        if tu.name == "ask_user_choice":
+            return self._handle_user_choice(trace, tu)
+
         tool = self.registry.get(tu.name)
         if tool is None:
             self.audit.event(trace, EventKind.ERROR,
@@ -414,6 +448,71 @@ class Agent:
         )
         return ToolResultBlock(tool_use_id=tu.id, is_error=not formatted.ok, content=content)
 
+    def _handle_user_choice(self, trace: Trace, tu: ToolUseBlock) -> ToolResultBlock:
+        """处理 ask_user_choice：解析选项 → 审计 → 通过 progress 通知 UI →
+        同步等 on_user_choice 回调 → 校验返回值合法 → 转 ToolResultBlock。
+
+        没有 ExecutionProxy 介入：不构 argv、不过 Guardrail。审计照样记，
+        以便事后能复盘"agent 问过用户什么 / 用户选了什么"。
+        """
+        args = tu.input or {}
+        question = str(args.get("question", "")).strip()
+        raw_options = args.get("options") or []
+        options: list[UserChoiceOption] = [
+            UserChoiceOption(
+                label=str(o.get("label", o.get("value", ""))),
+                value=str(o.get("value", "")),
+                description=str(o.get("description", "")),
+            )
+            for o in raw_options
+            if isinstance(o, dict) and o.get("value")
+        ]
+
+        self.audit.event(trace, EventKind.TOOL_REQUEST, {
+            "tool": "ask_user_choice",
+            "question": question,
+            "options": [{"value": o.value, "label": o.label} for o in options],
+        })
+
+        # 推送给 UI；TUI 可据此渲染选项卡片，但用户作答仍走 on_user_choice 回调
+        self._emit(ProgressEvent(
+            kind="user_choice",
+            text=question,
+            meta={"options": [
+                {"label": o.label, "value": o.value, "description": o.description}
+                for o in options
+            ]},
+        ))
+
+        # 同步阻塞拿用户结果；on_user_choice 可能由 UI 弹窗驱动
+        try:
+            chosen = self.on_user_choice(
+                UserChoice(question=question, options=options)
+            )
+        except Exception:
+            chosen = ""
+        chosen = (chosen or "").strip()
+        valid_values = {o.value for o in options}
+        if chosen and chosen not in valid_values:
+            # 拒绝非法值：UI 不应给 LLM 编造选项的机会
+            chosen = ""
+
+        self.audit.event(trace, EventKind.EXECUTION_RESULT, {
+            "tool": "ask_user_choice",
+            "chosen": chosen,
+            "stdout": chosen,
+        })
+
+        if not chosen:
+            return ToolResultBlock(
+                tool_use_id=tu.id, is_error=True,
+                content="[user_choice] 用户未做出选择或选项无效。",
+            )
+        return ToolResultBlock(
+            tool_use_id=tu.id, is_error=False,
+            content=f"用户选择: {chosen}",
+        )
+
     @staticmethod
     def _blocks_to_dict(am: AssistantMessage) -> list[dict]:
         out: list[dict] = []
@@ -429,6 +528,8 @@ class Agent:
 
 
 def build_agent(config_path: str | None = None, confirm: ConfirmFn = _auto_deny,
-                on_progress: ProgressCallback | None = None) -> Agent:
+                on_progress: ProgressCallback | None = None,
+                on_user_choice: UserChoiceFn | None = None) -> Agent:
     cfg = load_config(config_path)
-    return Agent.from_config(cfg, confirm=confirm, on_progress=on_progress)
+    return Agent.from_config(cfg, confirm=confirm, on_progress=on_progress,
+                             on_user_choice=on_user_choice)

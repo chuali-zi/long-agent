@@ -266,9 +266,19 @@ kyagent audit show trace-abc123
 # → 把这条 trace 的每个事件 panel 化打印出来，可直接做事故复盘
 ```
 
-## 6.1 TUI demo
+## 6.1 TUI demo（v2 流式）
 
 `kyagent tui` 启动 `prompt_toolkit + rich` 的轻量交互壳，保留同一个 `Agent` 多轮上下文，并复用现有 `ConfirmRequest`、Guardrail、ExecutionProxy 和 AuditStore。TUI 只负责展示、确认和回放，不直接执行 shell。
+
+v2 渲染策略：
+
+- 每条用户发言独立渲染为一个绿框 Panel（标题"你"），每条 agent 回答独立渲染为一个蓝框 Panel（标题"kyagent (backend)"）。
+- LLM reasoning 在 turn 期间以 `dim italic grey50` 样式逐 chunk 流式滚动显示，与最终回答的白色亮文显著区分；turn 结束后该区域被擦除（transient）。
+- 底部状态行实时显示 🧠 思考中 / 🔧 调用 `<tool> <argv>` / ✅ 完成 / ❌ 错误，带 spinner。
+- 当 LLM 调用 `ask_user_choice` 工具时，TUI 弹一个黄框选项 Panel 让用户输入序号或 value 选择，回车取消。
+- `Ctrl+L` 清屏（prompt_toolkit KeyBindings 实现）。
+
+驱动这些 UI 的两条契约都在主仓库里：`Agent.on_progress`（事件 `kind`：`agent_start / thinking_start / thinking_delta / thinking_end / tool_call_start / tool_call_end / user_choice / agent_final / error`）与 `Agent.on_user_choice`；`LlmBackend.chat_stream(system, messages, tools, on_delta)` 给 `HttpxBackend` / `OpenAIBackend` / `MockBackend` 提供真流式，`AnthropicBackend` 走基类 fallback（jiter Rust 编译对 LoongArch 不友好）。
 
 内置命令：
 

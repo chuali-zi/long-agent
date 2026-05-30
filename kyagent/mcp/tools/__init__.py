@@ -1,6 +1,14 @@
 """内置 MCP 工具集合。"""
 from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolResult, RiskLevel
-from kyagent.mcp.tools import process, network, logs, service, filesystem, package
+from kyagent.mcp.tools import (
+    process,
+    network,
+    logs,
+    service,
+    filesystem,
+    package,
+    interactive,
+)
 
 
 def register_builtin(registry: ToolRegistry) -> ToolRegistry:
@@ -11,6 +19,9 @@ def register_builtin(registry: ToolRegistry) -> ToolRegistry:
     service.register(registry)
     filesystem.register(registry)
     package.register(registry)
+    # ask_user_choice 是纯逻辑工具（不走 ExecutionProxy），默认就注册——
+    # LLM 不会主动叫，没用到时零成本。
+    interactive.register(registry)
     return registry
 
 

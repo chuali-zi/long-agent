@@ -1,7 +1,7 @@
 # 04 · LLM 后端层
 
-> 文件：`kyagent/agent/llm.py`（515 行）
-> 配套：`tests/test_openai_backend.py`
+> 文件：`kyagent/agent/llm.py`
+> 配套：`tests/test_openai_backend.py`、`tests/test_httpx_backend.py`
 
 ---
 
@@ -12,7 +12,7 @@ LLM 后端要做到三件事：
 2. **可替换**：换后端只改一个 YAML 字段，不动 Agent 代码
 3. **离线可跑**：MockBackend 让 CI / 比赛评测可以不依赖外部 API
 
-实现策略：内部用 Anthropic 风格的数据结构（TextBlock / ToolUseBlock / ToolResultBlock + AssistantMessage），三种后端都翻译到这套统一表示。
+实现策略：内部用 Anthropic 风格的数据结构（TextBlock / ToolUseBlock / ToolResultBlock + AssistantMessage），mock、SDK 后端和 `openai_httpx / deepseek_httpx / qwen_httpx` 都翻译到这套统一表示。
 
 ---
 
@@ -159,16 +159,14 @@ OpenAI 协议比 Anthropic 协议复杂——tool calls 是 message 上的字段
 | 服务 | base_url | model |
 |---|---|---|
 | OpenAI 官方 | `https://api.openai.com/v1` (默认) | `gpt-4o-mini` 等 |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-v4-flash` / `deepseek-v4-pro` |
 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` |
 | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
 | vLLM / Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:14b` 等 |
 
 只要服务遵循 OpenAI Chat Completions 协议（tools / tool_calls / tool_choice），就能直接接。
 
-> **部署推广边界**：当前阶段（含龙芯部署）**只推 DeepSeek 一个真实后端**，上表其他条目仅
-> 用于说明 `OpenAIBackend` 的协议适配能力。生产文档（README.kyagent.md、DEPLOYMENT-*）
-> 不应再列举多供应商。详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目。
+> **部署推广边界**：当前阶段（含龙芯部署）**只推 DeepSeek 一个真实后端**。LoongArch Old World 使用 `deepseek_httpx`，不安装 openai SDK；上表其他条目仅用于说明协议适配能力。
 
 ### 5.2 初始化（llm.py:161）
 
@@ -442,7 +440,7 @@ def _summarize(self, tool_results):
                 "```\n"
                 f"{snippet}\n"
                 "```\n"
-                "（mock 后端不做推理总结，真实部署请配置 Anthropic 后端）"
+                "（mock 后端不做推理总结，真实部署请配置真实 LLM 后端）"
             )
     return AssistantMessage(
         blocks=[TextBlock(text="\n\n".join(parts) or "（无结果）")],
@@ -450,7 +448,7 @@ def _summarize(self, tool_results):
     )
 ```
 
-阶段二直接把 tool_result 内容截 1200 字贴回给用户。没有真正的推理总结——离线模式下没法做真总结。注释里明确告诉用户"真实部署请配置 Anthropic 后端"。
+阶段二直接把 tool_result 内容截 1200 字贴回给用户。没有真正的推理总结——离线模式下没法做真总结。注释里明确告诉用户"真实部署请配置真实 LLM 后端"。
 
 ---
 
@@ -479,7 +477,35 @@ def build_backend(cfg) -> LlmBackend:
     raise ValueError(f"未知 LLM 后端：{name}")
 ```
 
-`cfg.agent.llm_backend` 取自 `default.yaml`（或环境变量 `KYAGENT_LLM_BACKEND`）。空值 / 拼写错误时 mock 兜底。
+`cfg.agent.llm_backend` 默认来自 `configs/default.yaml` 的 `deepseek_httpx`，也可以由项目根 `kyagent.json` 顶层 `llm_backend` 覆盖；显式环境变量 `KYAGENT_LLM_BACKEND` 优先级最高。DeepSeek key 可来自 `DEEPSEEK_API_KEY`，也可来自项目根 `kyagent.json` 的 `deepseek_api_key` 或 `deepseek.api_key`；环境变量优先。真实后端缺 key 时直接报错；如需离线演示，必须显式设置 `llm_backend=mock`。拼写错误仍直接报错。
+
+---
+
+## 7.5 流式输出（v2）
+
+为支持 TUI 实时显示思考过程，`LlmBackend` 增加了一个并行接口：
+
+```python
+def chat_stream(
+    self,
+    system: str,
+    messages: list[dict],
+    tools: list[dict],
+    on_delta: Callable[[str], None],
+) -> AssistantMessage:
+    ...
+```
+
+返回值仍是 `AssistantMessage`（与 `chat()` 同形），区别仅是 reasoning text 在生成过程中被逐 chunk 推给 `on_delta`。基类提供 fallback：调用一次 `chat()`，把最终 text 一次性发给 `on_delta`，再返回结果——这样任何只实现 `chat()` 的后端都自动具备"流式 API、非流式表现"。
+
+四个具体后端的策略：
+
+- **MockBackend** — 拿到最终 text 后按空格切块，逐块回调 `on_delta`，方便离线模拟流式 UI。
+- **HttpxBackend** — 走 OpenAI SSE 协议（默认 `deepseek_httpx` 的真实路径）：`POST` 时带 `stream=True`，用 `httpx.stream` + `iter_lines` 读 `data: {...}` / `data: [DONE]` 行，按 `choice` index 累积 `tool_calls`，每行 `delta.content` 推给 `on_delta`。纯 Python，零 Rust。
+- **OpenAIBackend** — SDK `stream=True`，遍历 chunk 拿 `delta.content` 推给 `on_delta`，结束后合成 `AssistantMessage`。
+- **AnthropicBackend** — 不实现，走基类 fallback。Anthropic SDK 的 `messages.stream()` 内部触发 jiter 的 Rust 编译路径，对 LoongArch Old World 不友好；保持现有"不在默认部署路径上拉 jiter"的策略。
+
+Agent 主循环里只有 TUI 通道会走 `chat_stream`：CLI 的 `ask` / `chat` 仍调用 `chat()`，行为与旧版一致。
 
 ---
 

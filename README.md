@@ -168,13 +168,15 @@ TUI：
 kyagent tui
 ```
 
-新版流式 TUI 对标 Claude Code / OpenCode / Codex：
+v2 流式 TUI 对标 Claude Code / OpenCode / Codex：
 
-- 顶部 banner 显示当前 backend 和会话 trace id；
-- 中部是对话历史，只展示你输入的问题和 agent 给出的最终回答，不再堆 kind+summary 表格；
-- 底部状态栏由 `rich.live.Live` 实时驱动，会显示 agent 当前在做什么——例如 `思考中…`、`调用 lsof_port --port 80`、`等待安全裁决`，工具执行结束后自动消失。
+- 每条用户发言独立渲染为一个绿框 Panel（标题"你"），每条 agent 回答独立渲染为一个蓝框 Panel（标题"kyagent (backend)"），屏幕不再维护"对话历史大框"。
+- LLM 的 reasoning text 在 turn 期间以 `dim italic grey50` 样式逐 chunk 流式滚动显示（显著比最终回答的白色亮文要暗），turn 结束后该思考区被擦除（transient），只留下最终回答 Panel。
+- 底部状态行由 `rich.live.Live` 实时驱动，含 spinner，会显示当前阶段——🧠 思考中 / 🔧 调用 `<tool> <argv>` / ✅ 完成 / ❌ 错误。
+- 当 LLM 调用 `ask_user_choice` 工具时，TUI 弹出一个黄框选项 Panel 让用户从给定选项里选一个，输入序号或 value 回车确认，直接回车视为取消。
+- 内置命令：`/tools`、`/audit`、`/reset`、`/exit`；快捷键 `Ctrl+L` 清屏（prompt_toolkit KeyBindings 实现）。
 
-TUI 基于 `prompt_toolkit + rich`，不引入 Textual/tree-sitter。TUI 内常用命令仍是 `/tools`、`/audit`、`/reset`、`/exit`。
+TUI 基于 `prompt_toolkit + rich`，不引入 Textual/tree-sitter。
 
 安全测试，不真正执行命令：
 
@@ -295,6 +297,8 @@ python -m kyagent tui
 ```
 
 `python -m kyagent tui` 在 Windows PowerShell 上也能正常跑：Console 用 `force_terminal=True, legacy_windows=False`，`prompt_toolkit` 输入会被 `patch_stdout` 包住，`rich.live.Live` 的状态栏不会与输入行打架。工具执行仍走 `[mock][win32]` 占位，但底部 "思考中… / 调用 lsof_port …" 这条状态线是真实驱动的——可以直接观察到 agent 在选哪个工具、参数是什么。
+
+v2 流式 TUI 在 Windows 同样可用：每条发言独立 Panel、思考流以 `dim italic grey50` 实时打印、`Ctrl+L` 清屏、`ask_user_choice` 黄框选项面板都正常工作。工具执行结果仍是 `[mock][win32]` 占位，但思考流和工具调用状态行都是真实驱动的——可以肉眼观察 agent 在选哪个工具、思考什么。
 
 也可以把 key 写到项目根 `kyagent.json`（注意不要提交）：
 

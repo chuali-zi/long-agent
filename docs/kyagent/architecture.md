@@ -68,6 +68,15 @@
 
 模块之间靠数据结构（Verdict / ExecutionResult / ToolResult）通信，不互相 import 彼此的内部实现，便于替换。
 
+### 2.1 v2 流式接口（TUI 通道使用）
+
+`Agent.ask()` 在保留同步签名的前提下，额外暴露两个回调，供 TUI / 长时通道实时驱动 UI：
+
+- `on_progress: ProgressCallback` — 主循环里每个阶段都会发一个事件，事件 `kind` 取值为 `agent_start / thinking_start / thinking_delta / thinking_end / tool_call_start / tool_call_end / user_choice / agent_final / error`，schema 见 `kyagent/progress.py`。CLI 的 `ask` / `chat` 子命令不接这个回调，行为与旧版一致；TUI 用它驱动思考流面板和底部状态行。
+- `on_user_choice: UserChoiceFn` — 用于内置的 `ask_user_choice` 工具：LLM 主动让用户从选项里挑一个时，由该回调向 UI 提问并返回所选 value。schema 见 `kyagent/interactive.py`。
+
+`LlmBackend` 同步新增 `chat_stream(system, messages, tools, on_delta)`：基类提供基于 `chat()` 的 fallback（一次性发完整 text），`HttpxBackend`（OpenAI SSE）、`OpenAIBackend`（SDK `stream=True`）、`MockBackend`（按空格切块模拟流）各自原生实现；`AnthropicBackend` 走基类 fallback，因为 SDK 的 `messages.stream()` 会触发 jiter Rust 编译，对 LoongArch 不友好。
+
 ## 3. 配置链
 
 ```

@@ -179,7 +179,7 @@ TUI demo 同样走默认轻量依赖路径：
 sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tui'
 ```
 
-该入口使用 `prompt_toolkit + rich`，不引入 Textual 或 tree-sitter。内部命令包括 `/tools`、`/audit`、`/reset`、`/exit`，确认面板仍复用 `ConfirmRequest`，默认拒绝高风险操作。
+该入口使用 `prompt_toolkit + rich`，不引入 Textual 或 tree-sitter。内部命令包括 `/tools`、`/audit`、`/reset`、`/exit`，确认面板仍复用 `ConfirmRequest`，默认拒绝高风险操作。v2 流式 TUI 的 LLM 流式输出走 `httpx.stream` + `iter_lines`（纯 Python，零 Rust），与 LoongArch 默认零 Rust 路径一致。
 
 仓库测试基线：
 

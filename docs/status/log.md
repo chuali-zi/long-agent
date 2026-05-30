@@ -44,3 +44,6 @@
 ## 2026-05-30
 
 - streaming TUI: README §4/§8 更新；install 脚本核对（若有改动）；rich/prompt_toolkit 依赖核对完成
+- v2 TUI 上线：每条用户/agent 发言独立 Panel（绿框"你" / 蓝框"kyagent (backend)"），LLM reasoning 以 `dim italic grey50` 流式打印（turn 结束擦除），底部状态行实时显示 🧠 思考中 / 🔧 调用工具 / ✅ 完成 / ❌ 错误，`Ctrl+L` 清屏，新增 `ask_user_choice` 工具（黄框选项面板）。
+- LLM 真流式：`HttpxBackend`（默认 `deepseek_httpx`）走 OpenAI SSE，`OpenAIBackend` 用 SDK `stream=True`，`MockBackend` 按空格切块，`AnthropicBackend` 走基类 fallback（避免 jiter Rust 编译，保护 LoongArch 路径）。
+- 零新增依赖；`rich` + `prompt_toolkit` + `httpx` 仍是主依赖；271 tests passed。
