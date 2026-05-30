@@ -45,10 +45,12 @@ tools_app = typer.Typer(help="工具相关")
 safety_app = typer.Typer(help="安全护栏调试")
 audit_app = typer.Typer(help="审计日志")
 mcp_app = typer.Typer(help="MCP 协议")
+web_app = typer.Typer(help="B/S 架构 Web 服务（FastAPI）")
 app.add_typer(tools_app, name="tools")
 app.add_typer(safety_app, name="safety")
 app.add_typer(audit_app, name="audit")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(web_app, name="web")
 
 console = Console()
 
@@ -369,6 +371,40 @@ def mcp_serve(config: str | None = typer.Option(None, "--config", "-c")):
         import os
         os.environ["KYAGENT_CONFIG"] = config
     serve_main()
+
+
+# ---- web -----------------------------------------------------------------
+
+
+@web_app.command("serve")
+def web_serve(
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="监听地址"),
+    port: int = typer.Option(8000, "--port", "-p", help="监听端口"),
+    config: str | None = typer.Option(None, "--config", "-c"),
+    reload: bool = typer.Option(False, "--reload", help="开发态自动重载"),
+):
+    """启动 B/S 架构 Web 服务（FastAPI + uvicorn）。
+
+    需要安装 [web] extra：``pip install -e .[web]``
+    """
+    try:
+        import uvicorn  # type: ignore
+    except ImportError:
+        console.print("[red]缺少依赖：请先 [bold]pip install -e .[web][/]")
+        raise typer.Exit(code=1)
+    from kyagent.web.server import build_app
+    cfg = load_config(config)
+    app_obj = build_app(cfg)
+    console.print(Panel.fit(
+        f"[bold cyan]kyagent web[/] 已就绪\n"
+        f"  监听         : http://{host}:{port}\n"
+        f"  LLM 后端     : [bold]{cfg.agent.llm_backend}[/]\n"
+        f"  执行账户     : [bold]{cfg.executor.account}[/]\n"
+        f"  审计 DB      : {cfg.resolve(cfg.audit.database)}\n"
+        f"  打开浏览器访问 / 即可看到前端",
+        title="kyagent · web", border_style="cyan",
+    ))
+    uvicorn.run(app_obj, host=host, port=port, reload=reload, log_level="info")
 
 
 # ---- 默认子命令：直接 chat -----------------------------------------------

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kyagent — 麒麟安全运维 Agent</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a22; --panel2: #1c2230;
+    --fg: #e6e9ef; --muted: #8a93a6; --accent: #4fa3ff;
+    --green: #5dd39e; --yellow: #f6c177; --red: #ff6b6b;
+    --border: #252b38;
+    --code-bg: #0a0d12;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 14px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--fg); }
+  header { padding: 14px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
+           display:flex; align-items:center; gap:18px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  nav button { background: transparent; color: var(--muted); border: 0; padding: 8px 14px;
+               font: inherit; cursor: pointer; border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--fg); border-color: var(--accent); }
+  main { padding: 18px 22px; max-width: 1100px; margin: 0 auto; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+           padding: 14px 16px; margin-bottom: 14px; }
+  .row { display:flex; gap:10px; align-items:flex-start; }
+  .row > * { flex: 1; }
+  textarea, input[type=text] {
+      width:100%; background: var(--panel2); color: var(--fg); border:1px solid var(--border);
+      padding: 8px 10px; border-radius:6px; font: inherit; resize:vertical;
+  }
+  button.primary { background: var(--accent); color:#000; border:0; padding: 8px 16px;
+                   border-radius:6px; font-weight:600; cursor:pointer; }
+  button.ghost   { background: transparent; color: var(--muted); border:1px solid var(--border);
+                   padding: 6px 12px; border-radius:6px; cursor:pointer; }
+  .chat-log { background: var(--panel2); border-radius: 6px; padding: 10px 12px; min-height: 300px;
+              max-height: 60vh; overflow-y: auto; }
+  .msg { margin-bottom: 12px; }
+  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; }
+  .msg.user .who { color: var(--green); }
+  .msg.agent .who { color: var(--accent); }
+  .msg.event { color: var(--muted); font-size: 12px; font-style: italic; }
+  .msg.thinking { color: var(--muted); font-size: 12px; opacity: 0.75; white-space: pre-wrap; }
+  .msg.tool { color: var(--yellow); font-size: 12px; }
+  .msg.error { color: var(--red); }
+  pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow-x:auto;
+        margin: 4px 0; font: 12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  table { width:100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align:left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .pill { display:inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+          background: var(--panel2); color: var(--muted); }
+  .pill.low { color: var(--green); }
+  .pill.medium { color: var(--yellow); }
+  .pill.high { color: var(--red); }
+  .pill.critical { color: var(--red); font-weight: 600; }
+  .muted { color: var(--muted); }
+  .right { text-align:right; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>kyagent</h1>
+  <span class="meta" id="banner">连接中…</span>
+  <nav style="margin-left:auto;">
+    <button data-tab="chat" class="active">对话</button>
+    <button data-tab="tools">工具</button>
+    <button data-tab="safety">安全</button>
+    <button data-tab="audit">审计</button>
+  </nav>
+</header>
+
+<main>
+  <!-- 对话 -->
+  <section id="tab-chat">
+    <div class="panel">
+      <div class="chat-log" id="chatLog"></div>
+    </div>
+    <div class="panel row">
+      <textarea id="askInput" rows="3" placeholder="问点什么……例如：列出当前 CPU 占用前 5 的进程"></textarea>
+      <div style="flex:0 0 auto; display:flex; flex-direction:column; gap:6px;">
+        <button class="primary" onclick="sendAsk()">发送（流式）</button>
+        <button class="ghost"   onclick="resetSession()">清空会话</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 工具 -->
+  <section id="tab-tools" class="hide">
+    <div class="panel">
+      <div class="row" style="align-items:center;">
+        <h3 style="margin:0;">已注册工具 <span class="muted" id="toolCount"></span></h3>
+        <input type="text" id="toolFilter" placeholder="按名称过滤…" oninput="renderTools()">
+      </div>
+    </div>
+    <div class="panel">
+      <table id="toolTable">
+        <thead><tr>
+          <th>name</th><th>risk</th><th>root</th><th>read-only</th><th>description</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 安全 -->
+  <section id="tab-safety" class="hide">
+    <div class="panel">
+      <h3 style="margin-top:0;">护栏调试 — 输入意图 / shell 命令</h3>
+      <textarea id="safetyInput" rows="3" placeholder="如：rm -rf /etc 或 帮我清理 /var/log/..."></textarea>
+      <div style="margin-top:8px;">
+        <button class="primary" onclick="checkSafety()">校验</button>
+        <span class="muted" style="margin-left:10px;">两层都跑（意图 + argv），综合取最严</span>
+      </div>
+    </div>
+    <div class="panel" id="safetyResult"></div>
+  </section>
+
+  <!-- 审计 -->
+  <section id="tab-audit" class="hide">
+    <div class="panel row" style="align-items:center;">
+      <h3 style="margin:0;">最近 trace</h3>
+      <button class="ghost" onclick="loadTraces()">刷新</button>
+    </div>
+    <div class="panel">
+      <table id="traceTable">
+        <thead><tr><th>trace_id</th><th>user</th><th>started_at</th><th>channel</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="panel" id="traceDetail"><span class="muted">点击上面任意 trace_id 查看推理链</span></div>
+  </section>
+</main>
+
+<script>
+const SESSION_ID = (() => {
+  let s = localStorage.getItem('ky_sid');
+  if (!s) { s = 'web-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('ky_sid', s); }
+  return s;
+})();
+
+// ---- 标签切换 ------------------------------------------------------------
+document.querySelectorAll('header nav button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('header nav button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    ['chat','tools','safety','audit'].forEach(t => {
+      document.getElementById('tab-'+t).classList.toggle('hide', t !== b.dataset.tab);
+    });
+    if (b.dataset.tab === 'tools') loadTools();
+    if (b.dataset.tab === 'audit') loadTraces();
+  };
+});
+
+// ---- 健康检查 ------------------------------------------------------------
+fetch('/api/health').then(r => r.json()).then(h => {
+  document.getElementById('banner').textContent =
+    `v${h.version} · backend=${h.backend} · tools=${h.tools}`;
+}).catch(e => {
+  document.getElementById('banner').textContent = '连接失败：' + e;
+});
+
+// ---- 对话（SSE 流式） ----------------------------------------------------
+function appendMsg(cls, who, text) {
+  const log = document.getElementById('chatLog');
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  div.innerHTML = `<div class="who">${who}</div><div class="body"></div>`;
+  div.querySelector('.body').textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+async function sendAsk() {
+  const input = document.getElementById('askInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  appendMsg('user', '你', text);
+  const thinkingDiv = appendMsg('thinking', 'agent 思考', '');
+  const statusDiv   = appendMsg('event', '', '⏳ 调度中…');
+
+  // fetch + ReadableStream 解析 SSE（EventSource 不支持 POST）
+  const resp = await fetch('/api/ask/stream', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text, user: 'web', session_id: SESSION_ID}),
+  });
+  if (!resp.ok) {
+    statusDiv.textContent = `❌ HTTP ${resp.status}`;
+    return;
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let thinking = '';
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, {stream: true});
+    const frames = buf.split('\n\n');
+    buf = frames.pop();
+    for (const frame of frames) {
+      const lines = frame.split('\n');
+      let event = 'message', data = '';
+      for (const ln of lines) {
+        if (ln.startsWith('event: ')) event = ln.slice(7);
+        else if (ln.startsWith('data: ')) data += ln.slice(6);
+      }
+      if (!data) continue;
+      let p; try { p = JSON.parse(data); } catch { continue; }
+      if (event === 'progress') {
+        if (p.kind === 'thinking_delta') {
+          thinking += p.delta;
+          thinkingDiv.querySelector('.body').textContent = thinking;
+        } else if (p.kind === 'tool_call_start') {
+          appendMsg('tool', 'tool', `⚙ ${p.tool}  argv=${JSON.stringify(p.argv)}`);
+        } else if (p.kind === 'tool_call_end') {
+          const ok = p.meta?.ok ? '✓' : '✗';
+          appendMsg('tool', 'tool', `${ok} ${p.tool} — ${(p.text || '').slice(0, 200)}`);
+        } else if (p.kind === 'error') {
+          appendMsg('error', 'error', p.text);
+        } else {
+          statusDiv.textContent = `· ${p.kind}`;
+        }
+      } else if (event === 'final') {
+        statusDiv.textContent = `✓ trace=${p.trace_id?.slice(0,12)} iter=${p.tool_iterations}`;
+        appendMsg('agent', 'kyagent', p.text || '(空)');
+        if (p.denied) appendMsg('error', '', '⚠ 被安全护栏拦截');
+      }
+    }
+  }
+}
+
+async function resetSession() {
+  await fetch(`/api/sessions/${SESSION_ID}/reset`, {method:'POST'});
+  document.getElementById('chatLog').innerHTML = '';
+}
+
+// ---- 工具清单 ------------------------------------------------------------
+let _allTools = [];
+async function loadTools() {
+  const r = await fetch('/api/tools'); const j = await r.json();
+  _allTools = j.tools;
+  document.getElementById('toolCount').textContent = `(${j.count})`;
+  renderTools();
+}
+function renderTools() {
+  const f = (document.getElementById('toolFilter').value || '').toLowerCase();
+  const tbody = document.querySelector('#toolTable tbody');
+  tbody.innerHTML = '';
+  for (const t of _allTools) {
+    if (f && !t.name.toLowerCase().includes(f) && !t.description.toLowerCase().includes(f)) continue;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><code>${t.name}</code></td>
+      <td><span class="pill ${t.risk}">${t.risk}</span></td>
+      <td>${t.requires_root ? 'yes' : 'no'}</td>
+      <td>${t.read_only ? 'yes' : 'no'}</td>
+      <td>${t.description.split('\n')[0]}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+// ---- 安全护栏 ------------------------------------------------------------
+async function checkSafety() {
+  const text = document.getElementById('safetyInput').value.trim();
+  if (!text) return;
+  const r = await fetch('/api/safety/check', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text, layer: 'both'}),
+  });
+  const j = await r.json();
+  const box = document.getElementById('safetyResult');
+  const blockHtml = (b) => b ? `
+    <h4 style="margin-bottom:6px;">${b.layer} 层
+      <span class="pill ${b.risk}">${b.risk}</span>
+      <span class="pill ${b.decision === 'deny' ? 'critical' : b.decision === 'confirm' ? 'medium' : 'low'}">${b.decision}</span>
+    </h4>
+    <ul>${b.hits.map(h => `<li><code>${h.rule_id}</code> [${h.category || ''}] ${h.risk}: ${escape(h.matched)}</li>`).join('') || '<li class="muted">(无命中)</li>'}</ul>
+    <pre>${b.rationale.join('\n') || '(无说明)'}</pre>` : '';
+  box.innerHTML = `
+    ${blockHtml(j.intent)}
+    ${blockHtml(j.argv)}
+    ${j.final_decision ? `<h4>综合 <span class="pill ${j.final_risk}">${j.final_risk}</span> <span class="pill">${j.final_decision}</span></h4>` : ''}
+  `;
+}
+function escape(s) { return (s ?? '').toString().replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+
+// ---- 审计 ----------------------------------------------------------------
+async function loadTraces() {
+  const r = await fetch('/api/audit/traces?limit=20'); const j = await r.json();
+  const tbody = document.querySelector('#traceTable tbody');
+  tbody.innerHTML = '';
+  for (const t of j.traces) {
+    const tr = document.createElement('tr');
+    const ts = new Date(t.started_at * 1000).toLocaleString();
+    tr.innerHTML = `<td><a href="#" data-id="${t.trace_id}">${t.trace_id}</a></td><td>${t.user}</td><td>${ts}</td><td>${t.channel}</td>`;
+    tr.querySelector('a').onclick = (e) => { e.preventDefault(); showTrace(t.trace_id); };
+    tbody.appendChild(tr);
+  }
+}
+async function showTrace(id) {
+  const r = await fetch(`/api/audit/traces/${id}`); const j = await r.json();
+  const box = document.getElementById('traceDetail');
+  box.innerHTML = `<h3>trace ${id}</h3>` + j.events.map(ev => `
+    <details><summary>#${String(ev.seq).padStart(2,'0')} ${ev.kind}</summary>
+    <pre>${escape(JSON.stringify(ev.payload, null, 2))}</pre></details>`).join('');
+}
+</script>
+</body>
+</html>

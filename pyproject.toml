@@ -36,6 +36,14 @@ anthropic = ["anthropic==0.39.0"]
 # (llm_backend=deepseek_httpx / qwen_httpx / openai_httpx) 走纯 httpx 路径。
 openai = ["openai>=1.30"]
 mcp = ["mcp>=1.0"]
+# B/S 架构 Web 服务（赛题要求的 B/S 接入层）。
+# fastapi<0.100 锁定是为了兼容 pydantic v1（项目硬约束 — 见 dependencies 注释）。
+# uvicorn 标准 wheel 纯 Python，LoongArch 可安装；可选的 [standard] extra 含 uvloop/
+# httptools/watchfiles 等 C/Rust 依赖，故不收。
+web = [
+    "fastapi>=0.95,<0.100",
+    "uvicorn>=0.23,<0.30",
+]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
 [project.scripts]
@@ -44,6 +52,9 @@ kyagent-mcp = "kyagent.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["kyagent*"]
+
+[tool.setuptools.package-data]
+kyagent = ["web/static/*.html", "web/static/*.css", "web/static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
