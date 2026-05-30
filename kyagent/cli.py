@@ -7,6 +7,7 @@
   safety test <cmd>  在不执行的情况下让安全护栏判定 cmd
   audit list         最近 trace 概览
   audit show <id>    打印某条 trace 的完整推理链
+  tui                进入轻量 TUI 壳
   mcp serve          以 stdio 模式启动 MCP 服务器
 """
 from __future__ import annotations
@@ -87,16 +88,7 @@ def chat(
     cfg = load_config(config)
     agent = Agent.from_config(cfg, confirm=_cli_confirm)
 
-    # 后端栏：若发生了降级，显式提示「未配置 key 时自动降级，配 key 即生效」
     backend_line = f"  LLM 后端     : [bold]{agent.llm.name}[/]"
-    fallback_from = getattr(agent.llm, "fallback_from", None)
-    if fallback_from:
-        reason = getattr(agent.llm, "fallback_reason", "")
-        backend_line = (
-            f"  LLM 后端     : [bold]{agent.llm.name}[/] "
-            f"[yellow](已从 {fallback_from} 降级；{reason}；"
-            f"设置该环境变量并重启即可启用真实后端)[/]"
-        )
 
     console.print(Panel.fit(
         f"[bold cyan]kyagent[/] 已就绪\n"
@@ -161,21 +153,22 @@ def ask(
             "denied": result.denied,
             "notes": result.notes,
             "backend": agent.llm.name,
-            "fallback_from": getattr(agent.llm, "fallback_from", None),
         }, ensure_ascii=False, indent=2) + "\n")
         return
-    # 降级提示（stderr，不污染 stdout 管道）
-    fallback_from = getattr(agent.llm, "fallback_from", None)
-    if fallback_from:
-        reason = getattr(agent.llm, "fallback_reason", "")
-        console.print(
-            f"[yellow][warn] LLM 后端已从 {fallback_from} 降级到 mock"
-            f"（{reason}）。设置该环境变量并重新运行即可启用真实后端。[/]",
-            style="yellow",
-        )
     console.print(result.final_text)
     if result.notes:
         console.print("[dim]" + " | ".join(result.notes) + "[/]")
+
+
+@app.command()
+def tui(
+    config: str | None = typer.Option(None, "--config", "-c", help="配置文件路径"),
+    user: str = typer.Option("tui", "--user", "-u"),
+):
+    """启动轻量 TUI 壳（持续会话、工具视图、确认与 trace 回放）。"""
+    from kyagent.tui import run_tui
+
+    run_tui(config=config, user=user)
 
 
 # ---- tools ----------------------------------------------------------------

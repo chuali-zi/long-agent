@@ -33,9 +33,9 @@
 
 <div class="hero">
   <div class="eyebrow">CHAPTER · 13 · TESTING + BENCHMARK</div>
-  <h1>测试 + 性能基线<br><span class="sub">99 测试 · 7 个文件 · 冻结 baseline.json</span></h1>
+  <h1>测试 + 性能基线<br><span class="sub">244 测试 · 11 个文件 · 冻结 baseline.json</span></h1>
   <p class="lead">
-    7 个测试文件覆盖<strong>危险必拦 + 良性必放行 + 工具清洗 + 执行沙箱 + 审计完整 + 端到端闭环 + 并发安全 + LLM 适配</strong>。
+    11 个测试文件覆盖<strong>危险必拦 + 良性必放行 + 工具清洗 + 执行沙箱 + 审计完整 + 端到端闭环 + 并发安全 + LLM 适配 + LoongArch 部署一致性</strong>。
     冻结基线让所有 perf 改动都有客观尺。
   </p>
 </div>
@@ -46,7 +46,7 @@
   <div class="callout ok">
     <span class="icon">99</span>
     <div class="body">
-      <strong>99 passed / 2 skipped</strong>（POSIX-only 在 Windows 上跳过）
+      <strong>244 collected</strong>（Windows 开发态会有 2 个 POSIX-only skip）
     </div>
   </div>
 
@@ -293,7 +293,7 @@ test_confirm_required_tools_do_not_enter_parallel_path
   <div class="callout ok">
     <span class="icon">NOTE</span>
     <div class="body">
-      <strong>baseline -34% p50 完全不依赖并行路径</strong>（详见 README.kyagent.md §6.5）。
+      <strong>baseline -34% p50 完全不依赖并行路径</strong>（详见 docs/kyagent/README.md §6.5）。
       并行路径是冻结基线之后的「未来扩展脚手架」，gate 死。
     </div>
   </div>
@@ -329,7 +329,7 @@ python benchmarks/bench_ask.py --save-baseline</code></pre>
 
 steps:
   - run: pip install -e .
-  - run: pytest -q                           # 期望 99 passed / 2 skipped on win
+  - run: pytest -q                           # 期望 244 collected；Windows 有 2 个 POSIX skip
   - run: ruff check kyagent/ tests/          # 期望 All checks passed
   - run: python benchmarks/bench_ask.py      # 期望 Overall: PASS</code></pre>
 </section>
@@ -337,7 +337,7 @@ steps:
 <section>
   <h2><span class="num">11</span> 关键不变量</h2>
   <div class="bullets">
-    <div class="bul ok"><span class="b-num">1</span><div><strong>99 个测试在 Windows 上 99 passed / 2 skipped</strong>；Linux 上 99 passed</div></div>
+    <div class="bul ok"><span class="b-num">1</span><div><strong>244 个测试被收集</strong>；Windows 开发态会有 2 个 POSIX-only skip</div></div>
     <div class="bul ok"><span class="b-num">2</span><div><strong>baseline.json 是冻结的</strong>：任何修改要更新 frozen 行为前必须同步改 bench_ask.py 注释</div></div>
     <div class="bul ok"><span class="b-num">3</span><div><strong>C2 修复后的 reviewer-enabled gate 不能去掉</strong>：tests/test_agent_parallel.py 锁死</div></div>
     <div class="bul ok"><span class="b-num">4</span><div><strong>危险命令必拦 + 良性命令必放行</strong>：30+ / 14+ 两条 parametrize 列表是底线</div></div>

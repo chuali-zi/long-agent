@@ -5,8 +5,8 @@
 #   **当前阶段生产部署仅推荐 DeepSeek 一个真实后端**（见 configs/deepseek.yaml）。
 #   其他 OpenAI 协议兼容服务（智谱 GLM / 通义千问 / vLLM / Ollama / Azure OpenAI 等）
 #   代码协议层面能跑，但**不在当前推广范围内**。
-#   龙芯（LoongArch Old World）部署下 `pip install openai` 仍存在 jiter Rust 编译问题，
-#   详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目（status: pending）。
+#   龙芯（LoongArch Old World）不要安装 openai SDK extra；如需 OpenAI 协议兼容端点，
+#   使用 llm_backend=openai_httpx / deepseek_httpx / qwen_httpx 的纯 httpx 路径。
 #
 # 用法（OpenAI 官方端点）：
 #   export OPENAI_API_KEY=sk-...

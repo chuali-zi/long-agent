@@ -19,7 +19,7 @@ pip install -e .
 mkdir -p var
 
 echo ""
-echo "[OK] kyagent 已安装（默认 mock backend + HttpxBackend 可用，零 Rust 编译依赖）。"
+echo "[OK] kyagent 已安装（默认 deepseek_httpx；缺 DEEPSEEK_API_KEY 会直接报错；HttpxBackend 可用，零 Rust 编译依赖）。"
 echo "    激活：source .venv/bin/activate"
 echo "    入门：kyagent tools list"
 echo "    交互：kyagent chat"
@@ -31,4 +31,4 @@ echo "      llm_backend=deepseek_httpx  # 默认主依赖里的 httpx 即可用�
 echo "  - DeepSeek / Qwen / OpenAI 通过官方 openai SDK（备选 — OpenAIBackend）："
 echo "      pip install -e '.[openai]'  # ≥1.40 含 jiter(Rust)；LoongArch 别走这个"
 echo "  - Anthropic Claude（海外参考对照）："
-echo "      pip install -e '.[anthropic]'  # 含 jiter(Rust)；LoongArch 走 DEPLOYMENT-LOONGARCH.md 第 6.4 节可选步骤"
+echo "      pip install -e '.[anthropic]'  # 含 jiter(Rust)；LoongArch 先看 docs/deployment/loongarch.md"

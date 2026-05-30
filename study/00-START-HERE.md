@@ -48,7 +48,7 @@
 | 01 | architecture-overview | 这些模块怎么拼在一起？谁依赖谁？ |
 | 02 | data-flow | 一句"查 80 端口"从输入到回复经过多少层？ |
 | 03 | agent-core | Agent.ask() 主循环的每个分支都干嘛？ |
-| 04 | llm-backends | Anthropic / OpenAI / Mock 三套后端怎么统一？ |
+| 04 | llm-backends | Mock / SDK / `*_httpx` 后端怎么统一？ |
 | 05 | safety-layer | 规则引擎 + 策略映射 + 可选 LLM 复审是怎么组装的？ |
 | 06 | executor-sandbox | sudo 怎么包？preexec_fn 设了哪些 rlimit？env 怎么洗？ |
 | 07 | mcp-tools | 六大工具家族每一个 argv 长什么样？ |
@@ -57,7 +57,7 @@
 | 10 | cli-entry | typer 子命令树 + Rich 渲染怎么工作？ |
 | 11 | security-model | 全部防御层叠在一起的威胁模型 |
 | 12 | concurrency | 并发模型 + 三处 review 修复（H1/C2/C1） |
-| 13 | testing-bench | 7 个测试文件 + 冻结基线测什么？ |
+| 13 | testing-bench | 11 个测试文件 + 冻结基线测什么？ |
 
 ---
 
@@ -74,7 +74,7 @@ D:\race\long\
 │   ├── config.py           # Pydantic 配置 schema + YAML 加载器
 │   ├── agent/
 │   │   ├── core.py         # ★ Agent.ask() 主循环（最重要）
-│   │   ├── llm.py          # ★ LLM 后端抽象：Anthropic/OpenAI/Mock
+│   │   ├── llm.py          # ★ LLM 后端抽象：Mock/SDK/*_httpx
 │   │   └── prompt.py       # SYSTEM_PROMPT 文本
 │   ├── safety/
 │   │   ├── patterns.py     # RiskLevel + Rule dataclass + load_rules()
@@ -99,15 +99,15 @@ D:\race\long\
 │           ├── filesystem.py  # fs_df / fs_du / fs_ls / fs_find
 │           └── package.py  # pkg_info / pkg_installed
 ├── configs/
-│   ├── default.yaml        # 默认配置（mock 后端）
+│   ├── default.yaml        # 默认配置（deepseek_httpx；缺 key 降级 mock）
 │   ├── openai.yaml         # OpenAI 协议兼容（架构示例；当前部署仅推 DeepSeek）
 │   ├── safety-rules.yaml   # 27 条危险命令规则
 │   └── sudoers.kyagent     # /etc/sudoers.d 白名单（NOPASSWD + 显式黑名单）
-├── tests/                  # 99 个测试用例，2 个 POSIX-only skip 在 Windows
+├── tests/                  # 244 个测试用例，Windows 下有 2 个 POSIX-only skip
 ├── benchmarks/
 │   ├── bench_ask.py        # 冻结的性能基线脚本
 │   └── baseline.json       # 冻结的基线数字
-├── README.md / README.kyagent.md
+├── README.md / docs/kyagent/README.md
 └── pyproject.toml
 ```
 
@@ -121,10 +121,10 @@ D:\race\long\
 # 装包
 python -m pip install -e .
 
-# 跑全部测试（99 通过，POSIX-only 用例在 Windows 上 2 个 skip）
+# 跑全部测试（当前收集 244 个；POSIX-only 用例在 Windows 上 2 个 skip）
 python -m pytest -q
 
-# mock 后端：不需要任何 API key，规则路由演示完整闭环
+# 默认 deepseek_httpx；不设置 DEEPSEEK_API_KEY 时会直接报错
 python -m kyagent ask "查下 CPU 占用最高的进程" --json
 
 # 列工具 + 风险等级

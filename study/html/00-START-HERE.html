@@ -118,7 +118,7 @@
       <tr><td>10</td><td><a href="10-cli-entry.html">cli-entry</a></td><td>typer 子命令树 + Rich 渲染怎么工作？</td></tr>
       <tr><td>11</td><td><a href="11-security-model.html">security-model</a></td><td>全部防御层叠在一起的威胁模型</td></tr>
       <tr><td>12</td><td><a href="12-concurrency.html">concurrency</a></td><td>并发模型 + 三处 review 修复（H1/C2/C1）</td></tr>
-      <tr><td>13</td><td><a href="13-testing-bench.html">testing-bench</a></td><td>7 个测试文件 + 冻结基线测什么？</td></tr>
+      <tr><td>13</td><td><a href="13-testing-bench.html">testing-bench</a></td><td>11 个测试文件 + 冻结基线测什么？</td></tr>
     </tbody>
   </table>
 </section>
@@ -161,15 +161,15 @@
 │           ├── <span class="file">filesystem.py</span> <span class="cmt"># fs_df / fs_du / fs_ls / fs_find</span>
 │           └── <span class="file">package.py</span> <span class="cmt"># pkg_info / pkg_installed</span>
 ├── <span class="dir">configs/</span>
-│   ├── <span class="file">default.yaml</span>        <span class="cmt"># 默认配置（mock 后端）</span>
+│   ├── <span class="file">default.yaml</span>        <span class="cmt"># 默认配置（deepseek_httpx；缺 key 降级 mock）</span>
 │   ├── <span class="file">openai.yaml</span>         <span class="cmt"># OpenAI 协议兼容（DeepSeek/智谱/Ollama）</span>
 │   ├── <span class="file">safety-rules.yaml</span>   <span class="cmt"># 27 条危险命令规则</span>
 │   └── <span class="file">sudoers.kyagent</span>     <span class="cmt"># /etc/sudoers.d 白名单</span>
-├── <span class="dir">tests/</span>                   <span class="cmt"># 99 个测试用例</span>
+├── <span class="dir">tests/</span>                   <span class="cmt"># 244 个测试用例</span>
 ├── <span class="dir">benchmarks/</span>
 │   ├── <span class="file">bench_ask.py</span>        <span class="cmt"># 冻结的性能基线脚本</span>
 │   └── <span class="file">baseline.json</span>       <span class="cmt"># 冻结的基线数字</span>
-├── <span class="file">README.md / README.kyagent.md</span>
+├── <span class="file">README.md / docs/kyagent/README.md</span>
 └── <span class="file">pyproject.toml</span>
   </div>
 
@@ -187,7 +187,7 @@ python -m pip install -e .
 # 跑全部测试（99 通过，POSIX-only 用例在 Windows 上 2 个 skip）
 python -m pytest -q
 
-# mock 后端：不需要任何 API key，规则路由演示完整闭环
+# 默认 deepseek_httpx；不设置 DEEPSEEK_API_KEY 时会直接报错
 python -m kyagent ask "查下 CPU 占用最高的进程" --json
 
 # 列工具 + 风险等级

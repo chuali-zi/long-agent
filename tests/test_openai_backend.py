@@ -267,31 +267,27 @@ def test_build_backend_constructs_openai(monkeypatch):
 
 
 def test_build_backend_missing_key_raises(monkeypatch):
-    """fallback_to_mock=False（CI/生产）模式下，缺 key 必须直接 raise。"""
+    """缺 key 必须直接 raise，避免生产环境静默降级到 mock。"""
     fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAIClient)
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     cfg = Config()
     cfg.agent.llm_backend = "openai"
-    cfg.agent.fallback_to_mock = False
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         build_backend(cfg)
 
 
-def test_build_backend_missing_key_falls_back_to_mock(monkeypatch):
-    """默认 fallback_to_mock=True 时缺 key 应降级为 MockBackend 并挂上 fallback_from 标记。"""
+def test_build_backend_missing_key_raises_even_if_legacy_fallback_flag_is_true(monkeypatch):
+    """旧 fallback_to_mock 开关不再允许真实后端缺 key 时降级。"""
     fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAIClient)
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     cfg = Config()
     cfg.agent.llm_backend = "openai"
-    # 不动 fallback_to_mock，验证默认就是 True
-    assert cfg.agent.fallback_to_mock is True
+    cfg.agent.fallback_to_mock = True
 
-    be = build_backend(cfg)
-    assert isinstance(be, MockBackend)
-    assert getattr(be, "fallback_from", None) == "openai"
-    assert "OPENAI_API_KEY" in getattr(be, "fallback_reason", "")
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        build_backend(cfg)
 
 
 def test_build_backend_constructs_deepseek_preset(monkeypatch):
@@ -315,6 +311,29 @@ def test_build_backend_constructs_deepseek_preset(monkeypatch):
     assert be.model == "deepseek-v4-flash"  # 预设值
     assert captured["base_url"] == "https://api.deepseek.com"
     assert captured["api_key"] == "sk-deepseek-test"
+
+
+def test_build_backend_deepseek_preset_uses_config_api_key_when_env_missing(monkeypatch):
+    """llm_backend=deepseek 也支持从配置对象读取 DeepSeek key。"""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeOpenAIClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured.update(kwargs)
+
+    fake_module = types.SimpleNamespace(OpenAI=_CapturingClient)
+    monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    cfg = Config()
+    cfg.agent.llm_backend = "deepseek"
+    cfg.agent.deepseek.api_key = "sk-json"
+
+    be = build_backend(cfg)
+
+    assert isinstance(be, OpenAIBackend)
+    assert captured["api_key"] == "sk-json"
 
 
 def test_build_backend_constructs_qwen_preset(monkeypatch):
@@ -362,13 +381,12 @@ def test_build_backend_deepseek_user_override(monkeypatch):
     assert captured["base_url"] == "https://my-proxy.example.com/v1"
 
 
-def test_build_backend_deepseek_missing_key_falls_back(monkeypatch):
-    """国产 LLM 也享受 fallback 语义。"""
+def test_build_backend_deepseek_missing_key_raises(monkeypatch):
+    """国产 LLM 缺 key 也直接报错。"""
     fake_module = types.SimpleNamespace(OpenAI=_FakeOpenAIClient)
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     cfg = Config()
     cfg.agent.llm_backend = "deepseek"
-    be = build_backend(cfg)
-    assert isinstance(be, MockBackend)
-    assert getattr(be, "fallback_from", None) == "deepseek"
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        build_backend(cfg)

@@ -1,9 +1,13 @@
 # kyagent 默认配置。可通过环境变量 KYAGENT_CONFIG 指向其他文件。
 agent:
   name: kyagent
-  # 后端：anthropic / mock
-  # mock 模式不调用任何外部 LLM，用规则路由演示完整闭环
-  llm_backend: ${KYAGENT_LLM_BACKEND:-mock}
+  # 后端：mock / anthropic / openai / deepseek / qwen /
+  #       openai_httpx / deepseek_httpx / qwen_httpx
+  # 默认走真实 DeepSeek httpx 后端；缺 DEEPSEEK_API_KEY 且 kyagent.json 未写 deepseek_api_key 时直接报错。
+  # 离线演示请显式设置 KYAGENT_LLM_BACKEND=mock。
+  # 也可在项目根 kyagent.json 写 {"llm_backend": "deepseek_httpx", "deepseek_api_key": "sk-..."}。
+  llm_backend: ${KYAGENT_LLM_BACKEND:-deepseek_httpx}
+  fallback_to_mock: false
   anthropic:
     model: claude-opus-4-7
     max_tokens: 4096

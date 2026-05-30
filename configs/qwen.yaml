@@ -3,8 +3,8 @@
 # ⚠️ 部署说明（2026-05-22）：
 #   本文件保留作为「OpenAI 协议兼容层 + Qwen preset」的多后端架构示例。
 #   **当前阶段生产部署不推荐 Qwen 后端**；唯一推广的国产真实后端是 DeepSeek
-#   （见 configs/deepseek.yaml）。本文件可用于离线 / 自研环境的能力验证，
-#   不要在评测演示路径上推。详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目。
+#   （见 configs/deepseek.yaml）。本文件可用于离线 / 自研环境的能力验证。
+#   LoongArch Old World 如需 Qwen，应走 llm_backend=qwen_httpx，避免 openai SDK 依赖。
 #
 # 用法：
 #   1. 申请 key：https://bailian.console.aliyun.com  （国内）
@@ -13,7 +13,7 @@
 #   3. export KYAGENT_CONFIG=$(pwd)/configs/qwen.yaml
 #   4. kyagent ask "sshd 服务状态？"
 #
-# 不设 DASHSCOPE_API_KEY 时会自动降级到 mock；fallback_to_mock=false 则报错。
+# 不设 DASHSCOPE_API_KEY 时会直接报错；离线演示请显式设置 llm_backend=mock。
 #
 # 2026-05 验证信息：
 #   - DashScope 提供 OpenAI 协议兼容端点（不必装 dashscope 包，pip install openai 足够）
@@ -26,7 +26,7 @@
 agent:
   name: kyagent
   llm_backend: qwen
-  fallback_to_mock: true
+  fallback_to_mock: false
   qwen:
     # qwen-plus：性价比挡，tools 支持完整
     # qwen3-max：旗舰

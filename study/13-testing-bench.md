@@ -2,7 +2,8 @@
 
 > 文件：
 > - `tests/test_safety.py` / `test_executor.py` / `test_mcp.py` / `test_audit.py` /
->   `test_integration.py` / `test_openai_backend.py` / `test_agent_parallel.py`
+>   `test_integration.py` / `test_openai_backend.py` / `test_httpx_backend.py` /
+>   `test_loongarch_deploy_docs.py` / `test_agent_parallel.py`
 > - `benchmarks/bench_ask.py`（冻结脚本）
 > - `benchmarks/baseline.json`（冻结基线数字）
 
@@ -11,7 +12,7 @@
 ## 1. 测试矩阵总览
 
 ```
-99 passed / 2 skipped (POSIX-only 在 Windows 上跳过)
+244 collected（Windows 开发态会有 2 个 POSIX-only skip）
 
 tests/
 ├── test_safety.py           ★ 必拦 30+ / 必放行 14+ / declared_risk 下限
@@ -25,6 +26,9 @@ tests/
 │                            未知问题 fallback
 ├── test_openai_backend.py   OpenAI SDK 适配：tools / messages 双向翻译 /
 │                            响应解析 / 工厂构造 / 缺 key 报错
+├── test_httpx_backend.py    ★ 纯 httpx OpenAI/DeepSeek/Qwen 兼容路径
+├── test_loongarch_deploy_docs.py
+│                            LoongArch 部署脚本、依赖清单和文档一致性
 └── test_agent_parallel.py   ★ 并发路径：executor opt-out / confirm 串行 /
                               llm_reviewer 启用拒绝并行 / worker CONFIRM 自动 deny
 ```
@@ -425,7 +429,7 @@ audit_total:   -34.6% / -35.5% / -37.2%   ✓ (floor: -25%)
 4. **agent/core.py 加并行多工具调度脚手架**：当前 dormant（C1 gate），未来扩展点
 5. **agent/llm.py 加 Anthropic prompt cache**：TTFT -13~31%，input token -41~80%
 
-注意：**baseline -34% p50 完全不依赖并行路径**（详见 README.kyagent.md §6.5）。
+注意：**baseline -34% p50 完全不依赖并行路径**（详见 `docs/kyagent/README.md` §6.5）。
 
 ### 9.6 ScriptedMultiToolBackend
 
@@ -487,7 +491,7 @@ strategy:
 
 steps:
   - run: pip install -e .
-  - run: pytest -q                           # 期望 99 passed / 2 skipped on win
+  - run: pytest -q                           # 期望 244 collected；Windows 有 2 个 POSIX skip
   - run: ruff check kyagent/ tests/          # 期望 All checks passed
   - run: python benchmarks/bench_ask.py      # 期望 Overall: PASS
 ```
@@ -496,7 +500,7 @@ steps:
 
 ## 12. 关键不变量
 
-1. **99 个测试在 Windows 上 99 passed / 2 skipped；Linux 上 99 passed**（POSIX-only 用例）
+1. **244 个测试被收集；Windows 开发态会有 2 个 POSIX-only skip**
 2. **baseline.json 是冻结的**：任何修改要更新 frozen 行为前必须同步改 bench_ask.py 注释
 3. **C2 修复后的 reviewer-enabled gate 不能去掉**：tests/test_agent_parallel.py 锁死
 4. **危险命令必拦 + 良性命令必放行**：30+ / 14+ 两条 parametrize 列表是底线
@@ -506,7 +510,7 @@ steps:
 
 ## 13. 一句话总结这份
 
-**99 个测试覆盖了"危险必拦 + 良性必放行 + 工具清洗 + 执行沙箱 + 审计完整 + 端到端闭环 + 并发安全 + LLM 适配"**。冻结基线让所有 perf 改动都有客观尺。新加功能 = 新加测试。
+**244 个测试覆盖了"危险必拦 + 良性必放行 + 工具清洗 + 执行沙箱 + 审计完整 + 端到端闭环 + 并发安全 + LLM 适配 + LoongArch 部署一致性"**。冻结基线让所有 perf 改动都有客观尺。新加功能 = 新加测试。
 
 ---
 

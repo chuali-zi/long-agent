@@ -1,0 +1,150 @@
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+CHECKED_TEXT_FILES = [
+    "README.md",
+    "AGENT.md",
+    "docs/kyagent/README.md",
+    "docs/deployment/loongarch.md",
+    "docs/status/current.md",
+    "docs/status/log.md",
+    "requirements.txt",
+    "requirements-loongarch.txt",
+    "pyproject.toml",
+    "configs/default.yaml",
+    "configs/deepseek.yaml",
+    "configs/openai.yaml",
+    "configs/qwen.yaml",
+    "kyagent/config.py",
+    "study/00-START-HERE.md",
+    "study/04-llm-backends.md",
+    "study/09-config.md",
+    "study/13-testing-bench.md",
+]
+
+
+def read_repo(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_root_docs_are_migrated_to_docs_directory() -> None:
+    root_docs_that_should_not_exist = [
+        "README.kyagent.md",
+        "DEPLOYMENT-LOONGARCH.md",
+        "log.md",
+        "staus.md",
+    ]
+
+    for path in root_docs_that_should_not_exist:
+        assert not (ROOT / path).exists()
+
+    required_docs = [
+        "docs/kyagent/README.md",
+        "docs/deployment/loongarch.md",
+        "docs/status/log.md",
+        "docs/status/current.md",
+    ]
+
+    for path in required_docs:
+        assert (ROOT / path).exists()
+
+
+def test_no_docs_reference_removed_implementation_notes() -> None:
+    offenders = [
+        path
+        for path in CHECKED_TEXT_FILES
+        if "implementation-notes.html" in read_repo(path)
+    ]
+
+    assert offenders == []
+
+
+def test_loongarch_install_script_exists_and_has_safety_gates() -> None:
+    script = read_repo("scripts/install-loongarch.sh")
+
+    required_tokens = [
+        "set -euo pipefail",
+        "detect_arch",
+        "detect_python",
+        "KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx",
+        "KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db",
+        "KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl",
+        "visudo -cf",
+        "--dry-run",
+        "--yes",
+        "pip install --no-binary PyYAML -r requirements-loongarch.txt",
+    ]
+
+    for token in required_tokens:
+        assert token in script
+
+
+def test_loongarch_default_requirements_avoid_sdk_and_rust_extensions() -> None:
+    requirements = read_repo("requirements-loongarch.txt")
+
+    forbidden_runtime_deps = [
+        "openai>=",
+        "openai==",
+        "anthropic>=",
+        "anthropic==",
+        "mcp>=",
+        "mcp==",
+        "jiter",
+        "pydantic-core",
+    ]
+
+    for token in forbidden_runtime_deps:
+        assert token not in requirements
+
+    assert "pydantic>=1.10.13,<2" in requirements
+    assert "PyYAML>=6.0.1,<7" in requirements
+    assert "httpx>=0.23.0,<1" in requirements
+    assert "prompt_toolkit>=3.0,<4" in requirements
+    assert "textual" not in requirements
+    assert "tree-sitter" not in requirements
+
+
+def test_loongarch_docs_prefer_httpx_transport_over_sdk_extras() -> None:
+    deployment = read_repo("docs/deployment/loongarch.md")
+
+    required_phrases = [
+        "deepseek_httpx",
+        "不要在 LoongArch Old World 上安装 `.[openai]`",
+        "默认路径零 Rust",
+        "PyYAML",
+        "fallback",
+        "244 个测试",
+    ]
+
+    for phrase in required_phrases:
+        assert phrase in deployment
+
+
+def test_backend_docs_list_httpx_variants() -> None:
+    docs = [
+        read_repo("configs/default.yaml"),
+        read_repo("configs/deepseek.yaml"),
+        read_repo("kyagent/config.py"),
+        read_repo("docs/kyagent/README.md"),
+    ]
+
+    for doc in docs:
+        assert "openai_httpx" in doc
+        assert "deepseek_httpx" in doc
+        assert "qwen_httpx" in doc
+
+
+def test_tui_demo_documented_for_loongarch() -> None:
+    readme = read_repo("README.md")
+    deployment = read_repo("docs/deployment/loongarch.md")
+
+    assert "kyagent tui" in readme
+    assert "prompt_toolkit + rich" in readme
+    assert "/tools" in readme
+    assert "/audit" in readme
+    assert "kyagent tui" in deployment
+    assert "prompt_toolkit + rich" in deployment
+    assert "tree-sitter" in deployment

@@ -33,7 +33,7 @@
 
 <div class="hero">
   <div class="eyebrow">CHAPTER · 09 · CONFIGURATION</div>
-  <h1>配置系统<br><span class="sub">Pydantic + YAML + 环境变量</span></h1>
+  <h1>配置系统<br><span class="sub">Pydantic + YAML + 项目根 JSON + 环境变量</span></h1>
   <p class="lead">
     对应文件 <code>kyagent/config.py</code> + <code>configs/{default,openai}.yaml</code>。
     <strong>强类型校验</strong>、<strong>环境变量友好</strong>、<strong>零配置兜底</strong>。
@@ -57,7 +57,7 @@
 <span class="dir">Config</span>
 ├── <span class="file">agent: AgentConfig</span>
 │   ├── name: str = <span class="cmt">"kyagent"</span>
-│   ├── llm_backend: str = <span class="cmt">"mock"</span>   <span class="star">★</span> <span class="cmt">"anthropic" / "openai" / "mock"</span>
+│   ├── llm_backend: str = <span class="cmt">"deepseek_httpx"</span>   <span class="star">★</span> <span class="cmt">mock / SDK / *_httpx</span>
 │   ├── anthropic: AnthropicConfig
 │   │   ├── model: str = <span class="cmt">"claude-opus-4-7"</span>
 │   │   ├── max_tokens: int = 4096
@@ -101,7 +101,7 @@
 
 # 支持两种语法：
 ${KYAGENT_LLM_BACKEND}           # → 取环境变量，无值时变空字符串
-${KYAGENT_LLM_BACKEND:-mock}     # → 取环境变量，无值时回退 mock</code></pre>
+${KYAGENT_LLM_BACKEND:-deepseek_httpx}     # → 取环境变量，无值时回退 deepseek_httpx</code></pre>
   </div>
 
   <div class="bullets">
@@ -146,12 +146,13 @@ ${KYAGENT_LLM_BACKEND:-mock}     # → 取环境变量，无值时回退 mock</c
 </section>
 
 <section>
-  <h2><span class="num">6</span> default.yaml · mock 后端</h2>
+  <h2><span class="num">6</span> default.yaml · deepseek_httpx 默认后端</h2>
   <div class="code-annot">
     <div class="file">configs/default.yaml</div>
 <pre><code>agent:
   name: kyagent
-  llm_backend: ${KYAGENT_LLM_BACKEND:-mock}
+  llm_backend: ${KYAGENT_LLM_BACKEND:-deepseek_httpx}
+  fallback_to_mock: false
   anthropic:
     model: claude-opus-4-7
     max_tokens: 4096
@@ -191,11 +192,14 @@ mcp:
   </div>
 
   <div class="bullets">
-    <div class="bul"><span class="b-num">1</span><div><strong>默认 llm_backend: mock</strong>，离线可跑</div></div>
-    <div class="bul"><span class="b-num">2</span><div>用 <code>KYAGENT_LLM_BACKEND</code> 覆盖（<code>KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."</code>）</div></div>
-    <div class="bul"><span class="b-num">3</span><div><strong>forbid_root: true</strong> 默认禁用 root 提权</div></div>
-    <div class="bul"><span class="b-num">4</span><div><strong>enable_tools: []</strong> 空白名单 = 全部启用</div></div>
-    <div class="bul"><span class="b-num">5</span><div><strong>llm_review: false</strong> 默认关闭 LLM 复审</div></div>
+    <div class="bul"><span class="b-num">1</span><div><strong>默认 llm_backend: deepseek_httpx</strong>，优先走真实 DeepSeek httpx 后端</div></div>
+    <div class="bul"><span class="b-num">2</span><div>DeepSeek key 可来自 <code>DEEPSEEK_API_KEY</code> 或项目根 <code>kyagent.json</code> 的 <code>deepseek_api_key</code> / <code>deepseek.api_key</code></div></div>
+    <div class="bul"><span class="b-num">3</span><div>两处都缺 key 时直接报错；离线演示需显式设置 <code>llm_backend=mock</code></div></div>
+    <div class="bul"><span class="b-num">4</span><div>项目根 <code>kyagent.json</code> 可写 <code>{"llm_backend":"qwen_httpx"}</code> 覆盖默认 YAML</div></div>
+    <div class="bul"><span class="b-num">4</span><div>显式 <code>KYAGENT_LLM_BACKEND</code> 优先级最高（<code>KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."</code>）</div></div>
+    <div class="bul"><span class="b-num">5</span><div><strong>forbid_root: true</strong> 默认禁用 root 提权</div></div>
+    <div class="bul"><span class="b-num">6</span><div><strong>enable_tools: []</strong> 空白名单 = 全部启用</div></div>
+    <div class="bul"><span class="b-num">7</span><div><strong>llm_review: false</strong> 默认关闭 LLM 复审</div></div>
   </div>
 </section>
 

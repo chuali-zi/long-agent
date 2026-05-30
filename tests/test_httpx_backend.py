@@ -6,7 +6,7 @@
   - JSON 响应解析与 OpenAIBackend._from_openai_choice 在 AssistantMessage 上等价
   - 工厂 build_backend 能根据 llm_backend in {openai_httpx, deepseek_httpx, qwen_httpx}
     路由到 HttpxBackend，且复用现有 cfg.agent.{openai,deepseek,qwen} 子节
-  - 缺 key 时遵循 fallback_to_mock 语义，与 OpenAIBackend 路径完全一致
+  - 缺 key 时直接报错，与 OpenAIBackend 路径完全一致
 
 不打真实网络（无 httpx.Client 真实实例化）。
 """
@@ -459,25 +459,72 @@ def test_build_backend_deepseek_httpx_user_override(monkeypatch):
     assert captured["base_url"] == "https://my-proxy.example.com/v1/"
 
 
-def test_build_backend_deepseek_httpx_missing_key_falls_back(monkeypatch):
-    """缺 key 应降级到 mock，与 deepseek 路径行为完全一致。"""
+def test_build_backend_deepseek_httpx_uses_config_api_key_when_env_missing(monkeypatch):
+    captured: dict = {}
+
+    class _CaptureClient:
+        def __init__(self, base_url, headers, **_):
+            captured["base_url"] = base_url
+            captured["headers"] = headers
+
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
+
     cfg = Config()
     cfg.agent.llm_backend = "deepseek_httpx"
+    cfg.agent.deepseek.api_key = "sk-json"
 
     be = build_backend(cfg)
-    assert isinstance(be, MockBackend)
-    assert getattr(be, "fallback_from", None) == "deepseek_httpx"
-    assert "DEEPSEEK_API_KEY" in getattr(be, "fallback_reason", "")
+
+    assert isinstance(be, HttpxBackend)
+    assert captured["headers"]["Authorization"] == "Bearer sk-json"
 
 
-def test_build_backend_deepseek_httpx_missing_key_raises_in_strict(monkeypatch):
+def test_build_backend_deepseek_httpx_env_key_takes_precedence_over_config_key(monkeypatch):
+    captured: dict = {}
+
+    class _CaptureClient:
+        def __init__(self, base_url, headers, **_):
+            captured["base_url"] = base_url
+            captured["headers"] = headers
+
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env")
+
+    cfg = Config()
+    cfg.agent.llm_backend = "deepseek_httpx"
+    cfg.agent.deepseek.api_key = "sk-json"
+
+    build_backend(cfg)
+
+    assert captured["headers"]["Authorization"] == "Bearer sk-env"
+
+
+def test_build_backend_deepseek_httpx_missing_key_raises(monkeypatch):
+    """缺 key 应直接报错，与 deepseek 路径行为完全一致。"""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
     cfg = Config()
     cfg.agent.llm_backend = "deepseek_httpx"
-    cfg.agent.fallback_to_mock = False
+
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        build_backend(cfg)
+
+
+def test_build_backend_default_is_deepseek_httpx_and_raises_without_key(monkeypatch):
+    """Config() 默认使用真实 deepseek_httpx；无 key 时直接报错。"""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
+
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        build_backend(Config())
+
+def test_build_backend_deepseek_httpx_missing_key_raises_even_if_legacy_fallback_flag_is_true(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", lambda **_: None)
+    cfg = Config()
+    cfg.agent.llm_backend = "deepseek_httpx"
+    cfg.agent.fallback_to_mock = True
     with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
         build_backend(cfg)
 

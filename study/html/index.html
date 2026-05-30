@@ -136,7 +136,7 @@
     <a class="card" href="13-testing-bench.html" style="text-decoration:none;color:inherit;">
       <div class="label">CHAPTER · 13</div>
       <div class="title">测试 + 性能基线</div>
-      <div class="body">99 个测试 / 7 个文件，冻结的 bench_ask.py + baseline.json，-34% p50 优化。</div>
+      <div class="body">244 个测试 / 11 个文件，冻结的 bench_ask.py + baseline.json，-34% p50 优化。</div>
     </a>
   </div>
 </section>
@@ -190,7 +190,7 @@ python -m pip install -e .
 # 跑全部测试（99 通过，POSIX-only 用例在 Windows 上 2 个 skip）
 python -m pytest -q
 
-# mock 后端：不需要任何 API key，规则路由演示完整闭环
+# 默认 deepseek_httpx；不设置 DEEPSEEK_API_KEY 时会直接报错
 python -m kyagent ask "查下 CPU 占用最高的进程" --json
 
 # 列工具 + 风险等级

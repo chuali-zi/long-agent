@@ -12,6 +12,7 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+pytest_tmp*/
 *.egg-info/
 var/
 logs/

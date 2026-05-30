@@ -1,6 +1,7 @@
-"""配置加载：从 YAML + 环境变量构建强类型配置。"""
+"""配置加载：从 YAML + 项目根 JSON + 环境变量构建强类型配置。"""
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -38,7 +39,8 @@ class OpenAIConfig(BaseModel):
 
     base_url 留空则走 https://api.openai.com/v1；填上即可对接任何 OpenAI 协议兼容服务
     （Azure OpenAI 用其专用端点、vLLM/Ollama 等本地推理服务走 /v1 路径）。
-    DeepSeek / Qwen 已有专用配置节，建议优先用 llm_backend=deepseek / qwen。
+    DeepSeek / Qwen 已有专用配置节，建议优先用 llm_backend=deepseek / qwen；
+    LoongArch Old World 推荐 deepseek_httpx / qwen_httpx / openai_httpx 这类纯 httpx 路径。
     """
     model: str = "gpt-4o-mini"
     max_tokens: int = 4096
@@ -51,16 +53,16 @@ class OpenAIConfig(BaseModel):
 class DeepSeekConfig(BaseModel):
     """DeepSeek 后端（走 OpenAI 协议兼容路径）。
 
-    2026-05 官方推荐：openai Python SDK + base_url=https://api.deepseek.com。
-    模型 ID 选择 deepseek-v4-flash（tools 支持完整、性价比最高）；
-    deepseek-v4-pro 适合强推理；legacy 别名 deepseek-chat/deepseek-reasoner 在
-    2026-07-24 退役，不建议新代码使用。
+    官方示例使用 OpenAI API 格式 + base_url=https://api.deepseek.com。
+    LoongArch Old World 推荐 deepseek_httpx，避免 openai SDK 拉入 jiter。
     Key 获取：https://platform.deepseek.com
     """
     model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     temperature: float = 0.2
     api_key_env: str = "DEEPSEEK_API_KEY"
+    # 可由项目根 kyagent.json 写入；环境变量 DEEPSEEK_API_KEY 优先级更高。
+    api_key: str | None = None
     # 留空则使用预设 https://api.deepseek.com；仅在使用第三方反代时填
     base_url: str | None = None
 
@@ -83,12 +85,12 @@ class QwenConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     name: str = "kyagent"
-    # 支持的 backend: mock / anthropic / openai / deepseek / qwen
-    llm_backend: str = "mock"
-    # 当真实后端缺 API key 时是否自动降级到 mock。
-    # true（默认）：开发者友好，CLI 打印 warning 后用 mock 跑完闭环
-    # false：缺 key 直接报错，适合 CI / 生产部署
-    fallback_to_mock: bool = True
+    # 支持的 backend: mock / anthropic / openai / deepseek / qwen /
+    #               openai_httpx / deepseek_httpx / qwen_httpx
+    llm_backend: str = "deepseek_httpx"
+    # 兼容旧配置字段；真实后端缺 API key 时不再自动降级，统一直接报错。
+    # 如需离线 demo，请显式设置 llm_backend=mock。
+    fallback_to_mock: bool = False
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
@@ -168,8 +170,51 @@ def find_default_config() -> Path | None:
     return None
 
 
+def _project_root_for_config(cfg_path: Path | None) -> Path:
+    if cfg_path is None:
+        return Path.cwd()
+    if cfg_path.parent.name == "configs":
+        return cfg_path.parent.parent
+    return cfg_path.parent
+
+
+def _apply_project_json_overrides(raw: dict[str, Any], project_root: Path) -> dict[str, Any]:
+    """读取项目根 kyagent.json 的轻量覆盖项。
+
+    当前公开支持顶层 key：
+      {"llm_backend": "deepseek_httpx"}
+
+    为避免破坏现有环境变量部署，KYAGENT_LLM_BACKEND 显式设置时优先级更高。
+    """
+    json_path = project_root / "kyagent.json"
+    if not json_path.exists():
+        return raw
+
+    data = json.loads(json_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{json_path} 必须是 JSON object")
+
+    agent = raw.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        raise ValueError("配置项 agent 必须是 object")
+
+    llm_backend = data.get("llm_backend")
+    if llm_backend is not None and not os.environ.get("KYAGENT_LLM_BACKEND"):
+        agent["llm_backend"] = llm_backend
+    deepseek_api_key = data.get("deepseek_api_key")
+    nested_deepseek = data.get("deepseek")
+    if deepseek_api_key is None and isinstance(nested_deepseek, dict):
+        deepseek_api_key = nested_deepseek.get("api_key")
+    if deepseek_api_key is not None and not os.environ.get("DEEPSEEK_API_KEY"):
+        deepseek = agent.setdefault("deepseek", {})
+        if not isinstance(deepseek, dict):
+            raise ValueError("配置项 agent.deepseek 必须是 object")
+        deepseek["api_key"] = deepseek_api_key
+    return raw
+
+
 def load_config(path: str | Path | None = None) -> Config:
-    """加载并展开 YAML 配置。"""
+    """加载并展开 YAML 配置，再应用项目根 kyagent.json 的轻量覆盖。"""
     cfg_path = Path(path) if path else find_default_config()
     if cfg_path is None or not cfg_path.exists():
         # 没有配置文件时使用全默认
@@ -177,7 +222,9 @@ def load_config(path: str | Path | None = None) -> Config:
 
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     raw = _expand_env(raw)
+    project_root = _project_root_for_config(cfg_path)
+    raw = _apply_project_json_overrides(raw, project_root)
     # pydantic v1 API（v2 等价为 model_validate）；锁 v1 是为了在龙芯老世界绕开 pydantic-core Rust 编译
     cfg = Config.parse_obj(raw)
-    cfg.base_dir = cfg_path.parent.parent  # configs/ 的父目录是项目根
+    cfg.base_dir = project_root
     return cfg

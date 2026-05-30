@@ -5,30 +5,80 @@
 set -euo pipefail
 
 USER_NAME=${KYAGENT_USER:-kyagent}
-SUDOERS_SRC="$(dirname "$0")/../configs/sudoers.kyagent"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUDOERS_SRC="$SCRIPT_DIR/../configs/sudoers.kyagent"
 SUDOERS_DST="/etc/sudoers.d/kyagent"
+BACKUP=""
+TMP_SUDOERS=""
+
+cleanup() {
+  [[ -n "$TMP_SUDOERS" && -f "$TMP_SUDOERS" ]] && rm -f "$TMP_SUDOERS"
+  return 0
+}
+trap cleanup EXIT
+
+die() {
+  echo "[!] $*" >&2
+  exit 1
+}
 
 if [[ $EUID -ne 0 ]]; then
-  echo "[!] 此脚本需要 root" >&2
-  exit 1
+  die "此脚本需要 root"
+fi
+
+if ! command -v visudo >/dev/null 2>&1; then
+  die "找不到 visudo，请先安装 sudo 包"
+fi
+
+if [[ ! -f "$SUDOERS_SRC" ]]; then
+  die "找不到 sudoers 模板：$SUDOERS_SRC"
 fi
 
 if ! id "$USER_NAME" >/dev/null 2>&1; then
   echo "[+] 创建系统账户 $USER_NAME"
-  useradd -r -s /usr/sbin/nologin -m -d "/var/lib/$USER_NAME" "$USER_NAME"
+  NOLOGIN="/usr/sbin/nologin"
+  [[ -x "$NOLOGIN" ]] || NOLOGIN="/sbin/nologin"
+  useradd -r -s "$NOLOGIN" -m -d "/var/lib/$USER_NAME" "$USER_NAME"
 fi
 
-# 让 kyagent 能读 journalctl
+# 让运行账户能读 journalctl。最小化系统没有该组时跳过。
 if getent group systemd-journal >/dev/null; then
   usermod -aG systemd-journal "$USER_NAME"
 fi
 
-install -m 0440 "$SUDOERS_SRC" "$SUDOERS_DST"
+TMP_SUDOERS="$(mktemp)"
+if [[ "$USER_NAME" == "kyagent" ]]; then
+  cp "$SUDOERS_SRC" "$TMP_SUDOERS"
+else
+  # 模板默认写 kyagent；允许通过 KYAGENT_USER 部署到自定义账户。
+  sed \
+    -e "s/^Defaults:kyagent/Defaults:${USER_NAME}/" \
+    -e "s/^kyagent[[:space:]]/${USER_NAME} /" \
+    "$SUDOERS_SRC" >"$TMP_SUDOERS"
+fi
+chmod 0440 "$TMP_SUDOERS"
+
+if ! visudo -cf "$TMP_SUDOERS"; then
+  die "sudoers 临时文件语法校验失败，未写入 $SUDOERS_DST"
+fi
+
+if [[ -f "$SUDOERS_DST" ]]; then
+  BACKUP="$(mktemp)"
+  cp -p "$SUDOERS_DST" "$BACKUP"
+fi
+
+install -m 0440 "$TMP_SUDOERS" "$SUDOERS_DST"
 if ! visudo -cf "$SUDOERS_DST"; then
-  echo "[!] sudoers 语法校验失败，已回滚" >&2
-  rm -f "$SUDOERS_DST"
+  echo "[!] sudoers 安装后校验失败，开始回滚" >&2
+  if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+    install -m 0440 "$BACKUP" "$SUDOERS_DST"
+  else
+    rm -f "$SUDOERS_DST"
+  fi
+  [[ -n "$BACKUP" ]] && rm -f "$BACKUP"
   exit 2
 fi
+[[ -n "$BACKUP" ]] && rm -f "$BACKUP"
 
 mkdir -p /var/log/sudo-io
 chmod 0750 /var/log/sudo-io

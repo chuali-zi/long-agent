@@ -1,8 +1,8 @@
 # 09 · 配置系统
 
 > 文件：
-> - `kyagent/config.py`（Pydantic schema + YAML 加载 + env 展开）
-> - `configs/default.yaml`（mock 后端默认）
+> - `kyagent/config.py`（Pydantic schema + YAML 加载 + 项目根 JSON 覆盖 + env 展开）
+> - `configs/default.yaml`（默认 `deepseek_httpx` 后端）
 > - `configs/openai.yaml`（OpenAI 协议兼容）
 
 ---
@@ -12,7 +12,7 @@
 1. **强类型**：Pydantic 在加载时把所有字段校验到对应类型
 2. **环境变量友好**：YAML 里写 `${VAR:-default}` 自动展开
 3. **可发现**：没有配置文件时也能跑（全默认）
-4. **可覆盖**：配置文件 > 环境变量 > Pydantic 默认
+4. **可覆盖**：显式环境变量 > 项目根 `kyagent.json` > YAML 配置 > Pydantic 默认
 
 ---
 
@@ -22,7 +22,7 @@
 Config
 ├── agent: AgentConfig
 │   ├── name: str = "kyagent"
-│   ├── llm_backend: str = "mock"           # "anthropic" / "openai" / "mock"
+│   ├── llm_backend: str = "deepseek_httpx" # mock / anthropic / openai / deepseek / *_httpx
 │   ├── anthropic: AnthropicConfig
 │   │   ├── model: str = "claude-opus-4-7"
 │   │   ├── max_tokens: int = 4096
@@ -84,7 +84,7 @@ def _expand_env(value):
 
 支持 `${VAR}` 和 `${VAR:-default}` 两种语法：
 - `${KYAGENT_LLM_BACKEND}` → 取环境变量，无值时变空字符串
-- `${KYAGENT_LLM_BACKEND:-mock}` → 取环境变量，无值时回退 `mock`
+- `${KYAGENT_LLM_BACKEND:-deepseek_httpx}` → 取环境变量，无值时回退 `deepseek_httpx`
 
 递归处理 dict 和 list，所以 `path: ["${A:-/usr/bin}"]` 这种也能展开。
 
@@ -129,6 +129,7 @@ def load_config(path=None) -> Config:
 
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     raw = _expand_env(raw)
+    raw = _apply_project_json_overrides(raw, project_root)
     cfg = Config.model_validate(raw)
     cfg.base_dir = cfg_path.parent.parent  # configs/ 的父目录是项目根
     return cfg
@@ -137,7 +138,7 @@ def load_config(path=None) -> Config:
 流程：
 1. 解析 cfg_path（参数 > 自动发现）
 2. 不存在 → 全默认 + base_dir = cwd
-3. 存在 → yaml.safe_load + 环境展开 + Pydantic 校验
+3. 存在 → yaml.safe_load + 环境展开 + 项目根 `kyagent.json` 轻量覆盖 + Pydantic 校验
 4. `base_dir` 设为 `configs/` 的父目录（项目根），后续 `cfg.resolve("./var/audit.db")` 会以此为锚点
 
 **`yaml.safe_load`** 而不是 `yaml.load`：杜绝 YAML 反序列化攻击（`!!python/object/apply:os.system` 这种）。
@@ -166,7 +167,8 @@ def resolve(self, p: str | Path) -> Path:
 ```yaml
 agent:
   name: kyagent
-  llm_backend: ${KYAGENT_LLM_BACKEND:-mock}
+  llm_backend: ${KYAGENT_LLM_BACKEND:-deepseek_httpx}
+  fallback_to_mock: false
   anthropic:
     model: claude-opus-4-7
     max_tokens: 4096
@@ -206,8 +208,11 @@ mcp:
 ```
 
 要点：
-- 默认 `llm_backend: mock`，离线可跑
-- 用环境变量 `KYAGENT_LLM_BACKEND` 覆盖（`KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."`）
+- 默认 `llm_backend: deepseek_httpx`，优先使用真实 DeepSeek httpx 后端
+- DeepSeek key 可来自 `DEEPSEEK_API_KEY` 或项目根 `kyagent.json` 的 `deepseek_api_key` / `deepseek.api_key`
+- 两处都缺 key 时直接报错；离线演示需显式设置 `llm_backend=mock`
+- 项目根 `kyagent.json` 可写 `{"llm_backend":"qwen_httpx"}` 覆盖默认 YAML
+- 显式环境变量 `KYAGENT_LLM_BACKEND` 覆盖 `kyagent.json`（`KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."`）
 - `forbid_root: true` 默认禁用 root 提权
 - `enable_tools: []` 空白名单 = 全部启用
 - `llm_review: false` 默认关闭 LLM 复审
@@ -271,10 +276,8 @@ kyagent ask "查 80 端口"
 ```
 
 > **关于其他 OpenAI 协议兼容端点**（OpenAI 官方 / vLLM / Ollama / Azure / 智谱 GLM / 通义千问 等）：
-> 代码层 `OpenAIBackend` 协议适配是通的，`configs/openai.yaml` / `configs/qwen.yaml`
-> 保留作为多后端架构示例；但**当前阶段生产部署只推 DeepSeek**，其他后端不再推广。
-> 龙芯（LoongArch Old World）下 `pip install openai` 还存在 jiter Rust 编译问题，
-> 详见 `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目（status: pending）。
+> 代码层支持 SDK 路径和 `openai_httpx / deepseek_httpx / qwen_httpx` 纯 httpx 路径。
+> 当前阶段生产部署只推 DeepSeek；LoongArch Old World 用 `deepseek_httpx`，不安装 openai SDK extra。
 
 ---
 
@@ -343,6 +346,7 @@ Pydantic 会自动校验类型 / 必填。
 3. **`yaml.safe_load` 而非 `yaml.load`**：杜绝 YAML 反序列化攻击
 4. **环境变量展开是字符串值上做的**：dict key / 数字字段不展开
 5. **配置不存在不报错**：全默认兜底，让"零配置启动"成立
+6. **项目根 JSON 只做轻量覆盖**：当前公开顶层 key 是 `llm_backend`，避免把两套完整配置格式混在一起
 
 ---
 
