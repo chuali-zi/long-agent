@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolResult
+from kyagent.mcp.tools.base import Tool, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
 
 
@@ -57,7 +57,7 @@ class PingTool(Tool):
         "type": "object",
         "required": ["host"],
         "properties": {
-            "host": {"type": "string"},
+            "host": {"type": "string", "pattern": r"^(?!-)[A-Za-z0-9._:-]+$"},
             "count": {"type": "integer", "minimum": 1, "maximum": 10, "description": "默认 3"},
         },
     }
@@ -100,7 +100,7 @@ class NetLinkStatsTool(Tool):
         "properties": {
             "iface": {
                 "type": "string",
-                "pattern": r"^[a-zA-Z0-9._@-]+$",
+                "pattern": r"^(?!-)[a-zA-Z0-9._@-]+$",
                 "maxLength": 32,
                 "description": "可选，限定网卡名（如 eth0）",
             },

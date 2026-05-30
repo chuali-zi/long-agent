@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 from typing import Any
-from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolError
+from kyagent.mcp.tools.base import Tool, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
 
 
@@ -180,6 +180,7 @@ class SecSudoersAuditTool(Tool):
     description = (
         "审计指定用户的 sudo 授权（sudo -l -U USER）。"
         "用例：核查是否存在 NOPASSWD 全权 / 通配符滥用。"
+        "默认 sudoers 仅允许审计部署运行账户自身；其他账户需人工执行。"
     )
     input_schema = {
         "type": "object",
@@ -197,7 +198,7 @@ class SecSudoersAuditTool(Tool):
     read_only = True
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
-        return ["sudo", "-l", "-U", "--", args["user"]]
+        return ["sudo", "-l", "-U", args["user"]]
 
 
 # ---- 工具 9：sshd_config -----------------------------------------------------

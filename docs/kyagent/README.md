@@ -235,7 +235,7 @@ systemctl restart my-app             # 非关键服务
 ## 5. 最小权限怎么做到
 
 - **账户**：默认运行账户 `kyagent`（`useradd -r -s /usr/sbin/nologin`），归属 `systemd-journal` 组以读日志。
-- **sudoers 白名单**：`configs/sudoers.kyagent` 列出允许 `NOPASSWD` 的命令，绝对路径、绝不通配；显式拒绝 `sh / bash / python / perl / awk / sed`。
+- **sudoers 白名单**：`configs/sudoers.kyagent` 只列需要 root 的 `NOPASSWD` 命令；固定参数逐条列出，动态参数使用 `sudo >= 1.9.10` 的锚定正则限制为单个安全参数。
 - **干净 env**：每次 subprocess 都重建环境，去掉 `LD_PRELOAD / LD_LIBRARY_PATH / BASH_ENV / PYTHONPATH`，PATH 只保留白名单段。
 - **POSIX rlimit**：CPU 60s、地址空间 1G、单文件 32M、句柄 256；超时 SIGTERM → SIGKILL 兜底。
 - **不走 shell**：所有命令以 `argv` 列表方式 `Popen`，不调 `shell=True`，杜绝 shell 注入。
@@ -337,7 +337,7 @@ sudo -u kyagent bash /opt/kyagent/scripts/start-web.sh --env-file /etc/kyagent/e
 | `sys_uptime` / `sys_memory` / `sys_kernel` / `sys_block_devices` | low | - | 开机巡检最小集 |
 | `sec_kysec_status` | low | - | **麒麟 KySec 强制访问控制（赛题加分项）** |
 | `sec_selinux_status` / `sec_setuid_files` / `sec_sudoers_audit` | low/med | - | MAC / SUID / sudo 授权审计 |
-| `compl_aide_check` / `compl_file_hash` / `compl_cron_dump` | low/med | yes/- | 完整性基线 / SHA-256 / crontab 后门 |
+| `compl_aide_check` / `compl_file_hash` / `compl_cron_dump` / `compl_user_cron_dump` | low/med | yes/- | 完整性基线 / SHA-256 / 系统与用户 crontab 后门 |
 | `la_arch_info` / `la_world_check` / `la_binary_compat` | low | - | **LoongArch 专属**：CPU 型号 / New-Old World / 异架构二进制 |
 | `ask_user_choice` | low | - | LLM 主动反询（不走 ExecutionProxy） |
 

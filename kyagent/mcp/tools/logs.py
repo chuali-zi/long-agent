@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolResult
+from kyagent.mcp.tools.base import Tool, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
 
 
 _PRIORITIES = {"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"}
+_JOURNAL_UNIT_PATTERN = r"^(?!-)[A-Za-z0-9@._\-+:]+$"
+_JOURNAL_SINCE_PATTERN = r"^(?!-)[A-Za-z0-9 :+.\-]+$"
+_NOT_OPTION_PATTERN = r"^(?!-)"
 
 
 class JournalctlTool(Tool):
@@ -16,18 +19,38 @@ class JournalctlTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "since": {"type": "string", "description": "时间窗，如 '10 min ago' / '2025-05-16 10:00'"},
+            "since": {
+                "type": "string",
+                "maxLength": 50,
+                "pattern": _JOURNAL_SINCE_PATTERN,
+                "description": "时间窗，如 '10 min ago' / '2025-05-16 10:00'",
+            },
             "priority": {
                 "type": "string",
                 "enum": ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"],
                 "description": "最低优先级过滤",
             },
-            "unit": {"type": "string", "description": "限定 systemd unit（如 sshd.service）"},
+            "unit": {
+                "type": "string",
+                "pattern": _JOURNAL_UNIT_PATTERN,
+                "description": "限定 systemd unit（如 sshd.service）",
+            },
             "lines": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "默认 100"},
-            "grep": {"type": "string", "description": "正则过滤（journalctl --grep）"},
+            "grep": {
+                "type": "string",
+                "maxLength": 200,
+                "pattern": _NOT_OPTION_PATTERN,
+                "description": "正则过滤（journalctl --grep）",
+            },
         },
     }
     risk_level = RiskLevel.LOW
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        if grep := cleaned.get("grep"):
+            _validate_grep_pattern(grep, allow_pipe=True)
+        return cleaned
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         from kyagent.mcp.tools.base import ToolError
@@ -54,7 +77,12 @@ class DmesgTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "level": {"type": "string", "description": "如 err,warn"},
+            "level": {
+                "type": "string",
+                "pattern": r"^(?:emerg|alert|crit|err|warn|notice|info|debug)(?:,(?:emerg|alert|crit|err|warn|notice|info|debug))*$",
+                "maxLength": 100,
+                "description": "如 err,warn",
+            },
             "lines": {"type": "integer", "minimum": 1, "maximum": 1000},
         },
     }
@@ -83,13 +111,14 @@ class DmesgTool(Tool):
 _GREP_FORBIDDEN = set("`$|;&(){}<>\n\r")
 
 
-def _validate_grep_pattern(p: str) -> None:
+def _validate_grep_pattern(p: str, *, allow_pipe: bool = False) -> None:
     """白名单清洁：禁止 shell 元字符出现在 LLM 传入的 grep 模式中。
 
     虽然我们走 exec(no-shell)，但 pattern 串可能被 LLM 后续误塞进其他命令；
     在工具边界提前拒绝可降低组合性风险。
     """
-    bad = [ch for ch in p if ch in _GREP_FORBIDDEN]
+    forbidden = _GREP_FORBIDDEN - {"|"} if allow_pipe else _GREP_FORBIDDEN
+    bad = [ch for ch in p if ch in forbidden]
     if bad:
         from kyagent.mcp.tools.base import ToolError
         raise ToolError(f"pattern 含非法字符: {bad!r}")

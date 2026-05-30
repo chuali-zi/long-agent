@@ -20,7 +20,6 @@ adapts is cleaner from the LLM's point of view.
 """
 from __future__ import annotations
 
-import os
 from enum import Enum
 from pathlib import Path
 

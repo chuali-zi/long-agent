@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
 from kyagent.executor.proxy import ExecutionResult

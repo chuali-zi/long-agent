@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kyagent.mcp.tools.base import Tool, TrendTool, ToolRegistry, ToolError
+from kyagent.mcp.tools.base import Tool, TrendTool, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
 
 
@@ -127,9 +127,9 @@ class DiskSmartTool(Tool):
         "properties": {
             "device": {
                 "type": "string",
-                "pattern": r"^/dev/[a-z]+[0-9]*$",
+                "pattern": r"^/dev/(?:sd[a-z][0-9]*|nvme[0-9]+n[0-9]+(?:p[0-9]+)?)$",
                 "maxLength": 50,
-                "description": "块设备路径，如 /dev/sda",
+                "description": "块设备路径，如 /dev/sda 或 /dev/nvme0n1",
             },
         },
     }
@@ -150,7 +150,7 @@ class DirLargestFilesTool(Tool):
         "properties": {
             "path": {
                 "type": "string",
-                "pattern": r"^/.*",
+                "pattern": _PATH_PATTERN,
                 "maxLength": 200,
                 "description": "起始目录（必须以 / 开头）",
             },
@@ -189,12 +189,7 @@ class DirLargestFilesTool(Tool):
         out = super().format_result(exec_result)
         if not out.ok:
             return out
-        # 解析 input args 还原 limit（execution result 不带 args，所以用默认或重算）
-        # 这里采用：按第一列（字节数）倒序，截前若干行；limit 通过环境无法回传，
-        # 因此在调用端 build_argv 之后我们没有保存 limit，但默认 30 是稳定行为。
-        # 实际上调用端 mcp 层把 args 给 build_argv 后并没有把 limit 透给 format_result，
-        # 因此这里改用类常量默认 30；如果将来 mcp 层提供 args，请使用之。
-        limit = 30
+        limit = int(exec_result.extra.get("tool_args", {}).get("limit", 30))
         lines = [ln for ln in out.content.splitlines() if ln.strip()]
         parsed: list[tuple[int, str]] = []
         for ln in lines:

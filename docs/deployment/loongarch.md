@@ -156,6 +156,8 @@ PY
 sudo bash scripts/setup-sudoers.sh
 ```
 
+动态参数 sudoers 规则使用锚定正则，要求目标机安装 `sudo >= 1.9.10`。安装脚本会通过 `visudo -cf` 校验模板；版本过旧时不会覆盖现有 sudoers 配置。
+
 ## 7. 验收命令
 
 开发账户先验：

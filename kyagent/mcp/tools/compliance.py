@@ -141,11 +141,32 @@ class ComplHostsTool(Tool):
 class ComplCronDumpTool(Tool):
     name = "compl_cron_dump"
     description = (
-        "导出 crontab：不带 user 读取系统 /etc/crontab；带 user 读取该用户 crontab。"
+        "导出系统 /etc/crontab。"
         "用例：检测后门定时任务。"
     )
     input_schema = {
         "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    risk_level = RiskLevel.LOW
+    requires_root = False
+    read_only = True
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["cat", "/etc/crontab"]
+
+
+class ComplUserCronDumpTool(Tool):
+    name = "compl_user_cron_dump"
+    description = (
+        "导出指定用户的 crontab。"
+        "用例：检测用户级后门定时任务。"
+        "crontab -u 需要 root，固定走 sudoers 中的锚定用户名规则。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["user"],
         "properties": {
             "user": {
                 "type": "string",
@@ -154,17 +175,12 @@ class ComplCronDumpTool(Tool):
             },
         },
     }
-    # 默认 LOW / 非 root（仅读系统 crontab）；运行时若传 user 则升级 root 需求由 sudoers
-    # 决定。risk_level 取 MEDIUM 涵盖最坏情形以触发守门规则。
     risk_level = RiskLevel.MEDIUM
-    requires_root = False
+    requires_root = True
     read_only = True
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
-        user = args.get("user")
-        if user:
-            return ["crontab", "-l", "-u", user]
-        return ["cat", "/etc/crontab"]
+        return ["crontab", "-l", "-u", args["user"]]
 
 
 def register(registry: ToolRegistry) -> None:
@@ -174,3 +190,4 @@ def register(registry: ToolRegistry) -> None:
     registry.register(ComplTimestampAuditTool())
     registry.register(ComplHostsTool())
     registry.register(ComplCronDumpTool())
+    registry.register(ComplUserCronDumpTool())

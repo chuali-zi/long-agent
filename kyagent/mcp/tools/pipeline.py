@@ -155,6 +155,7 @@ def execute_and_format(
         "requires_root": prepared.tool.requires_root,
     })
     exec_result = executor.run(prepared.argv, requires_root=prepared.tool.requires_root)
+    exec_result.extra["tool_args"] = prepared.cleaned
     audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
 
     formatted = prepared.tool.format_result(exec_result)

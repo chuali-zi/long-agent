@@ -1,7 +1,7 @@
 """LoongArch 架构专属工具（赛题部署目标 = LoongArch + Kylin V11）。"""
 from __future__ import annotations
 from typing import Any
-from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolError
+from kyagent.mcp.tools.base import Tool, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
 
 

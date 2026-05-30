@@ -524,7 +524,7 @@ class TestSecurityTools:
 
     def test_sec_sudoers_audit_argv(self):
         argv = _argv(security_mod.SecSudoersAuditTool(), {"user": "kyagent"})
-        assert argv == ["sudo", "-l", "-U", "--", "kyagent"]
+        assert argv == ["sudo", "-l", "-U", "kyagent"]
 
     def test_sec_sudoers_audit_rejects_slash_in_user(self):
         t = security_mod.SecSudoersAuditTool()
@@ -604,12 +604,17 @@ class TestComplianceTools:
         argv = _argv(compliance_mod.ComplCronDumpTool(), {})
         assert argv == ["cat", "/etc/crontab"]
 
-    def test_compl_cron_dump_argv_user(self):
-        argv = _argv(compliance_mod.ComplCronDumpTool(), {"user": "kyagent"})
+    def test_compl_user_cron_dump_argv(self):
+        argv = _argv(compliance_mod.ComplUserCronDumpTool(), {"user": "kyagent"})
         assert argv == ["crontab", "-l", "-u", "kyagent"]
 
-    def test_compl_cron_dump_rejects_bad_user(self):
+    def test_compl_cron_dump_rejects_user(self):
         t = compliance_mod.ComplCronDumpTool()
+        with pytest.raises(ToolError):
+            t.validate({"user": "kyagent"})
+
+    def test_compl_user_cron_dump_rejects_bad_user(self):
+        t = compliance_mod.ComplUserCronDumpTool()
         with pytest.raises(ToolError):
             t.validate({"user": "bad;user"})
 
@@ -642,8 +647,8 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_92_tools(self, registry):
-        assert len(registry.names()) == 92
+    def test_default_registry_has_93_tools(self, registry):
+        assert len(registry.names()) == 93
 
     def test_all_tools_have_description(self, registry):
         bad = [

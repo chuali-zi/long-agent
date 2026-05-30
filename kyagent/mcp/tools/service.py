@@ -17,10 +17,12 @@ _FORBIDDEN_UNITS = {
     "systemd-logind", "systemd-journald", "systemd-udevd",
     "dbus", "dbus.service", "polkit", "polkit.service",
 }
+_UNIT_PATTERN = r"^(?!-)[A-Za-z0-9@._\-+:]+$"
 
 
 def _validate_unit(unit: str) -> str:
-    if not unit or any(c in unit for c in [" ", ";", "|", "&", "$", "`"]):
+    import re
+    if not unit or not re.fullmatch(_UNIT_PATTERN, unit):
         raise ToolError(f"非法 unit 名: {unit!r}")
     if unit.split(".")[0] in _FORBIDDEN_UNITS:
         raise ToolError(f"unit {unit!r} 在工具层禁用名单内（防误关核心服务）")
@@ -34,7 +36,7 @@ class SvcStatusTool(Tool):
         "type": "object",
         "required": ["unit"],
         "properties": {
-            "unit": {"type": "string", "description": "如 sshd / nginx.service"},
+            "unit": {"type": "string", "pattern": _UNIT_PATTERN, "description": "如 sshd / nginx.service"},
         },
     }
     risk_level = RiskLevel.LOW
@@ -73,7 +75,7 @@ class SvcRestartTool(Tool):
         "type": "object",
         "required": ["unit"],
         "properties": {
-            "unit": {"type": "string"},
+            "unit": {"type": "string", "pattern": _UNIT_PATTERN},
         },
     }
     risk_level = RiskLevel.HIGH
@@ -91,7 +93,7 @@ class SvcReloadTool(Tool):
     input_schema = {
         "type": "object",
         "required": ["unit"],
-        "properties": {"unit": {"type": "string"}},
+        "properties": {"unit": {"type": "string", "pattern": _UNIT_PATTERN}},
     }
     risk_level = RiskLevel.MEDIUM
     requires_root = True
@@ -100,9 +102,6 @@ class SvcReloadTool(Tool):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         unit = _validate_unit(args["unit"])
         return ["systemctl", "reload", unit]
-
-
-_UNIT_PATTERN = r"^[A-Za-z0-9@._\-+:]+$"
 
 
 class SvcIsActiveTool(Tool):

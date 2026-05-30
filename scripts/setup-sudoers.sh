@@ -30,6 +30,19 @@ if ! command -v visudo >/dev/null 2>&1; then
   die "找不到 visudo，请先安装 sudo 包"
 fi
 
+if ! command -v sudo >/dev/null 2>&1; then
+  die "找不到 sudo，请先安装 sudo >= 1.9.10"
+fi
+
+SUDO_VERSION="$(sudo -V | sed -n '1s/^Sudo version //p')"
+if [[ -z "$SUDO_VERSION" ]] || ! printf '%s\n' "1.9.10" "$SUDO_VERSION" | sort -V -C; then
+  die "sudo 版本过旧或无法识别：${SUDO_VERSION:-unknown}，参数正则要求 sudo >= 1.9.10"
+fi
+
+if [[ ! "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+  die "非法运行账户名：$USER_NAME"
+fi
+
 if [[ ! -f "$SUDOERS_SRC" ]]; then
   die "找不到 sudoers 模板：$SUDOERS_SRC"
 fi
@@ -54,6 +67,7 @@ else
   sed \
     -e "s/^Defaults:kyagent/Defaults:${USER_NAME}/" \
     -e "s/^kyagent[[:space:]]/${USER_NAME} /" \
+    -e "s#/usr/bin/sudo -l -U kyagent#/usr/bin/sudo -l -U ${USER_NAME}#" \
     "$SUDOERS_SRC" >"$TMP_SUDOERS"
 fi
 chmod 0440 "$TMP_SUDOERS"

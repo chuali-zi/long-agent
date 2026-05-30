@@ -353,9 +353,9 @@ bash scripts/start-web.sh --install-web --mock
 | `sec_kernel_taints` / `sec_kernel_modules` | tainted 位解码 / lsmod |
 | `sec_listening_external` / `sec_audit_status` | 外网监听暴露 / auditd 状态 |
 
-#### 合规 / 完整性（6）
+#### 合规 / 完整性（7）
 
-`compl_aide_check` / `compl_file_attr` / `compl_file_hash` / `compl_timestamp_audit` / `compl_hosts` / `compl_cron_dump` —— **配置漂移检测**主战场（AIDE 基线、SHA-256、lsattr、stat 时间戳、hosts、crontab 后门）。
+`compl_aide_check` / `compl_file_attr` / `compl_file_hash` / `compl_timestamp_audit` / `compl_hosts` / `compl_cron_dump` / `compl_user_cron_dump` —— **配置漂移检测**主战场（AIDE 基线、SHA-256、lsattr、stat 时间戳、hosts、系统与用户 crontab 后门）。
 
 #### LoongArch 专属（3）
 
