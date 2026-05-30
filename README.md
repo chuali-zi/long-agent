@@ -212,6 +212,110 @@ kyagent mcp serve
 | `kyagent audit show <trace-id>` | 回放某条 trace |
 | `kyagent mcp serve` | 以 stdio 模式启动 MCP server |
 
+## 5.5 工具集（92 个）
+
+92 个内置 MCP 工具，按域分组；全部声明 `risk_level` 与 `requires_root`，覆盖赛题"OS 深度感知 / 安全意图校验 / 最小权限"三层要求。所有工具走 `Tool.build_argv → Guardrail → ExecutionProxy → Audit` 同一条管线，**不绕过任何一层**。
+
+赛题关键场景覆盖：
+
+| 场景 | 代表工具 |
+| --- | --- |
+| 僵尸进程 | `process_zombies` / `process_tree` / `process_fd_count` |
+| 磁盘 I/O 异常 | `disk_io_stats`（TrendTool）/ `disk_io_diskstats` / `disk_inode_usage` |
+| 配置漂移 | `pkg_verify` / `compl_file_hash` / `compl_aide_check` / `svc_show` / `svc_cat` |
+| 大日志暴增 | `log_files_top` / `log_size_sample` / `log_rotated_count` |
+| 麒麟加分项 | `sec_kysec_status`（`/sys/kernel/security/kysec/state`）|
+| LoongArch 专属 | `la_arch_info` / `la_world_check`（New/Old World 判定）/ `la_binary_compat` |
+
+#### 进程与资源（8）
+
+| 工具 | 用途 |
+| --- | --- |
+| `process_list` / `process_tree` / `process_zombies` | 进程列表、父子森林、僵尸专项 |
+| `process_fd_count` / `process_resource` | `/proc/PID/fd` 泄漏盘点、`/proc/PID/status` 资源占用 |
+| `top_cpu_snapshot` | 一次性 `top -bn1` 快照 |
+| `lsof_port` / `lsof_pid` | 端口占用、PID 文件句柄 |
+
+#### 服务与启动（12）
+
+| 工具 | 用途 |
+| --- | --- |
+| `svc_status` / `svc_list` / `svc_is_active` / `svc_is_enabled` | 只读状态查询 |
+| `svc_show` / `svc_cat` / `svc_failed` / `svc_timers` | 配置漂移与故障定位 |
+| `svc_restart` / `svc_reload` | 变更类，HIGH 风险走 confirm + sudoers |
+| `boot_analyze` / `boot_logs` | `systemd-analyze blame` / `journalctl -b -p err` |
+
+#### 网络（12）
+
+| 工具 | 用途 |
+| --- | --- |
+| `net_listen` / `net_connections` / `net_conn_state_summary` | 监听端口、连接、TCP 状态聚合 |
+| `net_routes` / `net_arp` / `net_addr` / `net_link_stats` | 路由 / ARP / 地址 / 网卡计数器（JSON） |
+| `net_dns_resolve` / `net_ping` / `net_tcp_stats` | DNS 验证、连通、协议栈总览 |
+| `net_firewall_iptables` / `net_firewall_nft` | 防火墙规则（需 root） |
+
+#### 日志（9）
+
+| 工具 | 用途 |
+| --- | --- |
+| `log_journal` / `log_dmesg` | journal / 内核环形缓冲 |
+| `log_files_top` / `log_size_sample` / `log_rotated_count` | 日志暴增定位 + 滚动文件枚举 |
+| `log_grep_recent` / `log_ssh_audit` / `log_auth_failed` | 关键字 / sshd / 鉴权失败 |
+| `log_audit_summary` | `aureport --summary` |
+
+#### 文件系统（4）
+
+`fs_df` / `fs_du` / `fs_ls` / `fs_find` — 全部只读，禁 `-exec`，禁读 `/etc/shadow` 等敏感路径。
+
+#### 包管理（8，含 PkgFamilyMixin 自适配）
+
+| 工具 | 用途 |
+| --- | --- |
+| `pkg_info` / `pkg_installed` | 单包信息 / 已安装清单 |
+| `pkg_verify` | **配置漂移检测**：`rpm -V` 或 `debsums -c`，按发行版透明切换 |
+| `pkg_updates` / `pkg_security_updates` | 可升级 / 安全升级清单 |
+| `pkg_owns_file` / `pkg_repo_list` / `pkg_history` | 反查归属、源、操作历史 |
+
+#### 磁盘 / I/O（7）
+
+| 工具 | 用途 |
+| --- | --- |
+| `disk_io_stats` | **TrendTool**：`iostat -dx 1 2` 一次得 delta，不在 Python 端 sleep |
+| `disk_io_diskstats` | 读 `/proc/diskstats` 原始计数（LLM 自行调两次算 delta） |
+| `disk_inode_usage` / `disk_mount` / `disk_open_deleted` | inode、挂载选项、已删除句柄 |
+| `disk_smart` / `dir_largest_files` | SMART 健康、大文件定位 |
+
+#### 系统态势（9）
+
+`sys_uptime` / `sys_loadavg` / `sys_memory` / `sys_swap` / `sys_kernel` / `sys_cpu_info` / `sys_dmi` / `sys_time_sync` / `sys_block_devices` —— 开机巡检的最小集合。
+
+#### 安全（13）
+
+| 工具 | 用途 |
+| --- | --- |
+| `sec_kysec_status` | **麒麟 KySec 状态**（赛题加分项，读 `/sys/kernel/security/kysec/state`） |
+| `sec_selinux_status` / `sec_apparmor_status` | SELinux / AppArmor MAC 框架 |
+| `sec_setuid_files` / `sec_world_writable` / `sec_capabilities` | 提权面盘点 |
+| `sec_passwd_audit` / `sec_sudoers_audit` / `sec_ssh_config` | 高危账户 / sudo 授权 / sshd 有效配置 |
+| `sec_kernel_taints` / `sec_kernel_modules` | tainted 位解码 / lsmod |
+| `sec_listening_external` / `sec_audit_status` | 外网监听暴露 / auditd 状态 |
+
+#### 合规 / 完整性（6）
+
+`compl_aide_check` / `compl_file_attr` / `compl_file_hash` / `compl_timestamp_audit` / `compl_hosts` / `compl_cron_dump` —— **配置漂移检测**主战场（AIDE 基线、SHA-256、lsattr、stat 时间戳、hosts、crontab 后门）。
+
+#### LoongArch 专属（3）
+
+| 工具 | 用途 |
+| --- | --- |
+| `la_arch_info` | `/proc/cpuinfo` 关键字段（CPU Family / Model Name / Revision） |
+| `la_world_check` | 通过 `ld-linux-loongarch-lp64d.so.1` 判定 New World vs Old World |
+| `la_binary_compat` | `file(1)` 判定异架构二进制能否落地 |
+
+#### 交互（1）
+
+`ask_user_choice` — LLM 主动反询：给出预定选项让用户挑一个，TUI 弹黄框选项面板。不走 ExecutionProxy。
+
 ## 6. 配置文件
 
 | 文件 | 说明 |

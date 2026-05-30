@@ -299,16 +299,27 @@ Agent 主循环里有一条 *并行多工具调度* 链路（`Agent._is_parallel
 
 ## 7. 工具清单
 
+**当前共 92 个内置工具，按 10 个域分组**（详情见根 [README §5.5](../../README.md)）。核心代表如下：
+
 | 工具 | risk | root | 用途 |
 |---|---|---|---|
-| `process_list` | low | - | `ps -eo ... --sort` |
+| `process_list` / `process_zombies` / `process_tree` | low | - | 进程列表、僵尸专项、父子森林 |
 | `lsof_port` / `lsof_pid` | low | - | 端口占用、PID 文件句柄 |
-| `net_listen` / `net_connections` / `net_ping` | low | - | `ss` / `ping` |
-| `log_journal` / `log_dmesg` | low | - | `journalctl` / `dmesg` |
-| `svc_status` / `svc_list` | low | - | `systemctl status / list-units` |
+| `net_listen` / `net_connections` / `net_dns_resolve` / `net_ping` | low | - | `ss` / `getent` / `ping` |
+| `log_journal` / `log_dmesg` / `log_files_top` / `log_grep_recent` | low | - | journal / 内核环 / 大日志定位 / 关键字 |
+| `svc_status` / `svc_show` / `svc_cat` / `svc_failed` | low | - | systemd 只读 + 配置漂移定位 |
 | `svc_restart` / `svc_reload` | **high** | **yes** | `systemctl restart`，需 confirm |
 | `fs_df` / `fs_du` / `fs_ls` / `fs_find` | low | - | 只读文件系统统计 |
-| `pkg_info` / `pkg_installed` | low | - | dnf / yum / apt / rpm 自动适配 |
+| `pkg_info` / `pkg_installed` / `pkg_verify` | low | - | RPM / DPKG 透明适配（PkgFamilyMixin） |
+| `disk_io_stats`（TrendTool）/ `disk_inode_usage` / `disk_open_deleted` | low | - | I/O 速率 / inode / 已删除句柄 |
+| `sys_uptime` / `sys_memory` / `sys_kernel` / `sys_block_devices` | low | - | 开机巡检最小集 |
+| `sec_kysec_status` | low | - | **麒麟 KySec 强制访问控制（赛题加分项）** |
+| `sec_selinux_status` / `sec_setuid_files` / `sec_sudoers_audit` | low/med | - | MAC / SUID / sudo 授权审计 |
+| `compl_aide_check` / `compl_file_hash` / `compl_cron_dump` | low/med | yes/- | 完整性基线 / SHA-256 / crontab 后门 |
+| `la_arch_info` / `la_world_check` / `la_binary_compat` | low | - | **LoongArch 专属**：CPU 型号 / New-Old World / 异架构二进制 |
+| `ask_user_choice` | low | - | LLM 主动反询（不走 ExecutionProxy） |
+
+赛题关键场景一一对应：**僵尸进程** → `process_zombies` / `process_tree`；**磁盘 I/O 异常** → `disk_io_stats` / `disk_io_diskstats`；**配置漂移** → `pkg_verify` / `compl_file_hash` / `compl_aide_check`；**大日志** → `log_files_top` / `log_size_sample`。
 
 工具的 `risk_level` 同时被 Guardrail 作为下限使用——一个被声明为 HIGH 的工具，即使参数完全干净，也会触发 confirm。
 
@@ -333,8 +344,9 @@ pytest tests -q
 | `test_httpx_backend.py` | 50 | 纯 httpx OpenAI/DeepSeek/Qwen 兼容路径 + tool_calls + JSON/环境变量 key 读取 + 缺 key 报错 |
 | `test_loongarch_deploy_docs.py` | 5 | LoongArch 部署脚本、依赖清单和文档一致性 |
 | `test_agent_parallel.py` | 4 | 并行预检 + per-trace 锁 + worker 拒绝 CONFIRM |
+| `test_tools_expansion.py` | 123 | v2 工具扩展（73 个新工具）build_argv + JSON Schema 拒绝路径全静态烟雾 |
 
-**当前本地收集：244 个测试；Windows 开发态会有 2 个 POSIX 相关 skip。**
+**当前本地收集：394 passed / 2 skipped（POSIX 相关）。**
 
 ## 9. 把 MCP 服务挂到 Claude Desktop
 

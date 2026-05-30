@@ -14,7 +14,7 @@
 #   sudo useradd -r -s /usr/sbin/nologin kyagent
 #   sudo usermod -aG systemd-journal kyagent
 
-# ---- 只读感知 ----------------------------------------------------------
+# ---- 只读感知：基础工具 -------------------------------------------------
 Cmnd_Alias KY_READONLY = \
     /usr/bin/ps, /bin/ps, \
     /usr/bin/ss, /usr/sbin/ss, \
@@ -28,9 +28,81 @@ Cmnd_Alias KY_READONLY = \
     /usr/bin/who, /bin/who, \
     /usr/bin/dmesg, /bin/dmesg, \
     /usr/bin/uname, /bin/uname, \
+    /usr/bin/top, /bin/top, \
     /usr/bin/cat /proc/cpuinfo, \
     /usr/bin/cat /proc/meminfo, \
-    /usr/bin/cat /etc/os-release
+    /usr/bin/cat /proc/loadavg, \
+    /usr/bin/cat /proc/diskstats, \
+    /usr/bin/cat /proc/sys/kernel/tainted, \
+    /usr/bin/cat /proc/[0-9]*/status, \
+    /usr/bin/cat /sys/kernel/security/kysec/state, \
+    /usr/bin/cat /sys/kernel/security/kysec/policy, \
+    /usr/bin/cat /etc/os-release, \
+    /usr/bin/cat /etc/hosts, \
+    /usr/bin/cat /etc/crontab, \
+    /usr/bin/cat /etc/ssh/sshd_config
+
+# ---- 只读感知：进程 / 文件系统观测 ------------------------------------
+Cmnd_Alias KY_PROC_OBSERVE = \
+    /usr/bin/ls -1 /proc/[0-9]*/fd, \
+    /usr/bin/ls -l /lib64/ld-linux-loongarch-lp64d.so.1, \
+    /usr/bin/findmnt -J, /usr/bin/findmnt -J -- *, \
+    /usr/bin/swapon --show, /sbin/swapon --show, \
+    /usr/bin/lsblk -J, /bin/lsblk -J, \
+    /usr/bin/lscpu, /usr/bin/timedatectl, \
+    /usr/bin/lsmod, /sbin/lsmod, \
+    /usr/sbin/lsmod
+
+# ---- 只读感知：网络 ----------------------------------------------------
+# ip 系列只读子命令。注意只放 route / neigh / addr / -s link，不放 add/del/set。
+Cmnd_Alias KY_NET_OBSERVE = \
+    /usr/sbin/ip -j route, /sbin/ip -j route, \
+    /usr/sbin/ip -j neigh, /sbin/ip -j neigh, \
+    /usr/sbin/ip -j addr, /sbin/ip -j addr, \
+    /usr/sbin/ip -s -j link, /sbin/ip -s -j link, \
+    /usr/sbin/ip -s -j link show dev *, /sbin/ip -s -j link show dev *, \
+    /usr/bin/getent hosts -- *, \
+    /usr/sbin/iptables -L -n -v --line-numbers, \
+    /usr/sbin/nft list ruleset
+
+# ---- 只读感知：日志 / 安全审计 ----------------------------------------
+Cmnd_Alias KY_LOG_OBSERVE = \
+    /usr/sbin/aureport --summary, /sbin/aureport --summary, \
+    /usr/bin/find /var/log -type f -size +[0-9]*M -printf *, \
+    /usr/bin/find /var/log -type f \( -name *.gz -o -name *.1 -o -name *.2 \)
+
+# ---- 只读感知：磁盘 I/O -----------------------------------------------
+Cmnd_Alias KY_DISK_OBSERVE = \
+    /usr/bin/iostat -dx *, \
+    /usr/bin/smartctl -H -A -- /dev/sd*, \
+    /usr/bin/smartctl -H -A -- /dev/nvme*
+
+# ---- 只读感知：安全态势 -----------------------------------------------
+# sestatus / aa-status / getenforce 在 Kylin Server V11 上都存在
+Cmnd_Alias KY_SEC_OBSERVE = \
+    /usr/sbin/sestatus, /sbin/sestatus, \
+    /usr/sbin/aa-status, /sbin/aa-status, \
+    /usr/bin/getenforce, \
+    /usr/sbin/getcap -r /, /sbin/getcap -r /, \
+    /usr/sbin/getcap -r /usr, /sbin/getcap -r /usr, \
+    /usr/bin/getent passwd, \
+    /usr/bin/sudo -l -U -- *, \
+    /usr/bin/find / -xdev -perm -4000 -type f, \
+    /usr/bin/find / -xdev -perm -0002 -type f -not -path /proc/* -not -path /sys/*
+
+# ---- 只读感知：合规 / 完整性 ------------------------------------------
+Cmnd_Alias KY_COMPL_OBSERVE = \
+    /usr/bin/lsattr -- *, \
+    /usr/bin/sha256sum -- *, \
+    /usr/bin/aide --check --config /etc/aide.conf, /usr/sbin/aide --check --config /etc/aide.conf, \
+    /usr/bin/crontab -l -u -- *
+
+# ---- 只读感知：硬件 / 系统标识 ----------------------------------------
+Cmnd_Alias KY_HW_OBSERVE = \
+    /usr/sbin/dmidecode -s system-product-name, \
+    /usr/sbin/dmidecode -s system-manufacturer, \
+    /sbin/dmidecode -s system-product-name, \
+    /sbin/dmidecode -s system-manufacturer
 
 # ---- 服务查询 ----------------------------------------------------------
 Cmnd_Alias KY_SVC_QUERY = \
@@ -39,7 +111,14 @@ Cmnd_Alias KY_SVC_QUERY = \
     /usr/bin/systemctl is-enabled *, \
     /usr/bin/systemctl list-units *, \
     /usr/bin/systemctl list-unit-files *, \
-    /usr/bin/systemctl show *
+    /usr/bin/systemctl list-timers *, \
+    /usr/bin/systemctl show *, \
+    /usr/bin/systemctl cat *, \
+    /usr/bin/systemctl --failed, \
+    /usr/bin/systemctl --no-pager --no-legend --failed, \
+    /usr/bin/systemd-analyze blame, \
+    /usr/bin/systemd-analyze blame --no-pager, \
+    /usr/bin/systemd-analyze critical-chain
 
 # ---- 服务变更（高风险，需要 confirm，由 Guardrail 拦） ------------------
 Cmnd_Alias KY_SVC_MUTATE = \
@@ -51,21 +130,36 @@ Cmnd_Alias KY_SVC_MUTATE = \
 # ---- 软件包（麒麟以 dnf/yum 为主，兼容 apt） ---------------------------
 Cmnd_Alias KY_PKG_QUERY = \
     /usr/bin/dnf list *, /usr/bin/dnf info *, /usr/bin/dnf repoquery *, \
+    /usr/bin/dnf check-update *, /usr/bin/dnf updateinfo list *, \
+    /usr/bin/dnf history list, /usr/bin/dnf repolist, \
     /usr/bin/yum list *, /usr/bin/yum info *, \
     /usr/bin/apt list *, /usr/bin/apt-cache *, \
-    /usr/bin/dpkg -l, /usr/bin/rpm -qa, /usr/bin/rpm -qi *
+    /usr/bin/dpkg -l, /usr/bin/dpkg -S -- *, \
+    /usr/bin/rpm -qa, /usr/bin/rpm -qi *, \
+    /usr/bin/rpm -V -- *, /usr/bin/rpm -qf -- *, \
+    /usr/bin/debsums -c -- *, \
+    /usr/bin/tail -n [0-9]* /var/log/apt/history.log
 
 # ---- 文件元信息（不开放 cat 任意文件，避免 /etc/shadow 之类） ----------
 Cmnd_Alias KY_FILE_META = \
     /usr/bin/ls -l*, /usr/bin/ls -la*, /bin/ls -l*, /bin/ls -la*, \
-    /usr/bin/stat *, /usr/bin/file *
+    /usr/bin/stat *, /usr/bin/file -- *
 
 # ---- 授权 --------------------------------------------------------------
 # kyagent 账户：所有 KY_* 命令 NOPASSWD；显式拒绝 shell / 文本编辑器
-kyagent  ALL=(root)  NOPASSWD: KY_READONLY, KY_SVC_QUERY, KY_PKG_QUERY, KY_FILE_META
+kyagent  ALL=(root)  NOPASSWD: KY_READONLY, KY_PROC_OBSERVE, KY_NET_OBSERVE, \
+                                KY_LOG_OBSERVE, KY_DISK_OBSERVE, KY_SEC_OBSERVE, \
+                                KY_COMPL_OBSERVE, KY_HW_OBSERVE, \
+                                KY_SVC_QUERY, KY_PKG_QUERY, KY_FILE_META
 kyagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE
 kyagent  ALL=(ALL)   !/bin/sh, !/bin/bash, !/usr/bin/zsh, !/usr/bin/perl, !/usr/bin/python*, \
-                     !/usr/bin/vi, !/usr/bin/vim, !/usr/bin/nano, !/usr/bin/awk, !/usr/bin/sed
+                     !/usr/bin/vi, !/usr/bin/vim, !/usr/bin/nano, !/usr/bin/awk, !/usr/bin/sed, \
+                     !/usr/bin/curl, !/usr/bin/wget, \
+                     !/usr/sbin/iptables -[ADIF]*, !/sbin/iptables -[ADIF]*, \
+                     !/usr/sbin/nft add*, !/usr/sbin/nft delete*, !/usr/sbin/nft flush*, \
+                     !/usr/sbin/ip route add*, !/usr/sbin/ip route del*, \
+                     !/usr/sbin/ip addr add*, !/usr/sbin/ip addr del*, \
+                     !/usr/sbin/ip link set*
 
 Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
                   log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}

@@ -111,7 +111,26 @@ configs/default.yaml ──(YAML + ${VAR:-default} 展开)──▶ Pydantic Con
 | 死循环消耗 CPU | timeout 30s + SIGTERM/SIGKILL pgrp |
 | 删本机审计 | 审计落 SQLite + JSONL；JSONL 可外送 SIEM |
 
-## 5. 可扩展点
+## 5. 工具集架构
+
+92 个内置工具按 10 个域模块组织在 `kyagent/mcp/tools/` 下：`process` / `service` / `network` / `logs` / `filesystem` / `package` / `disk` / `system` / `security` / `compliance` / `loongarch`（外加 `interactive` 单独承载 `ask_user_choice`）。每个域文件用 `register(registry)` 接入，`default_registry()` 一次性串起，详见 `kyagent/mcp/tools/__init__.py`。
+
+两个基础设施类约束工具实现边界：
+
+- **`TrendTool`**（`base.py:263`）—— 采样型工具基类，约定 `build_argv` 必须把"间隔 / 次数"编入命令本身（例如 `iostat -dx 1 2`、`vmstat 1 2`），让被调程序自行跨时间采样。绝不在 Python 端 sleep，避免给 sudoers 放行 `sh -c "...; sleep N"` 这类拼接命令。子类目前只有 `DiskIoStatsTool`；没有原生 interval 支持的命令（`/proc/diskstats`、文件大小扫描）继续做"快照"普通 Tool，让 LLM 自行调两次比对——这是更老实的边界。
+- **`PkgFamilyMixin`**（`pkg_family.py:107`）—— 按发行版透明切换包管理器 argv。一次性读 `/etc/os-release` 的 `ID/ID_LIKE/PRETTY_NAME` 判定 `PkgFamily.RPM`（麒麟服务器版 / RHEL 系）或 `PkgFamily.DPKG`（麒麟桌面版 / Debian 系），结果进程级缓存；`set_pkg_family_for_tests()` 让单测可注入。`PkgVerifyTool` 因此能在 RPM 下发 `rpm -V`、在 DPKG 下发 `debsums -c`，LLM 只看到统一的 `pkg_verify`，不必区分发行版。
+
+工具与三大子系统的关系是严格的单向依赖：
+
+```
+Tool.build_argv()  ──argv──▶  Guardrail.check_argv()  ──verdict──▶  ExecutionProxy.run()  ──ExecutionResult──▶  Tool.format_result()
+       ▲                              │                                       │                                       │
+       └── input_schema 校验           └── audit: SAFETY_CHECK                  └── audit: EXECUTION / EXECUTION_RESULT
+```
+
+任何工具都**不绕过**这三层。`interactive.AskUserChoiceTool` 是唯一例外：它由 `Agent._handle_tool_use_inner` 按名拦截，hand-off 给 UI 回调而不走 ExecutionProxy，所以 `build_argv` 只返回 placeholder。
+
+## 6. 可扩展点
 
 - **新增工具**：在 `kyagent/mcp/tools/` 增模块，写 `Tool` 子类，`register()` 进 registry。
 - **新增规则**：在 `configs/safety-rules.yaml` 加一条；支持 `pattern` / `command+flags+target_in` 两种范式。

@@ -78,7 +78,128 @@ class LsofPidTool(Tool):
         return ["lsof", "-nP", "-p", str(args["pid"])]
 
 
+class ProcessZombiesTool(Tool):
+    name = "process_zombies"
+    description = "列出系统中的僵尸进程（STAT 以 Z 开头），用于排查父进程未回收子进程的问题。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "返回行数上限，默认 50", "minimum": 1, "maximum": 500},
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["ps", "-eo", "stat,pid,ppid,user,comm"]
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        out = super().format_result(exec_result)
+        if out.ok:
+            lines = out.content.splitlines()
+            header = lines[:1]
+            zombies = [ln for ln in lines[1:] if ln.lstrip().startswith("Z")]
+            limit = 50
+            zombies_trimmed = zombies[:limit]
+            out.content = "\n".join(header + zombies_trimmed) if zombies_trimmed else "\n".join(header) + "\n(no zombies)"
+            out.data["zombie_count"] = len(zombies)
+        return out
+
+
+class ProcessTreeTool(Tool):
+    name = "process_tree"
+    description = "以森林形式列出进程父子关系（ps --forest），可按用户过滤，用于排查孤儿/异常派生。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "user": {"type": "string", "description": "仅显示该用户的进程"},
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        argv = ["ps", "-eo", "pid,ppid,user,comm", "--forest"]
+        if user := args.get("user"):
+            argv.extend(["-u", user])
+        return argv
+
+
+class ProcessFdCountTool(Tool):
+    name = "process_fd_count"
+    description = "统计指定 PID 打开的文件描述符数量（ls /proc/PID/fd），用于排查 fd 泄漏。"
+    input_schema = {
+        "type": "object",
+        "required": ["pid"],
+        "properties": {
+            "pid": {"type": "integer", "minimum": 1},
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["ls", "-1", f"/proc/{args['pid']}/fd"]
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        out = super().format_result(exec_result)
+        if out.ok:
+            lines = [ln for ln in out.content.splitlines() if ln.strip()]
+            fd_count = len(lines)
+            out.content = f"fd_count={fd_count}"
+            out.data["fd_count"] = fd_count
+        return out
+
+
+class ProcessResourceTool(Tool):
+    name = "process_resource"
+    description = "读取 /proc/PID/status 查看进程内存、线程、FD 等资源占用（VmRSS / VmSize / Threads / FDSize）。"
+    input_schema = {
+        "type": "object",
+        "required": ["pid"],
+        "properties": {
+            "pid": {"type": "integer", "minimum": 1},
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["cat", f"/proc/{args['pid']}/status"]
+
+
+class TopCpuSnapshotTool(Tool):
+    name = "top_cpu_snapshot"
+    description = "一次性 top 快照（top -bn1），返回首 30 行；用于查看当前 CPU 负载与高耗进程。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "description": "返回行数（1..50），默认 30", "minimum": 1, "maximum": 50},
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["top", "-bn1", "-w", "256"]
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        out = super().format_result(exec_result)
+        if out.ok:
+            lines = out.content.splitlines()
+            limit = 30
+            trimmed = lines[:limit]
+            out.content = "\n".join(trimmed)
+            out.data["row_count"] = len(trimmed)
+        return out
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(PsListTool())
     registry.register(LsofPortTool())
     registry.register(LsofPidTool())
+    registry.register(ProcessZombiesTool())
+    registry.register(ProcessTreeTool())
+    registry.register(ProcessFdCountTool())
+    registry.register(ProcessResourceTool())
+    registry.register(TopCpuSnapshotTool())
