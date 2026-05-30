@@ -255,3 +255,36 @@ class ToolRegistry:
             }
             for t in self.all()
         ]
+
+
+# ---- Trend 类工具：跨时间采样 ------------------------------------------------
+
+
+class TrendTool(Tool):
+    """采样型工具基类。
+
+    与普通 Tool 的唯一约定差别是：build_argv 应当生成"内含采样间隔"的命令
+    （例如 ``iostat -dx 1 2`` / ``vmstat 1 2`` / ``sar -d 1 2``），让被调用
+    程序自己负责跨时间采样并输出 delta。
+
+    这样做的理由：
+      1. 不需要改动 ExecutionProxy / pipeline.py（保持"一个工具 = 一次 argv
+         执行"的不变量，审计链一笔清楚）。
+      2. 避免在 Python 端 sleep —— 那要求 sudoers 放行 ``sh -c "...; sleep N; ..."``
+         之类的 shell 拼接命令，会显著扩大攻击面。
+      3. ``iostat`` / ``vmstat`` / ``sar`` 等工具是 sysstat 包的一部分，麒麟
+         服务器版默认安装；它们的 ``<interval> <count>`` 参数是稳定 ABI。
+
+    子类常量：
+      ``interval_s`` —— 默认采样间隔（秒），子类可改但通常 ≤ 3
+      ``sample_count`` —— 采样次数，固定 2（第一次基线，第二次返回 delta）
+
+    对于没有原生 interval 支持的命令（例如 ``cat /proc/diskstats``、文件大小
+    扫描），不要继承 TrendTool —— 把"快照"做成普通 Tool，让 LLM 自行决定两次
+    调用 + 比对。这是更老实的边界，避免给 sudoers 开口子。
+    """
+
+    interval_s: int = 2
+    sample_count: int = 2
+    risk_level: RiskLevel = RiskLevel.LOW
+    read_only: bool = True
