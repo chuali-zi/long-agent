@@ -1,0 +1,46 @@
+# 工作日志
+
+## 2026-05-29 10:17:06 +08:00
+
+- 按用户要求对根目录文档做整体整理：根目录保留 `README.md` 和必要的 agent 指令文件，详细说明、LoongArch 审查、状态与日志迁入 `docs/`。
+- 迁移旧根目录项目说明到 `docs/kyagent/README.md`，迁移 LoongArch 审查到 `docs/deployment/loongarch.md`，迁移工作日志和状态快照到 `docs/status/`。
+- 重写根 `README.md` 为使用手册入口，包含一键安装脚本、LoongArch/Kylin 部署、LLM key 配置、启动方式、CLI 使用、配置文件和验收命令；架构内容只链接到 `docs/kyagent/architecture.md` 和 `docs/kyagent/safety-model.md`。
+- 派出 2 个 gpt-5.5 medium 子agent协同梳理文档迁移方案和 README 使用命令大纲，并据此更新引用与测试路径。
+
+## 2026-05-29 09:43:03 +08:00
+
+- 按用户要求继续推进 TUI demo：派出多个 gpt-5.5 medium 子agent，分别负责设计文档、实施计划和测试切入点考察。
+- 新增 `docs/superpowers/specs/2026-05-29-tui-shell-design.md`，记录 TUI 目标、非目标、LoongArch 默认依赖策略、安全不变量、MVP 功能和后续缺口。
+- 新增 `kyagent/tui.py` 作为轻量 TUI 壳：提供可测试的确认渲染、工具表、trace timeline 摘要、`TuiSession` 状态对象和 `TuiApp` 交互循环；TUI 只复用 `Agent.from_config(confirm=...)`，不重写安全/执行/审计逻辑。
+- 在 `kyagent/cli.py` 增加 `kyagent tui` 子命令，支持持续交互、`/tools`、`/audit`、`/reset`、`/exit`、确认面板和每轮 trace timeline 回放。
+- 将 `prompt_toolkit>=3.0,<4` 加入 `pyproject.toml`、`requirements.txt`、`requirements-loongarch.txt`，并更新 `docs/deployment/loongarch.md`；LoongArch 默认 TUI 仍走 `prompt_toolkit + rich`，不引入 Textual/tree-sitter/Rust 扩展。
+- 新增 `tests/test_tui.py`，覆盖 ConfirmRequest 默认拒绝提示、工具白名单视图、trace 摘要、TuiSession reset/last_trace 和 CLI 注册；同时扩展 LoongArch 依赖测试，锁定默认依赖包含 prompt_toolkit 且不包含 textual/tree-sitter。
+
+## 2026-05-28 23:20:44 +08:00
+
+- 按用户要求围绕 “Codex CLI / opencode / Claude Code 风格 TUI 前端壳” 做只读设计考察，重点检查 LoongArch/龙芯默认可运行路径。
+- 派出 3 个并行子agent协同调查，均按 AGENTS 指示使用 gpt-5.5 medium，分别覆盖现有 CLI/Agent 集成点、LoongArch TUI 依赖风险、TUI MVP 与安全审计状态暴露。
+- 结论：TUI 方案合理，但不应重写安全/执行/审计逻辑；应作为新通道层复用 `Agent.from_config(confirm=...)`、`ConfirmRequest`、`AgentRunResult`、AuditStore 与 ToolRegistry。
+- 推荐默认技术路线为 `prompt_toolkit + rich`，保留 Typer 子命令和现有 `ask/json/mcp` 自动化入口；Textual 仅作为后续可选 extra，不进入 LoongArch Old World 默认部署路径，且不要启用 tree-sitter/syntax 相关依赖。
+- 主要缺口：`Agent.ask()` 当前同步阻塞且没有事件回调/流式状态；TUI 如需展示工具调用阶段、确认弹窗、trace timeline，后续应抽出事件 sink 或 run state 回调，同时保持 CONFIRM 只由主交互循环处理。
+
+## 2026-05-28 21:10:28 +08:00
+
+- 按用户要求派出 3 个并行子agent协同调查仓库状态，分别覆盖赛题定位、代码结构、git/环境/产物状态；子agent均按要求使用 gpt-5.5 medium。
+- 确认仓库对应 A2 赛题“面向麒麟操作系统的安全智能运维 Agent”，状态总结已贴合赛题 5 大要求：OS 感知、MCP 插件化、安全意图校验、最小权限执行、推理链路溯源。
+- 检查 README、docs/kyagent 项目说明、部署说明、study 文档、核心源码、配置、测试和 benchmark 产物。
+- 运行验证：首次 `python -m pytest -q -p no:cacheprovider` 受 Windows pytest 临时目录权限影响失败；改用 `python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider` 后通过 `237 passed, 2 skipped`。
+- 新增状态文档，记录当前仓库具体状态、赛题贴合度、测试结果、git 状态、产物、风险缺口和下一步优先事项。
+
+## 2026-05-28 22:40:25 +08:00
+
+- 按用户要求继续执行 LoongArch 长任务：基于 3 个子agent报告和实际 Web 核查，完成依赖/架构兼容审查、文档纠偏、一键部署脚本与多轮审核。
+- 新增 `scripts/install-loongarch.sh`，默认 LoongArch Old World 路径使用 `deepseek_httpx`，不安装 openai/anthropic/mcp extra，支持 dry-run、系统包安装、Python 检测、venv 安装、sudoers/env/selfcheck。
+- 强化 `scripts/setup-sudoers.sh`，改为临时 sudoers 先校验、安装后再校验、失败回滚，降低写坏 `/etc/sudoers.d/kyagent` 的风险。
+- 重写 LoongArch 部署文档，同步 README、配置、study 文档和 HTML 学习页，移除已删除旧实现笔记的引用，统一测试数为 244 collected。
+- 新增 `tests/test_loongarch_deploy_docs.py`，锁定部署脚本、依赖清单、文档一致性和 `openai_httpx/deepseek_httpx/qwen_httpx` 后端说明。
+- 验证结果：`bash -n` 两个脚本通过；`install-loongarch.sh --dry-run` 通过；`tests/test_loongarch_deploy_docs.py` 5 passed；全量 `python -m pytest -q --basetemp pytest_tmp_verify -p no:cacheprovider` 为 `242 passed, 2 skipped`；collect-only 为 `244 tests collected`。
+
+## 2026-05-30
+
+- streaming TUI: README §4/§8 更新；install 脚本核对（若有改动）；rich/prompt_toolkit 依赖核对完成

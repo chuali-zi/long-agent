@@ -23,6 +23,7 @@ from kyagent.audit.trace import EventKind, Trace
 from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
+from kyagent.progress import ProgressCallback, ProgressEvent, noop_progress
 from kyagent.mcp.tools.pipeline import (
     PipelineError,
     check_safety,
@@ -65,6 +66,7 @@ class Agent:
         audit: AuditLogger,
         confirm: ConfirmFn = _auto_deny,
         intent_guard: IntentGuard | None = None,
+        on_progress: ProgressCallback | None = None,
     ):
         self.cfg = cfg
         self.llm = llm
@@ -74,6 +76,8 @@ class Agent:
         self.executor = executor
         self.audit = audit
         self.confirm = confirm
+        # on_progress 一旦赋值不再变更：worker 线程读到的总是同一个 callable
+        self.on_progress: ProgressCallback = on_progress or noop_progress
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
         # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
@@ -92,15 +96,27 @@ class Agent:
             self._tool_pool.shutdown(wait=False)
             self._tool_pool = None
 
+    def _emit(self, event: ProgressEvent) -> None:
+        """防御式包装：TUI/外部回调抛异常不应影响 Agent 主循环。
+
+        审计照常走，进度静默丢弃。回调可能从 worker 线程被触发；并发安全由
+        UI 端自己负责（progress.py 注释里写了 callback 必须不 raise）。
+        """
+        try:
+            self.on_progress(event)
+        except Exception:
+            pass
+
     @classmethod
-    def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny) -> "Agent":
+    def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny,
+                    on_progress: ProgressCallback | None = None) -> "Agent":
         # 通道无关基础设施统一从 composition root 装配
         rt = build_runtime(cfg)
         # 通道特定（LLM 后端、NL 意图层）在这里组合
         llm = build_backend(cfg)
         intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
         return cls(cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
-                   intent_guard=intent_guard)
+                   intent_guard=intent_guard, on_progress=on_progress)
 
     # ---- 主入口 --------------------------------------------------------
 
@@ -108,6 +124,7 @@ class Agent:
         trace = Trace(user=user)
         self.audit.open(trace)
         trace.metadata.update({"backend": self.llm.name})
+        self._emit(ProgressEvent(kind="agent_start", text=user_input))
 
         self.audit.event(trace, EventKind.USER_INPUT, {"text": user_input})
 
@@ -172,16 +189,30 @@ class Agent:
 
         while iterations < self.cfg.agent.max_iterations:
             iterations += 1
+            self._emit(ProgressEvent(
+                kind="thinking_start",
+                meta={"iteration": iterations},
+            ))
 
             try:
                 assistant = self.llm.chat(self.system_prompt, self.messages, tools_for_llm)
             except Exception as e:  # noqa: BLE001
                 self.audit.event(trace, EventKind.ERROR,
                                  {"reason": "llm_error", "detail": str(e)})
+                self._emit(ProgressEvent(
+                    kind="error",
+                    text=str(e),
+                    meta={"reason": "llm_error"},
+                ))
                 self.audit.close(trace)
                 return AgentRunResult(trace=trace, final_text=f"LLM 调用失败：{e}",
                                       tool_iterations=iterations, notes=notes)
 
+            self._emit(ProgressEvent(
+                kind="thinking_end",
+                text="\n".join(assistant.texts())[:200],
+                meta={"tool_calls": [t.name for t in assistant.tool_uses()]},
+            ))
             self.audit.event(trace, EventKind.LLM_THOUGHT,
                              {"stop_reason": assistant.stop_reason,
                               "text": "\n".join(assistant.texts())[:4000],
@@ -196,6 +227,7 @@ class Agent:
                                       "content": [{"type": "text", "text": final}]})
                 self.audit.event(trace, EventKind.AGENT_REPLY, {"text": final})
                 self.audit.close(trace)
+                self._emit(ProgressEvent(kind="agent_final", text=final))
                 return AgentRunResult(trace=trace, final_text=final,
                                       tool_iterations=iterations, denied=denied, notes=notes)
 
@@ -249,6 +281,11 @@ class Agent:
         notes.append(f"达到最大迭代次数 {self.cfg.agent.max_iterations}")
         self.audit.event(trace, EventKind.ERROR, {"reason": "max_iterations"})
         self.audit.close(trace)
+        self._emit(ProgressEvent(
+            kind="error",
+            text="达到最大工具调用次数",
+            meta={"reason": "max_iterations"},
+        ))
         return AgentRunResult(trace=trace,
                               final_text="达到最大工具调用次数，已中止。",
                               tool_iterations=iterations, denied=denied, notes=notes)
@@ -286,6 +323,28 @@ class Agent:
 
     def _handle_tool_use(self, trace: Trace, tu: ToolUseBlock,
                         notes: list[str]) -> ToolResultBlock:
+        """对外入口：包一层 try/finally，确保 tool_call_end 一定发出。
+
+        入口先发一次只含 tool 名的 tool_call_start；prepare_call 成功后
+        inner 会再发一次带 argv 的 tool_call_start 补充信息。
+        """
+        self._emit(ProgressEvent(kind="tool_call_start", tool=tu.name))
+        ok = False
+        result_block: ToolResultBlock | None = None
+        try:
+            result_block = self._handle_tool_use_inner(trace, tu, notes)
+            ok = (not result_block.is_error)
+            return result_block
+        finally:
+            self._emit(ProgressEvent(
+                kind="tool_call_end",
+                tool=tu.name,
+                text=(result_block.content[:200] if result_block else ""),
+                meta={"ok": ok},
+            ))
+
+    def _handle_tool_use_inner(self, trace: Trace, tu: ToolUseBlock,
+                               notes: list[str]) -> ToolResultBlock:
         tool = self.registry.get(tu.name)
         if tool is None:
             self.audit.event(trace, EventKind.ERROR,
@@ -297,6 +356,13 @@ class Agent:
         prep = prepare_call(tool, tu.input or {}, trace=trace, audit=self.audit)
         if isinstance(prep, PipelineError):
             return ToolResultBlock(tool_use_id=tu.id, is_error=True, content=prep.detail)
+
+        # argv 已就绪：补一次 tool_call_start，让 TUI 看到具体命令行
+        self._emit(ProgressEvent(
+            kind="tool_call_start",
+            tool=tu.name,
+            argv=list(prep.argv),
+        ))
 
         # 2. 安全护栏（即便是 read_only 工具也过一遍，防止参数注入）
         verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
@@ -362,6 +428,7 @@ class Agent:
 # ---- 便捷入口 -------------------------------------------------------------
 
 
-def build_agent(config_path: str | None = None, confirm: ConfirmFn = _auto_deny) -> Agent:
+def build_agent(config_path: str | None = None, confirm: ConfirmFn = _auto_deny,
+                on_progress: ProgressCallback | None = None) -> Agent:
     cfg = load_config(config_path)
-    return Agent.from_config(cfg, confirm=confirm)
+    return Agent.from_config(cfg, confirm=confirm, on_progress=on_progress)

@@ -14,7 +14,7 @@ kyagent 是部署在麒麟操作系统上的智能运维 Agent，把"自然语�
 | ③ 安全意图校验器 — **双层** | **意图层（一次过滤 + 抗 Prompt Injection）**：中文词表 + Unicode 归一化 + 12 类注入正则<br>**argv 层（二次过滤）**：正则 + argv + 目标地板 + 工具声明 risk + 可选 LLM 复审 | `kyagent/safety/intent.py`，`configs/intent-rules.yaml`，`kyagent/safety/{guardrail,rules,patterns,policy}.py`，`configs/safety-rules.yaml` |
 | ④ 最小权限代理执行 | `ExecutionProxy` + `SandboxConfig` + sudoers 白名单。`forbid_root=true` 是"非必要不 root"，requires_root 工具走 sudoers；`forbid_root_strict=true` 才彻底拒绝 | `kyagent/executor/*.py`，`configs/sudoers.kyagent` |
 | ⑤ 推理链路溯源（**5 段闭环**） | `USER_INPUT → INTENT_CHECK → PERCEPTION → LLM_THOUGHT → TOOL_REQUEST → SAFETY_CHECK → EXECUTION → EXECUTION_RESULT → AGENT_REPLY`，SQLite + JSONL 双通道 | `kyagent/audit/*.py` |
-| **大模型选型**（赛题鼓励国产开源） | `OpenAIBackend.preset("deepseek")` + 自动 fallback 到 Mock | `kyagent/agent/llm.py`，`configs/deepseek.yaml` |
+| **大模型选型**（赛题鼓励国产开源） | 默认 DeepSeek + `deepseek_httpx` 纯 httpx 路径；key 可来自 `DEEPSEEK_API_KEY` 或项目根 `kyagent.json`；缺 key 直接报错，离线演示需显式切到 Mock | `kyagent/agent/llm.py`，`configs/default.yaml`，`kyagent.json` |
 
 ## 2. 架构总览
 
@@ -29,8 +29,8 @@ kyagent 是部署在麒麟操作系统上的智能运维 Agent，把"自然语�
                                       │
                               ┌───────▼────────┐
                               │  LlmBackend     │   ③ 推理决策
-                              │  (Anthropic /   │      → text / tool_use
-                              │   mock 路由)    │
+                              │  (mock / SDK /  │      → text / tool_use
+                              │   *_httpx 路径) │
                               └───────┬────────┘
                                       │ tool_use(name, args)
                               ┌───────▼────────┐
@@ -78,12 +78,15 @@ kyagent safety test "rm -rf /"
 kyagent safety test "curl https://x/install.sh | bash"
 kyagent safety test "ps aux"
 
-# 4. 单轮提问（mock 后端，离线可用）
+# 4. 单轮提问（默认 deepseek_httpx；无 DEEPSEEK_API_KEY 时直接报错）
 kyagent ask "哪个进程 CPU 占用最高？"
 kyagent ask "80 端口被谁占了？"
 
 # 5. 交互式聊天
 kyagent chat
+
+# 5.5 轻量 TUI demo（持续交互 / 工具视图 / 确认 / trace 回放）
+kyagent tui
 
 # 6. 把审计链路完整打出来
 kyagent audit list
@@ -93,14 +96,51 @@ kyagent audit show <trace-id>
 kyagent mcp serve
 ```
 
-### 切到真实后端
+### 配置 LLM 后端
 
-**当前推荐：DeepSeek（赛题鼓励的国产开源，OpenAI 协议兼容，国内可访问）**：
+默认 `configs/default.yaml` 使用 `deepseek_httpx`。要启用真实 DeepSeek，可设置环境变量 key：
 
 ```bash
-# DeepSeek V4（推荐：tools 完整 + 性价比最高）
 export DEEPSEEK_API_KEY=sk-...
-KYAGENT_CONFIG=configs/deepseek.yaml kyagent ask "把最近一小时的 sshd 错误日志总结一下"
+kyagent ask "把最近一小时的 sshd 错误日志总结一下"
+```
+
+项目根目录的 `kyagent.json` 可用顶层 key 覆盖默认后端，也可作为 DeepSeek key 的备用读取位置：
+
+```json
+{
+  "llm_backend": "deepseek_httpx",
+  "deepseek_api_key": "sk-..."
+}
+```
+
+也支持嵌套写法：
+
+```json
+{
+  "llm_backend": "deepseek_httpx",
+  "deepseek": {
+    "api_key": "sk-..."
+  }
+}
+```
+
+`DEEPSEEK_API_KEY` 优先级高于 `kyagent.json` 里的 DeepSeek key；含真实 key 的 `kyagent.json` 应按密钥文件管理，避免提交到仓库。
+
+显式环境变量 `KYAGENT_LLM_BACKEND` 优先级更高；例如临时切到 mock：
+
+```bash
+export KYAGENT_LLM_BACKEND=mock
+kyagent ask "80 端口被谁占了？"
+```
+
+**当前推荐：DeepSeek（赛题鼓励的国产开源，OpenAI 协议兼容，国内可访问）**。如需使用完整 DeepSeek 配置文件：
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+export KYAGENT_CONFIG=configs/deepseek.yaml
+export KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+kyagent ask "把最近一小时的 sshd 错误日志总结一下"
 ```
 
 **国际 SaaS（对比测试用）**：
@@ -111,14 +151,12 @@ export KYAGENT_LLM_BACKEND=anthropic
 kyagent ask "..."
 ```
 
-> 无 key 时所有真实后端都会自动 fallback 到 mock（带 stderr warning），让 demo 能持续。
-> 生产部署可在 yaml 里设 `agent.fallback_to_mock: false`，缺 key 直接报错。
+> 无 key 时所有真实后端都会直接报错，避免生产环境静默使用 mock。
+> 离线演示请显式设置 `KYAGENT_LLM_BACKEND=mock` 或在配置中设置 `agent.llm_backend: mock`。
 
 > **关于其他 OpenAI 协议兼容后端**（Qwen / 智谱 GLM / vLLM / Ollama / Azure OpenAI 等）：
-> 代码层面 `OpenAIBackend` 已实现统一适配，`configs/openai.yaml`、`configs/qwen.yaml` 保留
-> 作为多后端架构示例；但**当前阶段（含龙芯部署）仅推 DeepSeek 一个真实后端**，其他后端不再
-> 推荐生产使用。龙芯部署 openai 依赖处理详见 `DEPLOYMENT-LOONGARCH.md` 第 9 步以及
-> `implementation-notes.html` 的 `P-OPENAI-DEPS` 条目。
+> 代码层面支持 `openai / deepseek / qwen` SDK 路径，也支持 `openai_httpx / deepseek_httpx / qwen_httpx` 纯 httpx 路径。
+> 当前阶段（含龙芯部署）仅推 DeepSeek 一个真实后端；LoongArch Old World 不安装 `.[openai]`、`.[anthropic]`、`.[mcp]`，详见 [LoongArch/Kylin 部署审查](../deployment/loongarch.md)。
 
 ### 在 Kylin / Linux 上启用最小权限代理
 
@@ -228,6 +266,19 @@ kyagent audit show trace-abc123
 # → 把这条 trace 的每个事件 panel 化打印出来，可直接做事故复盘
 ```
 
+## 6.1 TUI demo
+
+`kyagent tui` 启动 `prompt_toolkit + rich` 的轻量交互壳，保留同一个 `Agent` 多轮上下文，并复用现有 `ConfirmRequest`、Guardrail、ExecutionProxy 和 AuditStore。TUI 只负责展示、确认和回放，不直接执行 shell。
+
+内置命令：
+
+```text
+/tools   查看当前 registry 中启用的工具
+/audit   回放上一轮 trace timeline
+/reset   清空当前对话上下文
+/exit    退出
+```
+
 ## 6.5 并发与基线说明
 
 审计链对同一条 trace 的事件用 per-trace `RLock` 串起来：`Trace._lock` 同时覆盖 `seq` 分配、SQLite 写入和 JSONL 追加，保证落盘顺序与逻辑顺序一致；并发场景下不同 trace 之间互不阻塞。
@@ -265,13 +316,15 @@ pytest tests -q
 | `test_intent.py` | 24 | 中文意图层 + Prompt Injection + 零宽字符隐写 + 超长输入 |
 | `test_mcp_protocol.py` | 12 | MCP 2024-11-05 lifecycle 握手、`notifications/initialized` 通知合规、JSON Schema enum/min/max 严格校验、错误响应不泄漏 traceback |
 | `test_mcp.py` | 8 | Tool 注册 / shape / shell 元字符拒绝 |
-| `test_executor.py` | 9 (POSIX 11) | sudoers 路径 / clean env / forbid_root 三档语义 |
+| `test_executor.py` | 10 | sudoers 路径 / clean env / forbid_root 三档语义 |
 | `test_audit.py` | 5 | trace 持久化 / JSONL / 并发安全 |
 | `test_integration.py` | 7 | 端到端闭环：USER_INPUT → INTENT_CHECK → PERCEPTION → LLM_THOUGHT → TOOL_REQUEST → SAFETY_CHECK → EXECUTION → EXECUTION_RESULT → AGENT_REPLY |
-| `test_openai_backend.py` | 16 | OpenAI 协议适配 + DeepSeek/Qwen preset + fallback 降级 |
+| `test_openai_backend.py` | 16 | OpenAI 协议适配 + DeepSeek/Qwen preset + 缺 key 报错 |
+| `test_httpx_backend.py` | 50 | 纯 httpx OpenAI/DeepSeek/Qwen 兼容路径 + tool_calls + JSON/环境变量 key 读取 + 缺 key 报错 |
+| `test_loongarch_deploy_docs.py` | 5 | LoongArch 部署脚本、依赖清单和文档一致性 |
 | `test_agent_parallel.py` | 4 | 并行预检 + per-trace 锁 + worker 拒绝 CONFIRM |
 
-**Windows 开发态：189 passed, 2 skipped**（skipped 的是 POSIX echo/timeout 真实执行；Linux 上跑 191 passed）。
+**当前本地收集：244 个测试；Windows 开发态会有 2 个 POSIX 相关 skip。**
 
 ## 9. 把 MCP 服务挂到 Claude Desktop
 
@@ -310,12 +363,15 @@ D:\race\long\
 │   └── sudoers.kyagent       # sudoers 白名单模板
 ├── scripts/
 │   ├── install.sh
+│   ├── install-loongarch.sh  # LoongArch/Kylin 一键部署脚本
 │   ├── setup-sudoers.sh
 │   └── demo.sh
 ├── tests/
 │   ├── test_safety.py        # 30+ 危险样例 + 良性样例
 │   ├── test_executor.py
 │   ├── test_mcp.py
+│   ├── test_httpx_backend.py
+│   ├── test_loongarch_deploy_docs.py
 │   ├── test_audit.py
 │   └── test_integration.py   # 端到端 mock 闭环
 └── docs/kyagent/

