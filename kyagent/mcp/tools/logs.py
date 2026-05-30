@@ -17,7 +17,11 @@ class JournalctlTool(Tool):
         "type": "object",
         "properties": {
             "since": {"type": "string", "description": "时间窗，如 '10 min ago' / '2025-05-16 10:00'"},
-            "priority": {"type": "string", "description": "最低优先级：err/warning/info/..."},
+            "priority": {
+                "type": "string",
+                "enum": ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"],
+                "description": "最低优先级过滤",
+            },
             "unit": {"type": "string", "description": "限定 systemd unit（如 sshd.service）"},
             "lines": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "默认 100"},
             "grep": {"type": "string", "description": "正则过滤（journalctl --grep）"},
@@ -26,12 +30,15 @@ class JournalctlTool(Tool):
     risk_level = RiskLevel.LOW
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
+        from kyagent.mcp.tools.base import ToolError
         argv = ["journalctl", "--no-pager"]
         if since := args.get("since"):
             argv.extend(["--since", since])
         if pri := args.get("priority"):
-            if pri.lower() in _PRIORITIES:
-                argv.extend(["-p", pri.lower()])
+            pri_lower = pri.lower()
+            if pri_lower not in _PRIORITIES:
+                raise ToolError(f"priority {pri!r} 无效，允许值: {sorted(_PRIORITIES)}")
+            argv.extend(["-p", pri_lower])
         if unit := args.get("unit"):
             argv.extend(["-u", unit])
         lines = int(args.get("lines", 100))
@@ -53,6 +60,11 @@ class DmesgTool(Tool):
     }
     risk_level = RiskLevel.LOW
 
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        self._lines = int(cleaned.get("lines", 200))
+        return cleaned
+
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         argv = ["dmesg", "--human", "--color=never"]
         if lvl := args.get("level"):
@@ -62,9 +74,9 @@ class DmesgTool(Tool):
     def format_result(self, exec_result):  # type: ignore[override]
         res = super().format_result(exec_result)
         if res.ok:
-            lines_arg = 200
+            n = getattr(self, "_lines", 200)
             lines = res.content.splitlines()
-            res.content = "\n".join(lines[-lines_arg:])
+            res.content = "\n".join(lines[-n:])
         return res
 
 

@@ -21,6 +21,11 @@ class PsListTool(Tool):
     risk_level = RiskLevel.LOW
     read_only = True
 
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        self._limit = int(cleaned.get("limit", 20))
+        return cleaned
+
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         sort_by = args.get("sort_by", "cpu")
         argv = ["ps", "-eo", "user,pid,pcpu,pmem,etime,stat,comm,args"]
@@ -32,8 +37,7 @@ class PsListTool(Tool):
 
     def format_result(self, exec_result):  # type: ignore[override]
         out = super().format_result(exec_result)
-        # 截断到 limit 行
-        limit = 20
+        limit = getattr(self, "_limit", 20)
         if out.ok:
             lines = out.content.splitlines()
             header = lines[:1]
@@ -90,6 +94,11 @@ class ProcessZombiesTool(Tool):
     risk_level = RiskLevel.LOW
     read_only = True
 
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        self._limit = int(cleaned.get("limit", 50))
+        return cleaned
+
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         return ["ps", "-eo", "stat,pid,ppid,user,comm"]
 
@@ -99,7 +108,7 @@ class ProcessZombiesTool(Tool):
             lines = out.content.splitlines()
             header = lines[:1]
             zombies = [ln for ln in lines[1:] if ln.lstrip().startswith("Z")]
-            limit = 50
+            limit = getattr(self, "_limit", 50)
             zombies_trimmed = zombies[:limit]
             out.content = "\n".join(header + zombies_trimmed) if zombies_trimmed else "\n".join(header) + "\n(no zombies)"
             out.data["zombie_count"] = len(zombies)
@@ -180,6 +189,11 @@ class TopCpuSnapshotTool(Tool):
     risk_level = RiskLevel.LOW
     read_only = True
 
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        self._limit = int(cleaned.get("limit", 30))
+        return cleaned
+
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         return ["top", "-bn1", "-w", "256"]
 
@@ -187,7 +201,7 @@ class TopCpuSnapshotTool(Tool):
         out = super().format_result(exec_result)
         if out.ok:
             lines = out.content.splitlines()
-            limit = 30
+            limit = getattr(self, "_limit", 30)
             trimmed = lines[:limit]
             out.content = "\n".join(trimmed)
             out.data["row_count"] = len(trimmed)

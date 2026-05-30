@@ -704,3 +704,98 @@ class TestRegistry:
         }
         missing = expected - set(registry.names())
         assert not missing, f"missing tools: {missing}"
+
+
+# ---- P1 regression: params declared in schema must actually take effect ----
+
+
+def _make_exec_result(stdout: str, returncode: int = 0):
+    from kyagent.executor.proxy import ExecutionResult
+    return ExecutionResult(
+        argv=[],
+        returncode=returncode,
+        stdout=stdout,
+        stderr="",
+        truncated=False,
+        duration=0.0,
+    )
+
+
+class TestP1ParamEffect:
+    """P1 regressions: declared input params must visibly affect output."""
+
+    def test_process_list_limit_is_respected(self):
+        t = process_mod.PsListTool()
+        # 50 data rows + 1 header
+        rows = ["USER  PID  CPU"] + [f"root  {i}   0.1" for i in range(50)]
+        t.validate({"limit": 5})
+        result = t.format_result(_make_exec_result("\n".join(rows)))
+        assert result.ok
+        body_lines = result.content.splitlines()[1:]  # skip header
+        assert len(body_lines) == 5, f"expected 5 rows, got {len(body_lines)}"
+
+    def test_process_list_default_limit_is_20(self):
+        t = process_mod.PsListTool()
+        rows = ["USER  PID  CPU"] + [f"root  {i}   0.1" for i in range(50)]
+        t.validate({})
+        result = t.format_result(_make_exec_result("\n".join(rows)))
+        body_lines = result.content.splitlines()[1:]
+        assert len(body_lines) == 20
+
+    def test_process_zombies_limit_is_respected(self):
+        t = process_mod.ProcessZombiesTool()
+        rows = ["STAT PID PPID USER COMM"] + [f"Zs  {i}  1  root  defunct" for i in range(40)]
+        t.validate({"limit": 10})
+        result = t.format_result(_make_exec_result("\n".join(rows)))
+        body_lines = [ln for ln in result.content.splitlines() if ln.lstrip().startswith("Z")]
+        assert len(body_lines) == 10
+
+    def test_top_cpu_snapshot_limit_is_respected(self):
+        t = process_mod.TopCpuSnapshotTool()
+        rows = [f"line{i}" for i in range(50)]
+        t.validate({"limit": 8})
+        result = t.format_result(_make_exec_result("\n".join(rows)))
+        assert len(result.content.splitlines()) == 8
+
+    def test_log_dmesg_lines_is_respected(self):
+        t = logs_mod.DmesgTool()
+        content = "\n".join(f"[  {i}.0] kernel msg" for i in range(300))
+        t.validate({"lines": 50})
+        result = t.format_result(_make_exec_result(content))
+        assert result.ok
+        assert len(result.content.splitlines()) == 50
+
+    def test_log_dmesg_default_lines_is_200(self):
+        t = logs_mod.DmesgTool()
+        content = "\n".join(f"[  {i}.0] kernel msg" for i in range(300))
+        t.validate({})
+        result = t.format_result(_make_exec_result(content))
+        assert len(result.content.splitlines()) == 200
+
+    def test_log_journal_priority_enum_rejects_invalid(self):
+        t = logs_mod.JournalctlTool()
+        with pytest.raises(ToolError):
+            t.validate({"priority": "critical"})  # not in enum (correct is "crit")
+
+    def test_log_journal_priority_enum_rejects_random(self):
+        t = logs_mod.JournalctlTool()
+        with pytest.raises(ToolError):
+            t.validate({"priority": "high"})
+
+    def test_log_journal_priority_valid_passes(self):
+        t = logs_mod.JournalctlTool()
+        for p in ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"):
+            cleaned = t.validate({"priority": p})
+            assert cleaned["priority"] == p
+
+    def test_log_journal_priority_in_argv(self):
+        t = logs_mod.JournalctlTool()
+        argv = _argv(t, {"priority": "err"})
+        assert "-p" in argv
+        idx = argv.index("-p")
+        assert argv[idx + 1] == "err"
+
+    def test_log_journal_no_priority_flag_when_omitted(self):
+        t = logs_mod.JournalctlTool()
+        argv = _argv(t, {})
+        assert "-p" not in argv
