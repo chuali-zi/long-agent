@@ -23,6 +23,7 @@ echo "[OK] kyagent 已安装（默认 deepseek_httpx；缺 DEEPSEEK_API_KEY 会�
 echo "    激活：source .venv/bin/activate"
 echo "    入门：kyagent tools list"
 echo "    交互：kyagent chat"
+echo "    Web ：bash scripts/start-web.sh --install-web --mock"
 echo "    部署受限账户（root 执行）：sudo bash scripts/setup-sudoers.sh"
 echo ""
 echo "可选 LLM 后端（默认不装；按需 pip install）："

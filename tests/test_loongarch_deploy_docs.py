@@ -75,6 +75,7 @@ def test_loongarch_install_script_exists_and_has_safety_gates() -> None:
         "visudo -cf",
         "--dry-run",
         "--yes",
+        "--with-web",
         "pip install --no-binary PyYAML -r requirements-loongarch.txt",
     ]
 
@@ -116,7 +117,7 @@ def test_loongarch_docs_prefer_httpx_transport_over_sdk_extras() -> None:
         "默认路径零 Rust",
         "PyYAML",
         "fallback",
-        "244 个测试",
+        "`--with-web`",
     ]
 
     for phrase in required_phrases:
@@ -148,3 +149,37 @@ def test_tui_demo_documented_for_loongarch() -> None:
     assert "kyagent tui" in deployment
     assert "prompt_toolkit + rich" in deployment
     assert "tree-sitter" in deployment
+
+
+def test_web_start_script_and_docs_are_present() -> None:
+    script = read_repo("scripts/start-web.sh")
+    readme = read_repo("README.md")
+    deployment = read_repo("docs/deployment/loongarch.md")
+
+    for token in (
+        "set -euo pipefail",
+        "--install-web",
+        "--mock",
+        "KYAGENT_LLM_BACKEND=mock",
+        "kyagent web serve",
+        "pip install -e .[web]",
+    ):
+        assert token in script
+
+    for phrase in (
+        "bash scripts/start-web.sh --install-web --mock",
+        "approval_required",
+        "approval_resolved",
+        "POST /api/approvals/{approval_id}/approve",
+        "POST /api/approvals/{approval_id}/reject",
+    ):
+        assert phrase in readme
+
+    assert "`--with-web`" in deployment
+    assert "FastAPI" in deployment
+    assert "uvicorn" in deployment
+
+
+def test_shell_scripts_use_lf_line_endings() -> None:
+    for script in (ROOT / "scripts").glob("*.sh"):
+        assert b"\r\n" not in script.read_bytes(), f"{script.name} must use LF line endings"

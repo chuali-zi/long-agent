@@ -48,3 +48,5 @@
 - LLM 真流式：`HttpxBackend`（默认 `deepseek_httpx`）走 OpenAI SSE，`OpenAIBackend` 用 SDK `stream=True`，`MockBackend` 按空格切块，`AnthropicBackend` 走基类 fallback（避免 jiter Rust 编译，保护 LoongArch 路径）。
 - 零新增依赖；`rich` + `prompt_toolkit` + `httpx` 仍是主依赖；271 tests passed。
 - 2026-05-30 工具集大扩展 +73 → 92 个工具。新增 TrendTool / PkgFamilyMixin 基础设施。覆盖赛题 4 大场景：僵尸进程 / 磁盘 I/O / 配置漂移 / 大日志。KySec 工具命中麒麟加分项。LoongArch 专属域 3 工具。`tests/test_tools_expansion.py` 123 用例静态校验 build_argv + schema 拒绝路径，全量测试 394 passed / 2 skipped。
+- FastAPI Web 控制台补齐 TUI 同级动态展示：用户消息、浅色 thinking 增量、红色工具调用、加粗 final、状态栏和人工审核卡片；新增 `ApprovalBroker`、approve/reject API 与 `approval_required / approval_resolved` SSE。
+- 新增 `scripts/start-web.sh` 一键启动浏览器控制台；LoongArch 安装器增加可选 `--with-web`，默认最小依赖路径不变。README、完整项目说明、LoongArch 部署审查和状态文档同步更新。

@@ -65,6 +65,7 @@
 | `kyagent.executor`      | 无状态 | 接受 argv + requires_root，副作用仅限子进程 |
 | `kyagent.audit`         | 持久化 | 唯一向 SQLite/JSONL 写入的入口 |
 | `kyagent.mcp.server`    | 进程 | stdio JSON-RPC，把上述模块组合成 MCP host 端可见的工具 |
+| `kyagent.web.server`    | 进程 | FastAPI B/S 接入层；把 ProgressEvent 转为 SSE，并把浏览器 approve/reject 接回 ConfirmFn |
 
 模块之间靠数据结构（Verdict / ExecutionResult / ToolResult）通信，不互相 import 彼此的内部实现，便于替换。
 
@@ -76,6 +77,12 @@
 - `on_user_choice: UserChoiceFn` — 用于内置的 `ask_user_choice` 工具：LLM 主动让用户从选项里挑一个时，由该回调向 UI 提问并返回所选 value。schema 见 `kyagent/interactive.py`。
 
 `LlmBackend` 同步新增 `chat_stream(system, messages, tools, on_delta)`：基类提供基于 `chat()` 的 fallback（一次性发完整 text），`HttpxBackend`（OpenAI SSE）、`OpenAIBackend`（SDK `stream=True`）、`MockBackend`（按空格切块模拟流）各自原生实现；`AnthropicBackend` 走基类 fallback，因为 SDK 的 `messages.stream()` 会触发 jiter Rust 编译，对 LoongArch 不友好。
+
+### 2.2 Web 审核桥
+
+`kyagent.web.server` 把相同的 `ProgressEvent` 序列通过 `POST /api/ask/stream` 推成 SSE。遇到 `ConfirmRequest` 时，`ApprovalBroker` 创建待审核记录并阻塞当前 Agent turn；浏览器调用 `/api/approvals/{approval_id}/approve` 或 `/reject` 后唤醒执行线程，并收到 `approval_resolved`。同步 `/api/ask` 保持无人值守默认拒绝，避免没有交互界面时意外放行。
+
+FastAPI worker 线程可以成为一个 Agent turn 的拥有线程；并行 tool worker 仍不得触发 confirm。`Agent._active_run_thread_id` 区分这两类线程，保留原有并发安全约束。
 
 ## 3. 配置链
 

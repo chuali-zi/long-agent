@@ -27,7 +27,6 @@ import asyncio
 import json
 import queue
 import threading
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,7 +44,7 @@ from kyagent.mcp.tools import default_registry
 from kyagent.progress import ProgressEvent
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.intent import IntentGuard
-from kyagent.safety.policy import Decision
+from kyagent.web.approvals import ApprovalBroker
 from kyagent.web import schemas as S
 
 _VERSION = "0.1.0"
@@ -101,6 +100,7 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
     """
     cfg = cfg or load_config(None)
     sessions = _AgentSessionRegistry(cfg)
+    approvals = ApprovalBroker()
 
     app = FastAPI(
         title="kyagent",
@@ -168,6 +168,47 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
         ok = sessions.reset(session_id)
         return {"reset": ok}
 
+    # ---- 路由：approvals --------------------------------------------------
+
+    @app.get("/api/approvals", response_model=S.ApprovalListResponse)
+    async def list_approvals(status: Optional[str] = Query(None)):
+        records = approvals.list_records(status=status)
+        return S.ApprovalListResponse(
+            count=len(records),
+            approvals=[S.ApprovalRecordResponse(**r.to_dict()) for r in records],
+        )
+
+    @app.get("/api/approvals/{approval_id}", response_model=S.ApprovalRecordResponse)
+    async def get_approval(approval_id: str):
+        rec = approvals.get(approval_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+        return S.ApprovalRecordResponse(**rec.to_dict())
+
+    @app.post("/api/approvals/{approval_id}/approve", response_model=S.ApprovalRecordResponse)
+    async def approve_approval(approval_id: str, req: S.ApprovalActionRequest):
+        rec = approvals.resolve(
+            approval_id,
+            approved=True,
+            reviewer=req.reviewer,
+            reason=req.reason,
+        )
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+        return S.ApprovalRecordResponse(**rec.to_dict())
+
+    @app.post("/api/approvals/{approval_id}/reject", response_model=S.ApprovalRecordResponse)
+    async def reject_approval(approval_id: str, req: S.ApprovalActionRequest):
+        rec = approvals.resolve(
+            approval_id,
+            approved=False,
+            reviewer=req.reviewer,
+            reason=req.reason,
+        )
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
+        return S.ApprovalRecordResponse(**rec.to_dict())
+
     # ---- 路由：ask/stream（SSE） ------------------------------------------
 
     @app.post("/api/ask/stream")
@@ -176,39 +217,59 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
         q: queue.Queue = queue.Queue(maxsize=512)
         _SENTINEL = object()
 
-        def on_progress(ev: ProgressEvent) -> None:
-            # 把 progress 事件塞进 queue；满了就丢（避免拖垮 worker）
+        def enqueue(event: str, data: dict[str, Any]) -> None:
+            if event.startswith("approval_"):
+                q.put((event, data))
+                return
             try:
-                q.put_nowait({
-                    "kind": ev.kind,
-                    "text": ev.text,
-                    "tool": ev.tool,
-                    "argv": ev.argv,
-                    "delta": ev.delta,
-                    "meta": ev.meta,
-                })
+                q.put_nowait((event, data))
             except queue.Full:
                 pass
 
-        # 临时挂上 progress 回调；这是当前会话的一次性流式订阅，
-        # 不影响其他 session 或同 session 的下次非流式调用
-        prev_cb = agent.on_progress
-        agent.on_progress = on_progress
+        def on_progress(ev: ProgressEvent) -> None:
+            # 把 progress 事件塞进 queue；满了就丢（避免拖垮 worker）
+            enqueue("progress", {
+                "kind": ev.kind,
+                "text": ev.text,
+                "tool": ev.tool,
+                "argv": ev.argv,
+                "delta": ev.delta,
+                "meta": ev.meta,
+            })
+
+        def web_confirm(confirm_req):
+            rec = approvals.create(
+                confirm_req,
+                session_id=req.session_id,
+                user=req.user,
+                emit=enqueue,
+            )
+            enqueue("approval_required", rec.to_dict())
+            return approvals.wait(rec.approval_id)
 
         def worker() -> dict[str, Any]:
-            try:
-                result = agent.ask(req.text, user=req.user)
-                return {
-                    "trace_id": result.trace.trace_id,
-                    "text": result.final_text,
-                    "tool_iterations": result.tool_iterations,
-                    "denied": result.denied,
-                    "notes": result.notes,
-                }
-            finally:
-                # 不管成败都恢复回调并投毒终止 generator
-                agent.on_progress = prev_cb
-                q.put(_SENTINEL)
+            run_lock = getattr(agent, "_run_lock", threading.RLock())
+            with run_lock:
+                # 临时挂上 progress / confirm 回调；整个 ask turn 和恢复过程
+                # 在同一把 Agent 运行锁里，避免同 session 并发 stream 串事件。
+                prev_cb = agent.on_progress
+                prev_confirm = agent.confirm
+                agent.on_progress = on_progress
+                agent.confirm = web_confirm
+                try:
+                    result = agent.ask(req.text, user=req.user)
+                    return {
+                        "trace_id": result.trace.trace_id,
+                        "text": result.final_text,
+                        "tool_iterations": result.tool_iterations,
+                        "denied": result.denied,
+                        "notes": result.notes,
+                    }
+                finally:
+                    # 不管成败都恢复回调并投毒终止 generator
+                    agent.on_progress = prev_cb
+                    agent.confirm = prev_confirm
+                    q.put(_SENTINEL)
 
         loop = asyncio.get_running_loop()
         fut = loop.run_in_executor(None, worker)
@@ -224,7 +285,8 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
                         continue
                     if item is _SENTINEL:
                         break
-                    yield _sse_pack("progress", item)
+                    event_name, payload = item
+                    yield _sse_pack(event_name, payload)
                 # worker 收尾后再吐一次 final
                 result = await fut
                 yield _sse_pack("final", result)

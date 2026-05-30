@@ -46,6 +46,7 @@ docs/
 - `DEEPSEEK_API_KEY` 或项目根 `kyagent.json` 的 `deepseek_api_key` / `deepseek.api_key` 存在时走真实 DeepSeek OpenAI-compatible HTTP 接口。
 - 两处都未配置 key 时直接报错，避免生产环境静默使用 mock；离线演示需显式设置 `llm_backend=mock`。
 - LoongArch Old World 默认不安装 `.[openai]`、`.[anthropic]`、`.[mcp]`，避免 `jiter`、`pydantic-core` 等 Rust 扩展风险。
+- FastAPI Web 控制台是可选 extra；使用 `scripts/start-web.sh --install-web --mock` 可一键启动离线演示，LoongArch 安装器通过 `--with-web` 显式开启。
 
 ## 4. 赛题要求贴合度
 
@@ -57,6 +58,7 @@ docs/
 | 最小权限代理执行 | PATH 白名单、clean env、timeout、rlimit、sudoers 白名单 | `kyagent/executor/`、`configs/sudoers.kyagent` |
 | 推理链路溯源 | SQLite + JSONL 双通道 | `kyagent/audit/` |
 | 国产模型路径 | DeepSeek + `deepseek_httpx` | `kyagent/agent/llm.py`、`configs/deepseek.yaml` |
+| B/S 演示入口 | FastAPI + SSE + 浏览器人工审核 | `kyagent/web/`、`scripts/start-web.sh` |
 
 ## 5. 本轮文档整理结果
 

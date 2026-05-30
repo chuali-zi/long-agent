@@ -15,6 +15,7 @@ ALLOW_NON_LOONGARCH=0
 SKIP_SYSTEM_PACKAGES=0
 SKIP_SUDOERS=0
 RUN_DEEPSEEK_CHECK=0
+WITH_WEB=0
 DEEPSEEK_KEY="${DEEPSEEK_API_KEY:-}"
 
 log() {
@@ -54,6 +55,7 @@ Options:
   --skip-sudoers                Do not create account/sudoers/audit dirs.
   --deepseek-key KEY            Write DEEPSEEK_API_KEY to /etc/kyagent/env.
   --run-deepseek-check          Run a real DeepSeek request after install.
+  --with-web                    Install the optional FastAPI/uvicorn Web extra.
   --help                        Show this help.
 
 Default LoongArch path:
@@ -102,6 +104,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --run-deepseek-check)
       RUN_DEEPSEEK_CHECK=1
+      shift
+      ;;
+    --with-web)
+      WITH_WEB=1
       shift
       ;;
     --help)
@@ -269,6 +275,11 @@ create_venv_and_install() {
   log "installing kyagent editable package without optional SDK extras"
   run "$vpy" -m pip install -e .
 
+  if [[ "$WITH_WEB" == "1" ]]; then
+    log "installing optional FastAPI/uvicorn Web extra"
+    run "$vpy" -m pip install -e ".[web]"
+  fi
+
   log "verifying default dependency graph"
   if [[ "$DRY_RUN" != "1" ]]; then
     "$vpy" -m pip freeze | grep -Eiq '^(openai|anthropic|mcp|jiter|pydantic-core)==' \
@@ -388,6 +399,9 @@ main() {
   log "done"
   log "activate: source $INSTALL_PREFIX/.venv/bin/activate"
   log "env:      sudo -u $KYAGENT_USER bash -c 'set -a; source /etc/kyagent/env; set +a; $INSTALL_PREFIX/.venv/bin/kyagent ask \"查 80 端口\"'"
+  if [[ "$WITH_WEB" == "1" ]]; then
+    log "web:      sudo -u $KYAGENT_USER bash $INSTALL_PREFIX/scripts/start-web.sh --env-file /etc/kyagent/env"
+  fi
 }
 
 main "$@"

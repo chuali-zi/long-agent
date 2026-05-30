@@ -13,6 +13,7 @@
 - 赛题推荐国产可落地后端时，LoongArch 默认用 DeepSeek + `deepseek_httpx`，绕开 openai SDK 和 jiter。
 - 项目根 `kyagent.json` 支持顶层 `llm_backend` key，例如 `{"llm_backend":"deepseek_httpx"}`；显式 `KYAGENT_LLM_BACKEND` 环境变量优先级更高。
 - 不要在 LoongArch Old World 上安装 `.[openai]`、`.[anthropic]`、`.[mcp]`。这些 extra 适合 x86_64/aarch64 或 New World 有完整编译链的环境，不是麒麟 V10 默认验收路径。
+- Web 控制台是可选 extra：`--with-web` 才安装 `fastapi<0.100` 与标准版 `uvicorn`。默认安装仍保持最小依赖；不要安装 `uvicorn[standard]`，避免额外 native/Rust 扩展。
 
 ## 2. 外部事实依据
 
@@ -32,6 +33,7 @@
 | Python | `PyYAML>=6.0.1,<7` | 可用；可能尝试 `_yaml` C 扩展，失败后 fallback 到纯 Python。 |
 | Python | `typer` / `rich` / `prompt_toolkit` | 默认路径可用，纯 Python；TUI 壳默认用 `prompt_toolkit + rich`，不引入 Textual/tree-sitter。 |
 | Python | `httpx` | 默认路径可用；DeepSeek/Qwen/OpenAI 协议兼容服务走 `*_httpx`。 |
+| Web extra | `fastapi>=0.95,<0.100` / `uvicorn>=0.23,<0.30` | 可选；FastAPI 锁在兼容 pydantic v1 的版本，uvicorn 使用标准包，不安装 `[standard]`。 |
 | 可选 SDK | `openai` | 不作为 LoongArch Old World 默认依赖，因为当前依赖 `jiter`。 |
 | 可选 SDK | `anthropic==0.39.0` | 不作为默认依赖；SDK 依赖 `jiter`，流式接口还会触碰相关路径。 |
 | 可选 SDK | `mcp>=1.0` | 不作为默认依赖；可能引入 pydantic v2 / `pydantic-core`。本仓库已有自研 MCP stdio server。 |
@@ -93,6 +95,7 @@ bash scripts/install-loongarch.sh --yes --python /usr/bin/python3.11
 bash scripts/install-loongarch.sh --yes --skip-system-packages
 bash scripts/install-loongarch.sh --yes --skip-sudoers
 bash scripts/install-loongarch.sh --yes --deepseek-key sk-... --run-deepseek-check
+bash scripts/install-loongarch.sh --yes --with-web
 ```
 
 ## 5. 脚本做了什么
@@ -104,7 +107,7 @@ bash scripts/install-loongarch.sh --yes --deepseek-key sk-... --run-deepseek-che
 3. 检测 Python 3.10-3.13 和 `venv` 模块。
 4. 创建 `.venv`，升级 pip/setuptools/wheel。
 5. 执行 `pip install --no-binary PyYAML -r requirements-loongarch.txt`。
-6. 执行 `pip install -e .`，不安装任何 extra。
+6. 执行 `pip install -e .`，默认不安装任何 extra；显式传 `--with-web` 时额外执行 `pip install -e '.[web]'`。
 7. 检查默认 venv 中不得出现 `openai`、`anthropic`、`mcp`、`jiter`、`pydantic-core`。
 8. 调用 `scripts/setup-sudoers.sh` 创建受限账户、安装 sudoers、创建审计目录。
 9. 写入 `/etc/kyagent/env`，默认设置：
@@ -181,6 +184,26 @@ sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.
 
 该入口使用 `prompt_toolkit + rich`，不引入 Textual 或 tree-sitter。内部命令包括 `/tools`、`/audit`、`/reset`、`/exit`，确认面板仍复用 `ConfirmRequest`，默认拒绝高风险操作。v2 流式 TUI 的 LLM 流式输出走 `httpx.stream` + `iter_lines`（纯 Python，零 Rust），与 LoongArch 默认零 Rust 路径一致。
 
+### Web 控制台
+
+需要浏览器端演示时，安装阶段显式打开可选 extra：
+
+```bash
+sudo bash scripts/install-loongarch.sh --yes --with-web
+sudo -u kyagent bash /opt/kyagent/scripts/start-web.sh \
+  --env-file /etc/kyagent/env \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+离线演示可以直接使用 mock：
+
+```bash
+bash scripts/start-web.sh --install-web --mock
+```
+
+Web 页面复用 `Agent.on_progress` 的 SSE 流和原有 Guardrail / ExecutionProxy / Audit 链路。高风险命令会先显示人工审核卡片；浏览器调用 approve/reject API 后，Agent 才会继续或终止执行。Web extra 仍不引入 OpenAI/Anthropic SDK、`jiter`、`pydantic-core`、`uvicorn[standard]`。
+
 仓库测试基线：
 
 ```bash
@@ -188,7 +211,7 @@ python -m pytest -q
 python -m pytest --collect-only -q
 ```
 
-当前本地基线为 244 个测试（其中 2 个 Windows/POSIX 环境相关 skip），部署文档与脚本静态一致性由 `tests/test_loongarch_deploy_docs.py` 覆盖。
+当前本地全量基线为 `419 passed, 2 skipped`；部署文档与脚本静态一致性由 `tests/test_loongarch_deploy_docs.py` 覆盖。
 
 ## 8. 故障排查
 
@@ -202,6 +225,7 @@ python -m pytest --collect-only -q
 | `kyagent ask` 写审计时报权限错 | 没设置生产审计路径 | 设置 `/etc/kyagent/env` 中两个 `KYAGENT_AUDIT_*` 变量。 |
 | `sudo -u kyagent` 下找不到命令 | venv 路径没写绝对路径 | 使用 `/opt/kyagent/.venv/bin/kyagent`。 |
 | `systemctl`/`journalctl` 权限异常 | sudoers 或 journal 组没生效 | 跑 `sudo visudo -cf /etc/sudoers.d/kyagent`，重新登录或重启相关会话。 |
+| `start-web.sh` 提示缺少 FastAPI/uvicorn | 默认最小安装未包含 Web extra | 重跑安装器并加 `--with-web`，或执行 `bash scripts/start-web.sh --install-web --mock` 做离线演示。 |
 
 ## 9. 赛题贴合说明
 
@@ -211,6 +235,7 @@ python -m pytest --collect-only -q
 - 最小权限代理执行：部署脚本创建 `kyagent` 系统账户，sudoers 白名单由 `visudo -cf` 双阶段校验。
 - 推理链路溯源：生产环境固定写 `/var/lib/kyagent/audit.db` 与 `/var/log/kyagent/audit.jsonl`。
 - 国产模型路径：默认推荐 DeepSeek 的 OpenAI Chat Completions 兼容接口，通过 `deepseek_httpx` 实现，不依赖 openai SDK。
+- B/S 演示入口：可选 FastAPI Web 控制台提供 SSE 流式展示、状态栏和人工命令审核，不绕过 Guardrail / ExecutionProxy / Audit。
 
 ## 10. 已知边界
 

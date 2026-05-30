@@ -72,6 +72,7 @@ sudo bash scripts/install-loongarch.sh --yes --python /usr/bin/python3.11
 sudo bash scripts/install-loongarch.sh --yes --skip-system-packages
 sudo bash scripts/install-loongarch.sh --yes --skip-sudoers
 sudo bash scripts/install-loongarch.sh --yes --deepseek-key sk-... --run-deepseek-check
+sudo bash scripts/install-loongarch.sh --yes --with-web
 ```
 
 最小权限账户和 sudoers 白名单可单独配置：
@@ -82,6 +83,8 @@ sudo -u kyagent kyagent chat
 ```
 
 LoongArch Old World 不要安装 `.[openai]`、`.[anthropic]`、`.[mcp]`；需要真实 LLM 时使用 `deepseek_httpx`。细节见 [LoongArch/Kylin 部署审查](docs/deployment/loongarch.md)。
+
+Web 控制台是可选能力，不会进入 LoongArch 默认最小安装路径。需要浏览器演示时显式加 `--with-web`，该 extra 只安装 FastAPI 和标准版 uvicorn，不安装 `uvicorn[standard]`。
 
 ## 3. 配置 LLM Key
 
@@ -178,6 +181,49 @@ v2 流式 TUI 对标 Claude Code / OpenCode / Codex：
 
 TUI 基于 `prompt_toolkit + rich`，不引入 Textual/tree-sitter。
 
+### Web 控制台
+
+一键启动离线演示：
+
+```bash
+bash scripts/start-web.sh --install-web --mock
+```
+
+浏览器打开 `http://127.0.0.1:8000`。需要局域网访问时保留默认监听地址 `0.0.0.0`，并使用服务器 IP 打开页面。
+
+加载生产配置和密钥文件：
+
+```bash
+sudo -u kyagent bash scripts/start-web.sh \
+  --env-file /etc/kyagent/env \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+已经安装过 Web extra 时，不必重复传 `--install-web`。手工等价命令：
+
+```bash
+python -m pip install -e '.[web]'
+kyagent web serve --host 0.0.0.0 --port 8000
+```
+
+控制台复用和 TUI 相同的 Agent 流式钩子。对话区会区分用户输入、浅色思考增量、红色工具调用和加粗最终回复；顶部状态栏显示当前阶段、trace 和待审核数。高风险操作不会直接执行：服务端通过 SSE 推送 `approval_required`，浏览器批准或拒绝后再收到 `approval_resolved`。
+
+审核接口：
+
+```text
+GET  /api/approvals
+POST /api/approvals/{approval_id}/approve
+POST /api/approvals/{approval_id}/reject
+```
+
+用于页面交互的事件名：
+
+```text
+approval_required
+approval_resolved
+```
+
 安全测试，不真正执行命令：
 
 ```bash
@@ -206,11 +252,18 @@ kyagent mcp serve
 | `kyagent chat` | 进入交互式对话 |
 | `kyagent ask "..."` | 单轮提问 |
 | `kyagent tui` | 启动轻量 TUI |
+| `kyagent web serve` | 启动 FastAPI 浏览器控制台，需安装 `.[web]` |
 | `kyagent tools list` | 列出可用工具和风险等级 |
 | `kyagent safety test "..."` | 对自然语言或命令做安全裁决 |
 | `kyagent audit list` | 查看最近 trace |
 | `kyagent audit show <trace-id>` | 回放某条 trace |
 | `kyagent mcp serve` | 以 stdio 模式启动 MCP server |
+
+一键 Web 启动脚本：
+
+```bash
+bash scripts/start-web.sh --install-web --mock
+```
 
 ## 5.5 工具集（92 个）
 
@@ -347,6 +400,7 @@ python -m pytest tests -q
 kyagent tools list
 kyagent safety test "rm -rf /"
 kyagent ask "查下 CPU 占用最高的进程"
+bash scripts/start-web.sh --mock
 ```
 
 生产/受限账户验收：
@@ -355,6 +409,7 @@ kyagent ask "查下 CPU 占用最高的进程"
 sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tools list'
 sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent safety test "rm -rf /"'
 sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent ask "80 端口被谁占了？"'
+sudo -u kyagent bash /opt/kyagent/scripts/start-web.sh --env-file /etc/kyagent/env
 ```
 
 ## 8. Windows 本机测试
@@ -370,6 +425,7 @@ sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.
 - `kyagent safety test "..."`、自然语言意图规则
 - 审计落盘和 `kyagent audit list/show`
 - `kyagent tools list`、`kyagent chat`、`kyagent tui`、`kyagent ask`（含完整 Agent 多轮调度）
+- `kyagent web serve` 和 `scripts/start-web.sh`（安装 `.[web]` 后可用）
 - `kyagent.json` 覆盖、`KYAGENT_*` 环境变量、`KYAGENT_CONFIG` 切换
 
 在 Windows 上**只会得到 mock 输出**的部分：
@@ -392,6 +448,8 @@ $env:KYAGENT_LLM_BACKEND = "mock"
 python -m kyagent tools list
 python -m kyagent safety test "rm -rf /"
 python -m kyagent ask "查下 CPU 占用最高的进程"
+python -m pip install -e '.[web]'
+python -m kyagent web serve --host 127.0.0.1 --port 8000
 
 # 真实 LLM：DeepSeek key + 默认 httpx 后端
 Remove-Item Env:KYAGENT_LLM_BACKEND

@@ -31,6 +31,37 @@ class AskResponse(BaseModel):
     backend: str
 
 
+# ---- /api/approvals -------------------------------------------------------
+
+
+class ApprovalRecordResponse(BaseModel):
+    approval_id: str
+    title: str
+    risk: str
+    summary_lines: list[str]
+    body: Optional[str] = None
+    cmdline: str = ""
+    session_id: Optional[str] = None
+    user: str
+    created_at: float
+    expires_at: float
+    status: str
+    approved: Optional[bool] = None
+    reviewer: str = ""
+    reason: str = ""
+    resolved_at: Optional[float] = None
+
+
+class ApprovalListResponse(BaseModel):
+    count: int
+    approvals: list[ApprovalRecordResponse]
+
+
+class ApprovalActionRequest(BaseModel):
+    reviewer: str = Field("web", min_length=1, max_length=64)
+    reason: str = Field("", max_length=500)
+
+
 # ---- /api/tools -----------------------------------------------------------
 
 

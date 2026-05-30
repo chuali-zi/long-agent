@@ -88,6 +88,9 @@ kyagent chat
 # 5.5 轻量 TUI demo（持续交互 / 工具视图 / 确认 / trace 回放）
 kyagent tui
 
+# 5.6 FastAPI Web 控制台（SSE 流式输出 / 浏览器审核）
+bash scripts/start-web.sh --install-web --mock
+
 # 6. 把审计链路完整打出来
 kyagent audit list
 kyagent audit show <trace-id>
@@ -297,6 +300,25 @@ Agent 主循环里有一条 *并行多工具调度* 链路（`Agent._is_parallel
 
 因此 `benchmarks/baseline.json` 里测出的 ask p50 改善（-34%）**不依赖并行**，全部来自串行路径上的优化（提示重排、工具描述精简、按需缓存等，见 `feature/auto-optimize-2026-05-17` 合入 main 的提交）。基线被冻结作为后续任何 perf 改动的 gate。
 
+## 6.6 Web 控制台
+
+`kyagent web serve` 提供 FastAPI B/S 接入层。页面继续复用 `Agent.on_progress`，不会绕开意图过滤、Guardrail、ExecutionProxy 或 Audit。用于比赛演示时推荐：
+
+```bash
+bash scripts/start-web.sh --install-web --mock
+```
+
+页面区分用户输入、浅色 `thinking_delta`、红色 `tool_call_start/end` 和加粗最终回复。高风险命令通过 SSE 发出 `approval_required`，浏览器调用 `/api/approvals/{approval_id}/approve` 或 `/reject` 后，服务端再推送 `approval_resolved` 并继续或终止 Agent turn。
+
+LoongArch 默认安装不会自动拉 Web extra。需要浏览器控制台时显式执行：
+
+```bash
+sudo bash scripts/install-loongarch.sh --yes --with-web
+sudo -u kyagent bash /opt/kyagent/scripts/start-web.sh --env-file /etc/kyagent/env
+```
+
+`.[web]` 只包含兼容 pydantic v1 的 FastAPI 与标准版 uvicorn；不要安装 `uvicorn[standard]`。
+
 ## 7. 工具清单
 
 **当前共 92 个内置工具，按 10 个域分组**（详情见根 [README §5.5](../../README.md)）。核心代表如下：
@@ -346,7 +368,7 @@ pytest tests -q
 | `test_agent_parallel.py` | 4 | 并行预检 + per-trace 锁 + worker 拒绝 CONFIRM |
 | `test_tools_expansion.py` | 123 | v2 工具扩展（73 个新工具）build_argv + JSON Schema 拒绝路径全静态烟雾 |
 
-**当前本地收集：394 passed / 2 skipped（POSIX 相关）。**
+**当前本地收集：419 passed / 2 skipped（POSIX 相关）。**
 
 ## 9. 把 MCP 服务挂到 Claude Desktop
 
@@ -387,6 +409,7 @@ D:\race\long\
 │   ├── install.sh
 │   ├── install-loongarch.sh  # LoongArch/Kylin 一键部署脚本
 │   ├── setup-sudoers.sh
+│   ├── start-web.sh          # FastAPI Web 控制台一键启动
 │   └── demo.sh
 ├── tests/
 │   ├── test_safety.py        # 30+ 危险样例 + 良性样例

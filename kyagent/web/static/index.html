@@ -3,70 +3,131 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>kyagent — 麒麟安全运维 Agent</title>
+<title>kyagent - 运维 Agent 控制台</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #161a22; --panel2: #1c2230;
-    --fg: #e6e9ef; --muted: #8a93a6; --accent: #4fa3ff;
-    --green: #5dd39e; --yellow: #f6c177; --red: #ff6b6b;
-    --border: #252b38;
-    --code-bg: #0a0d12;
+    --bg: #0c0f13; --panel: #151a20; --panel2: #1d232c; --panel3: #252d38;
+    --fg: #eef2f6; --muted: #92a0af; --line: #303945; --accent: #58a6ff;
+    --user: #74d7a4; --agent: #ffd166; --think: #b8c7d8; --red: #ff5c5c;
+    --red-bg: #351719; --red-line: #7d2429; --green: #57d68d; --yellow: #f6c177;
+    --code: #090c10; --shadow: 0 18px 50px rgba(0,0,0,.34);
   }
   * { box-sizing: border-box; }
-  body { margin:0; font: 14px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-         background: var(--bg); color: var(--fg); }
-  header { padding: 14px 22px; background: var(--panel); border-bottom: 1px solid var(--border);
-           display:flex; align-items:center; gap:18px; }
-  header h1 { font-size: 18px; margin: 0; }
-  header .meta { color: var(--muted); font-size: 12px; }
-  nav button { background: transparent; color: var(--muted); border: 0; padding: 8px 14px;
-               font: inherit; cursor: pointer; border-bottom: 2px solid transparent; }
-  nav button.active { color: var(--fg); border-color: var(--accent); }
-  main { padding: 18px 22px; max-width: 1100px; margin: 0 auto; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-           padding: 14px 16px; margin-bottom: 14px; }
-  .row { display:flex; gap:10px; align-items:flex-start; }
+  body {
+    margin: 0; color: var(--fg); background: radial-gradient(circle at 25% 0, #172232 0, transparent 38%), var(--bg);
+    font: 14px/1.55 "Microsoft YaHei", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 18px;
+    padding: 13px 22px; background: rgba(15,19,25,.94); border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(12px);
+  }
+  h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+  h2, h3, h4 { letter-spacing: 0; }
+  .meta { color: var(--muted); font-size: 12px; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button {
+    background: transparent; color: var(--muted); border: 1px solid transparent; border-radius: 6px;
+    padding: 7px 12px; font: inherit; cursor: pointer;
+  }
+  nav button.active { color: var(--fg); background: var(--panel2); border-color: var(--line); }
+  main { width: min(1280px, calc(100vw - 32px)); margin: 0 auto; padding: 18px 0 28px; }
+  .panel {
+    background: rgba(21,26,32,.94); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+  }
+  .shell { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; align-items: start; }
+  .row { display: flex; gap: 10px; align-items: flex-start; }
   .row > * { flex: 1; }
   textarea, input[type=text] {
-      width:100%; background: var(--panel2); color: var(--fg); border:1px solid var(--border);
-      padding: 8px 10px; border-radius:6px; font: inherit; resize:vertical;
+    width: 100%; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    padding: 9px 10px; border-radius: 6px; font: inherit; resize: vertical;
   }
-  button.primary { background: var(--accent); color:#000; border:0; padding: 8px 16px;
-                   border-radius:6px; font-weight:600; cursor:pointer; }
-  button.ghost   { background: transparent; color: var(--muted); border:1px solid var(--border);
-                   padding: 6px 12px; border-radius:6px; cursor:pointer; }
-  .chat-log { background: var(--panel2); border-radius: 6px; padding: 10px 12px; min-height: 300px;
-              max-height: 60vh; overflow-y: auto; }
-  .msg { margin-bottom: 12px; }
-  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; }
-  .msg.user .who { color: var(--green); }
-  .msg.agent .who { color: var(--accent); }
-  .msg.event { color: var(--muted); font-size: 12px; font-style: italic; }
-  .msg.thinking { color: var(--muted); font-size: 12px; opacity: 0.75; white-space: pre-wrap; }
-  .msg.tool { color: var(--yellow); font-size: 12px; }
-  .msg.error { color: var(--red); }
-  pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow-x:auto;
-        margin: 4px 0; font: 12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
-  table { width:100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align:left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; }
-  .pill { display:inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
-          background: var(--panel2); color: var(--muted); }
+  textarea:focus, input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  button.primary, button.approve, button.reject, button.ghost {
+    border-radius: 6px; font: inherit; font-weight: 700; cursor: pointer; border: 1px solid transparent;
+  }
+  button.primary { background: var(--accent); color: #06111f; padding: 9px 16px; }
+  button.ghost { background: transparent; color: var(--muted); border-color: var(--line); padding: 7px 12px; }
+  button.approve { background: var(--green); color: #06130b; padding: 10px 14px; }
+  button.reject { background: var(--red); color: #1f0506; padding: 10px 14px; }
+  button:disabled { opacity: .55; cursor: wait; }
+  .status-strip {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px;
+  }
+  .status-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .label { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .value { margin-top: 3px; font-weight: 700; word-break: break-word; }
+  .chat-log {
+    min-height: 460px; max-height: 65vh; overflow-y: auto; padding: 14px;
+    background: #10151c; border: 1px solid var(--line); border-radius: 8px;
+  }
+  .msg { margin: 0 0 14px; }
+  .msg .who { margin-bottom: 5px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user {
+    margin-left: auto; max-width: 78%; padding: 11px 13px; border-radius: 8px 8px 2px 8px;
+    background: rgba(87,214,141,.13); border: 1px solid rgba(87,214,141,.35);
+  }
+  .msg.user .who { color: var(--user); }
+  .msg.agent {
+    max-width: 86%; padding: 12px 14px; border-radius: 8px 8px 8px 2px;
+    background: rgba(255,209,102,.11); border: 1px solid rgba(255,209,102,.38);
+  }
+  .msg.agent .body { font-weight: 800; color: #fff3c9; }
+  .msg.agent .who { color: var(--agent); }
+  .msg.thinking {
+    color: var(--think); background: rgba(184,199,216,.08); border-left: 3px solid rgba(184,199,216,.55);
+    padding: 8px 10px; font-size: 12px; opacity: .92;
+  }
+  .msg.event { color: var(--muted); font-size: 12px; }
+  .msg.tool {
+    color: #ffd0d0; background: var(--red-bg); border: 1px solid var(--red-line);
+    border-left: 4px solid var(--red); padding: 9px 10px; border-radius: 6px; font-size: 12px;
+  }
+  .msg.error { color: #ffd7d7; background: var(--red-bg); border: 1px solid var(--red-line); padding: 9px 10px; border-radius: 6px; }
+  .approval-panel {
+    border: 2px solid var(--red); background: linear-gradient(135deg, #4b171a, #231217 70%);
+    border-radius: 8px; padding: 14px; box-shadow: var(--shadow); animation: pulseAlert 1.6s ease-in-out infinite;
+  }
+  .approval-panel.resolved { animation: none; border-color: var(--line); opacity: .78; }
+  .approval-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .approval-title { font-size: 16px; font-weight: 800; }
+  .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .summary-list { margin: 8px 0 0; padding-left: 18px; }
+  @keyframes pulseAlert { 0%, 100% { box-shadow: 0 0 0 rgba(255,92,92,0); } 50% { box-shadow: 0 0 28px rgba(255,92,92,.36); } }
+  pre {
+    background: var(--code); color: #dbe7f4; padding: 10px; border-radius: 6px; overflow-x: auto;
+    margin: 6px 0; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  a { color: var(--accent); }
+  .pill {
+    display: inline-flex; align-items: center; min-height: 20px; padding: 1px 8px; border-radius: 999px;
+    background: var(--panel3); color: var(--muted); font-size: 11px; font-weight: 700;
+  }
   .pill.low { color: var(--green); }
   .pill.medium { color: var(--yellow); }
-  .pill.high { color: var(--red); }
-  .pill.critical { color: var(--red); font-weight: 600; }
+  .pill.high, .pill.critical { color: #ffd3d3; background: #4a191b; }
   .muted { color: var(--muted); }
-  .right { text-align:right; }
   .hide { display: none; }
+  @media (max-width: 880px) {
+    header { flex-wrap: wrap; }
+    nav { width: 100%; margin-left: 0; }
+    .shell, .status-strip { grid-template-columns: 1fr; }
+    .msg.user, .msg.agent { max-width: 100%; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>kyagent</h1>
-  <span class="meta" id="banner">连接中…</span>
-  <nav style="margin-left:auto;">
-    <button data-tab="chat" class="active">对话</button>
+  <h1>kyagent 运维 Agent 控制台</h1>
+  <span class="meta" id="banner">连接中...</span>
+  <nav>
+    <button data-tab="chat" class="active">控制台</button>
     <button data-tab="tools">工具</button>
     <button data-tab="safety">安全</button>
     <button data-tab="audit">审计</button>
@@ -74,42 +135,58 @@
 </header>
 
 <main>
-  <!-- 对话 -->
   <section id="tab-chat">
-    <div class="panel">
-      <div class="chat-log" id="chatLog"></div>
+    <div class="status-strip">
+      <div class="status-card"><div class="label">当前状态</div><div class="value" id="runStatus">空闲</div></div>
+      <div class="status-card"><div class="label">会话</div><div class="value" id="sessionView"></div></div>
+      <div class="status-card"><div class="label">Trace</div><div class="value" id="traceView">-</div></div>
+      <div class="status-card"><div class="label">审核</div><div class="value" id="approvalView">无待处理</div></div>
     </div>
-    <div class="panel row">
-      <textarea id="askInput" rows="3" placeholder="问点什么……例如：列出当前 CPU 占用前 5 的进程"></textarea>
-      <div style="flex:0 0 auto; display:flex; flex-direction:column; gap:6px;">
-        <button class="primary" onclick="sendAsk()">发送（流式）</button>
-        <button class="ghost"   onclick="resetSession()">清空会话</button>
+
+    <div class="shell">
+      <div>
+        <div class="panel">
+          <div class="chat-log" id="chatLog"></div>
+        </div>
+        <div class="panel row">
+          <textarea id="askInput" rows="3" placeholder="描述运维任务"></textarea>
+          <div style="flex:0 0 128px; display:flex; flex-direction:column; gap:8px;">
+            <button class="primary" id="sendBtn" onclick="sendAsk()">发送</button>
+            <button class="ghost" onclick="resetSession()">清空会话</button>
+          </div>
+        </div>
       </div>
+      <aside>
+        <div class="panel">
+          <h3 style="margin:0 0 10px;">人工审核</h3>
+          <div id="approvalDock" class="muted">高风险操作会在这里弹出审批卡片。</div>
+        </div>
+        <div class="panel">
+          <h3 style="margin:0 0 8px;">事件流</h3>
+          <div id="eventMetrics" class="muted">等待事件</div>
+        </div>
+      </aside>
     </div>
   </section>
 
-  <!-- 工具 -->
   <section id="tab-tools" class="hide">
     <div class="panel">
       <div class="row" style="align-items:center;">
         <h3 style="margin:0;">已注册工具 <span class="muted" id="toolCount"></span></h3>
-        <input type="text" id="toolFilter" placeholder="按名称过滤…" oninput="renderTools()">
+        <input type="text" id="toolFilter" placeholder="按名称过滤..." oninput="renderTools()">
       </div>
     </div>
     <div class="panel">
       <table id="toolTable">
-        <thead><tr>
-          <th>name</th><th>risk</th><th>root</th><th>read-only</th><th>description</th>
-        </tr></thead>
+        <thead><tr><th>name</th><th>risk</th><th>root</th><th>read-only</th><th>description</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
   </section>
 
-  <!-- 安全 -->
   <section id="tab-safety" class="hide">
     <div class="panel">
-      <h3 style="margin-top:0;">护栏调试 — 输入意图 / shell 命令</h3>
+      <h3 style="margin-top:0;">护栏调试 - 输入意图 / shell 命令</h3>
       <textarea id="safetyInput" rows="3" placeholder="如：rm -rf /etc 或 帮我清理 /var/log/..."></textarea>
       <div style="margin-top:8px;">
         <button class="primary" onclick="checkSafety()">校验</button>
@@ -119,7 +196,6 @@
     <div class="panel" id="safetyResult"></div>
   </section>
 
-  <!-- 审计 -->
   <section id="tab-audit" class="hide">
     <div class="panel row" style="align-items:center;">
       <h3 style="margin:0;">最近 trace</h3>
@@ -141,8 +217,9 @@ const SESSION_ID = (() => {
   if (!s) { s = 'web-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('ky_sid', s); }
   return s;
 })();
+const state = { busy: false, pendingApprovals: new Map(), metrics: {thinking: 0, tools: 0, approvals: 0} };
+document.getElementById('sessionView').textContent = SESSION_ID;
 
-// ---- 标签切换 ------------------------------------------------------------
 document.querySelectorAll('header nav button').forEach(b => {
   b.onclick = () => {
     document.querySelectorAll('header nav button').forEach(x => x.classList.remove('active'));
@@ -155,98 +232,258 @@ document.querySelectorAll('header nav button').forEach(b => {
   };
 });
 
-// ---- 健康检查 ------------------------------------------------------------
 fetch('/api/health').then(r => r.json()).then(h => {
-  document.getElementById('banner').textContent =
-    `v${h.version} · backend=${h.backend} · tools=${h.tools}`;
+  document.getElementById('banner').textContent = `v${h.version} · backend=${h.backend} · tools=${h.tools}`;
 }).catch(e => {
   document.getElementById('banner').textContent = '连接失败：' + e;
 });
 
-// ---- 对话（SSE 流式） ----------------------------------------------------
+function setStatus(text) {
+  document.getElementById('runStatus').textContent = text;
+}
+function updateApprovalStatus() {
+  const n = state.pendingApprovals.size;
+  document.getElementById('approvalView').textContent = n ? `${n} 个待审核` : '无待处理';
+}
+function updateMetrics() {
+  document.getElementById('eventMetrics').textContent =
+    `thinking ${state.metrics.thinking} · tools ${state.metrics.tools} · approvals ${state.metrics.approvals}`;
+}
+function esc(s) {
+  return (s ?? '').toString().replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+}
+function approvalDomId(id) {
+  return 'approval-' + encodeURIComponent(id).replace(/%/g, '_');
+}
 function appendMsg(cls, who, text) {
   const log = document.getElementById('chatLog');
   const div = document.createElement('div');
   div.className = 'msg ' + cls;
-  div.innerHTML = `<div class="who">${who}</div><div class="body"></div>`;
-  div.querySelector('.body').textContent = text;
+  div.innerHTML = who ? `<div class="who">${esc(who)}</div><div class="body"></div>` : '<div class="body"></div>';
+  div.querySelector('.body').textContent = text || '';
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
   return div;
 }
+function summarize(value) {
+  if (value == null || value === '') return '(空)';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > 260 ? text.slice(0, 260) + '...' : text;
+}
+function toolName(p) {
+  return p.tool || p.name || p.tool_name || 'unknown_tool';
+}
+function toolArgv(p) {
+  return p.argv ?? p.args ?? p.arguments ?? {};
+}
+function handleProgress(p) {
+  if (p.kind === 'thinking_delta') {
+    state.metrics.thinking += 1;
+    updateMetrics();
+    currentThinking += p.delta || '';
+    currentThinkingDiv.querySelector('.body').textContent = currentThinking;
+    setStatus('思考中');
+  } else if (p.kind === 'tool_call_start') {
+    state.metrics.tools += 1;
+    updateMetrics();
+    setStatus(`调用工具：${toolName(p)}`);
+    appendMsg('tool', 'tool_call_start', `${toolName(p)}\nargv: ${summarize(toolArgv(p))}`);
+  } else if (p.kind === 'tool_call_end') {
+    const ok = p.meta?.ok ?? p.ok;
+    setStatus(`工具结束：${toolName(p)}`);
+    appendMsg('tool', 'tool_call_end', `${ok === false ? 'FAILED' : 'OK'} ${toolName(p)}\nresult: ${summarize(p.text ?? p.result ?? p.output ?? p.meta)}`);
+  } else if (p.kind === 'approval_required') {
+    renderApproval(p);
+  } else if (p.kind === 'approval_resolved') {
+    resolveApproval(p);
+  } else if (p.kind === 'error') {
+    setStatus('错误');
+    appendMsg('error', 'error', p.text || p.message || '未知错误');
+  } else {
+    setStatus(p.kind || '运行中');
+    appendMsg('event', '', `· ${p.kind || 'progress'}`);
+  }
+}
+
+let currentThinking = '';
+let currentThinkingDiv = null;
 
 async function sendAsk() {
+  if (state.busy) return;
   const input = document.getElementById('askInput');
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  appendMsg('user', '你', text);
-  const thinkingDiv = appendMsg('thinking', 'agent 思考', '');
-  const statusDiv   = appendMsg('event', '', '⏳ 调度中…');
+  state.busy = true;
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('traceView').textContent = '-';
+  appendMsg('user', 'operator', text);
+  currentThinking = '';
+  currentThinkingDiv = appendMsg('thinking', 'thinking_delta', '');
+  const statusDiv = appendMsg('event', '', '调度中...');
+  setStatus('调度中');
 
-  // fetch + ReadableStream 解析 SSE（EventSource 不支持 POST）
-  const resp = await fetch('/api/ask/stream', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text, user: 'web', session_id: SESSION_ID}),
-  });
-  if (!resp.ok) {
-    statusDiv.textContent = `❌ HTTP ${resp.status}`;
-    return;
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let thinking = '';
-  while (true) {
-    const {done, value} = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, {stream: true});
-    const frames = buf.split('\n\n');
-    buf = frames.pop();
-    for (const frame of frames) {
-      const lines = frame.split('\n');
-      let event = 'message', data = '';
-      for (const ln of lines) {
-        if (ln.startsWith('event: ')) event = ln.slice(7);
-        else if (ln.startsWith('data: ')) data += ln.slice(6);
-      }
-      if (!data) continue;
-      let p; try { p = JSON.parse(data); } catch { continue; }
-      if (event === 'progress') {
-        if (p.kind === 'thinking_delta') {
-          thinking += p.delta;
-          thinkingDiv.querySelector('.body').textContent = thinking;
-        } else if (p.kind === 'tool_call_start') {
-          appendMsg('tool', 'tool', `⚙ ${p.tool}  argv=${JSON.stringify(p.argv)}`);
-        } else if (p.kind === 'tool_call_end') {
-          const ok = p.meta?.ok ? '✓' : '✗';
-          appendMsg('tool', 'tool', `${ok} ${p.tool} — ${(p.text || '').slice(0, 200)}`);
-        } else if (p.kind === 'error') {
-          appendMsg('error', 'error', p.text);
-        } else {
-          statusDiv.textContent = `· ${p.kind}`;
-        }
-      } else if (event === 'final') {
-        statusDiv.textContent = `✓ trace=${p.trace_id?.slice(0,12)} iter=${p.tool_iterations}`;
-        appendMsg('agent', 'kyagent', p.text || '(空)');
-        if (p.denied) appendMsg('error', '', '⚠ 被安全护栏拦截');
-      }
+  try {
+    const resp = await fetch('/api/ask/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, user: 'web', session_id: SESSION_ID}),
+    });
+    if (!resp.ok) {
+      statusDiv.textContent = `HTTP ${resp.status}`;
+      setStatus('请求失败');
+      return;
     }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const frames = buf.split('\n\n');
+      buf = frames.pop();
+      for (const frame of frames) handleSseFrame(frame);
+    }
+    if (buf.trim()) handleSseFrame(buf);
+  } catch (e) {
+    appendMsg('error', 'error', e.message || e);
+    setStatus('连接异常');
+  } finally {
+    state.busy = false;
+    document.getElementById('sendBtn').disabled = false;
   }
+}
+
+function handleSseFrame(frame) {
+  const lines = frame.split('\n');
+  let event = 'message', data = '';
+  for (const ln of lines) {
+    if (ln.startsWith('event:')) event = ln.slice(6).trim();
+    else if (ln.startsWith('data:')) data += ln.slice(5).trimStart();
+  }
+  if (!data) return;
+  let p; try { p = JSON.parse(data); } catch { return; }
+  if (event === 'progress' || event === 'message') {
+    handleProgress(p);
+  } else if (event === 'approval_required') {
+    renderApproval(p);
+  } else if (event === 'approval_resolved') {
+    resolveApproval(p);
+  } else if (event === 'final') {
+    const trace = p.trace_id ? String(p.trace_id) : '-';
+    document.getElementById('traceView').textContent = trace === '-' ? '-' : trace.slice(0, 12);
+    setStatus(p.denied ? '已被护栏拦截' : '完成');
+    appendMsg('agent', 'agent final', p.text || '(空)');
+    if (p.denied) appendMsg('error', 'safety', '被安全护栏拦截');
+  } else {
+    handleProgress({kind: event, ...p});
+  }
+}
+
+function renderApproval(p) {
+  const id = p.id || p.approval_id || p.request_id;
+  if (!id) return;
+  state.pendingApprovals.set(id, p);
+  state.metrics.approvals += 1;
+  updateMetrics();
+  updateApprovalStatus();
+  setStatus('等待人工审核');
+  appendMsg('error', 'approval_required', p.title || '需要人工审核');
+
+  const dock = document.getElementById('approvalDock');
+  if (dock.classList.contains('muted')) { dock.classList.remove('muted'); dock.innerHTML = ''; }
+  const old = document.getElementById(approvalDomId(id));
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.className = 'approval-panel';
+  div.id = approvalDomId(id);
+  const risk = p.risk || 'unknown';
+  const body = p.body || p.cmd || p.command || p.text || '';
+  const summary = Array.isArray(p.summary_lines) ? p.summary_lines : [];
+  div.innerHTML = `
+    <div class="approval-head">
+      <div>
+        <div class="label">approval_required</div>
+        <div class="approval-title">${esc(p.title || '高风险操作需要审核')}</div>
+      </div>
+      <span class="pill ${esc(risk)}">${esc(risk)}</span>
+    </div>
+    <div class="muted">id: <code>${esc(id)}</code></div>
+    <pre>${esc(body || '(无命令/正文)')}</pre>
+    ${summary.length ? `<ul class="summary-list">${summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="muted">按当前风险级别进入人工审核</div>'}
+    <div class="approval-actions">
+      <button class="approve" type="button" data-decision="approve">批准</button>
+      <button class="reject" type="button" data-decision="reject">拒绝</button>
+    </div>`;
+  div.querySelectorAll('button[data-decision]').forEach(btn => {
+    btn.onclick = () => decideApproval(id, btn.dataset.decision);
+  });
+  dock.prepend(div);
+}
+
+async function decideApproval(id, decision) {
+  const card = document.getElementById(approvalDomId(id));
+  if (!card) return;
+  card.querySelectorAll('button').forEach(b => b.disabled = true);
+  setStatus(decision === 'approve' ? '正在批准审核' : '正在拒绝审核');
+  try {
+    const resp = await fetch(`/api/approvals/${encodeURIComponent(id)}/${decision}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({reviewer: 'web', reason: 'browser decision'}),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    resolveApproval(await resp.json());
+  } catch (e) {
+    appendMsg('error', 'approval', `${decision} 失败：${e.message || e}`);
+    card.querySelectorAll('button').forEach(b => b.disabled = false);
+    setStatus('审核操作失败');
+  }
+}
+
+function approveApproval(id) {
+  return decideApproval(id, 'approve');
+}
+
+function rejectApproval(id) {
+  return decideApproval(id, 'reject');
+}
+
+function resolveApproval(p) {
+  const id = p.id || p.approval_id || p.request_id;
+  if (!id) return;
+  const card = document.getElementById(approvalDomId(id));
+  if (!state.pendingApprovals.has(id) && card?.classList.contains('resolved')) return;
+  state.pendingApprovals.delete(id);
+  updateApprovalStatus();
+  if (card) {
+    card.classList.add('resolved');
+    card.querySelector('.approval-actions').innerHTML = `<span class="pill">${esc(p.decision || p.status || 'resolved')}</span>`;
+  }
+  appendMsg('event', '', `approval_resolved ${id}: ${p.decision || p.status || 'resolved'}`);
+  setStatus(state.pendingApprovals.size ? '等待人工审核' : '运行中');
 }
 
 async function resetSession() {
   await fetch(`/api/sessions/${SESSION_ID}/reset`, {method:'POST'});
   document.getElementById('chatLog').innerHTML = '';
+  document.getElementById('approvalDock').className = 'muted';
+  document.getElementById('approvalDock').textContent = '高风险操作会在这里弹出审批卡片。';
+  state.pendingApprovals.clear();
+  state.metrics = {thinking: 0, tools: 0, approvals: 0};
+  updateApprovalStatus();
+  updateMetrics();
+  setStatus('空闲');
 }
 
-// ---- 工具清单 ------------------------------------------------------------
+updateMetrics();
+
 let _allTools = [];
 async function loadTools() {
   const r = await fetch('/api/tools'); const j = await r.json();
-  _allTools = j.tools;
-  document.getElementById('toolCount').textContent = `(${j.count})`;
+  _allTools = j.tools || [];
+  document.getElementById('toolCount').textContent = `(${j.count ?? _allTools.length})`;
   renderTools();
 }
 function renderTools() {
@@ -254,19 +491,19 @@ function renderTools() {
   const tbody = document.querySelector('#toolTable tbody');
   tbody.innerHTML = '';
   for (const t of _allTools) {
-    if (f && !t.name.toLowerCase().includes(f) && !t.description.toLowerCase().includes(f)) continue;
+    const hay = `${t.name || ''} ${t.description || ''}`.toLowerCase();
+    if (f && !hay.includes(f)) continue;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><code>${t.name}</code></td>
-      <td><span class="pill ${t.risk}">${t.risk}</span></td>
+      <td><code>${esc(t.name)}</code></td>
+      <td><span class="pill ${esc(t.risk)}">${esc(t.risk)}</span></td>
       <td>${t.requires_root ? 'yes' : 'no'}</td>
       <td>${t.read_only ? 'yes' : 'no'}</td>
-      <td>${t.description.split('\n')[0]}</td>`;
+      <td>${esc((t.description || '').split('\n')[0])}</td>`;
     tbody.appendChild(tr);
   }
 }
 
-// ---- 安全护栏 ------------------------------------------------------------
 async function checkSafety() {
   const text = document.getElementById('safetyInput').value.trim();
   if (!text) return;
@@ -276,40 +513,38 @@ async function checkSafety() {
   });
   const j = await r.json();
   const box = document.getElementById('safetyResult');
-  const blockHtml = (b) => b ? `
-    <h4 style="margin-bottom:6px;">${b.layer} 层
-      <span class="pill ${b.risk}">${b.risk}</span>
-      <span class="pill ${b.decision === 'deny' ? 'critical' : b.decision === 'confirm' ? 'medium' : 'low'}">${b.decision}</span>
+  const blockHtml = b => b ? `
+    <h4 style="margin-bottom:6px;">${esc(b.layer)} 层
+      <span class="pill ${esc(b.risk)}">${esc(b.risk)}</span>
+      <span class="pill ${b.decision === 'deny' ? 'critical' : b.decision === 'confirm' ? 'medium' : 'low'}">${esc(b.decision)}</span>
     </h4>
-    <ul>${b.hits.map(h => `<li><code>${h.rule_id}</code> [${h.category || ''}] ${h.risk}: ${escape(h.matched)}</li>`).join('') || '<li class="muted">(无命中)</li>'}</ul>
-    <pre>${b.rationale.join('\n') || '(无说明)'}</pre>` : '';
+    <ul>${(b.hits || []).map(h => `<li><code>${esc(h.rule_id)}</code> [${esc(h.category || '')}] ${esc(h.risk)}: ${esc(h.matched)}</li>`).join('') || '<li class="muted">(无命中)</li>'}</ul>
+    <pre>${esc((b.rationale || []).join('\n') || '(无说明)')}</pre>` : '';
   box.innerHTML = `
     ${blockHtml(j.intent)}
     ${blockHtml(j.argv)}
-    ${j.final_decision ? `<h4>综合 <span class="pill ${j.final_risk}">${j.final_risk}</span> <span class="pill">${j.final_decision}</span></h4>` : ''}
+    ${j.final_decision ? `<h4>综合 <span class="pill ${esc(j.final_risk)}">${esc(j.final_risk)}</span> <span class="pill">${esc(j.final_decision)}</span></h4>` : ''}
   `;
 }
-function escape(s) { return (s ?? '').toString().replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
 
-// ---- 审计 ----------------------------------------------------------------
 async function loadTraces() {
   const r = await fetch('/api/audit/traces?limit=20'); const j = await r.json();
   const tbody = document.querySelector('#traceTable tbody');
   tbody.innerHTML = '';
-  for (const t of j.traces) {
+  for (const t of (j.traces || [])) {
     const tr = document.createElement('tr');
     const ts = new Date(t.started_at * 1000).toLocaleString();
-    tr.innerHTML = `<td><a href="#" data-id="${t.trace_id}">${t.trace_id}</a></td><td>${t.user}</td><td>${ts}</td><td>${t.channel}</td>`;
-    tr.querySelector('a').onclick = (e) => { e.preventDefault(); showTrace(t.trace_id); };
+    tr.innerHTML = `<td><a href="#" data-id="${esc(t.trace_id)}">${esc(t.trace_id)}</a></td><td>${esc(t.user)}</td><td>${esc(ts)}</td><td>${esc(t.channel)}</td>`;
+    tr.querySelector('a').onclick = e => { e.preventDefault(); showTrace(t.trace_id); };
     tbody.appendChild(tr);
   }
 }
 async function showTrace(id) {
-  const r = await fetch(`/api/audit/traces/${id}`); const j = await r.json();
+  const r = await fetch(`/api/audit/traces/${encodeURIComponent(id)}`); const j = await r.json();
   const box = document.getElementById('traceDetail');
-  box.innerHTML = `<h3>trace ${id}</h3>` + j.events.map(ev => `
-    <details><summary>#${String(ev.seq).padStart(2,'0')} ${ev.kind}</summary>
-    <pre>${escape(JSON.stringify(ev.payload, null, 2))}</pre></details>`).join('');
+  box.innerHTML = `<h3>trace ${esc(id)}</h3>` + (j.events || []).map(ev => `
+    <details><summary>#${String(ev.seq).padStart(2,'0')} ${esc(ev.kind)}</summary>
+    <pre>${esc(JSON.stringify(ev.payload, null, 2))}</pre></details>`).join('');
 }
 </script>
 </body>

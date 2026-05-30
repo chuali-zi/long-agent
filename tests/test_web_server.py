@@ -10,7 +10,10 @@
 """
 from __future__ import annotations
 
+import json
 import importlib.util
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -103,3 +106,124 @@ def test_index_served(client):
     assert r.status_code == 200
     # 至少包含核心字段
     assert "kyagent" in r.text.lower()
+
+
+def _sse_events(response):
+    event = "message"
+    data: list[str] = []
+    for line in response.iter_lines():
+        if isinstance(line, bytes):
+            line = line.decode("utf-8")
+        if line == "":
+            if data:
+                yield event, json.loads("".join(data))
+            event = "message"
+            data = []
+            continue
+        if line.startswith("event: "):
+            event = line[7:]
+        elif line.startswith("data: "):
+            data.append(line[6:])
+
+
+def test_stream_confirmation_roundtrip_allows_browser_decision(client, monkeypatch):
+    """Web stream must surface high-risk confirm and wait for approve/reject."""
+    from kyagent.agent.core import Agent, AgentRunResult
+    from kyagent.audit.trace import Trace
+    from kyagent.confirm import ConfirmRequest
+
+    def fake_ask(self, text: str, user: str = "anonymous"):
+        approved = self.confirm(
+            ConfirmRequest(
+                title="tool svc_restart",
+                risk="high",
+                summary_lines=["svc-restart-high (high): restart service"],
+                body="systemctl restart sshd",
+            )
+        )
+        return AgentRunResult(
+            trace=Trace(user=user),
+            final_text="approved" if approved else "denied",
+            tool_iterations=1,
+            denied=not approved,
+            notes=[],
+        )
+
+    monkeypatch.setattr(Agent, "ask", fake_ask)
+
+    events = []
+
+    def consume_stream():
+        with client.stream(
+            "POST",
+            "/api/ask/stream",
+            json={"text": "restart sshd", "user": "tester", "session_id": "approval-test"},
+        ) as resp:
+            assert resp.status_code == 200
+            events.extend(_sse_events(resp))
+
+    t = threading.Thread(target=consume_stream, name="stream-consumer")
+    t.start()
+
+    approval = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        pending = client.get("/api/approvals", params={"status": "pending"})
+        assert pending.status_code == 200
+        rows = pending.json()["approvals"]
+        if rows:
+            approval = rows[0]
+            break
+        time.sleep(0.02)
+
+    assert approval is not None
+    assert approval["risk"] == "high"
+    assert approval["body"] == "systemctl restart sshd"
+    assert approval["status"] == "pending"
+
+    approve = client.post(
+        f"/api/approvals/{approval['approval_id']}/approve",
+        json={"reviewer": "tester", "reason": "demo approval"},
+    )
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "approved"
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+    approval_event = None
+    resolved = None
+    final = None
+    for event, payload in events:
+        if event == "approval_required":
+            approval_event = payload
+        if event == "approval_resolved":
+            resolved = payload
+        if event == "final":
+            final = payload
+
+    assert approval_event is not None
+    assert approval_event["approval_id"] == approval["approval_id"]
+    assert resolved is not None
+    assert resolved["status"] == "approved"
+    assert final is not None
+    assert final["text"] == "approved"
+
+
+def test_approvals_list_endpoint_exists(client):
+    r = client.get("/api/approvals")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body.keys()) == {"count", "approvals"}
+    assert isinstance(body["approvals"], list)
+
+
+def test_static_index_exposes_live_shell_review_ui():
+    html = (Path(__file__).parent.parent / "kyagent" / "web" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "approval_required" in html
+    assert "approval_resolved" in html
+    assert "approveApproval" in html
+    assert "rejectApproval" in html
+    assert ".msg.tool" in html and "var(--red)" in html
+    assert ".msg.thinking" in html and "var(--think)" in html

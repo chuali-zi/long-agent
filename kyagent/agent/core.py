@@ -89,6 +89,8 @@ class Agent:
         self.on_user_choice: UserChoiceFn = on_user_choice or auto_cancel_choice
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
+        self._run_lock = threading.RLock()
+        self._active_run_thread_id: int | None = None
         # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
         # 在 Windows mock 后端这一开销会盖过并行带来的收益。
         self._tool_pool: ThreadPoolExecutor | None = None
@@ -132,6 +134,15 @@ class Agent:
     # ---- 主入口 --------------------------------------------------------
 
     def ask(self, user_input: str, user: str = "anonymous") -> AgentRunResult:
+        with self._run_lock:
+            previous_thread_id = self._active_run_thread_id
+            self._active_run_thread_id = threading.get_ident()
+            try:
+                return self._ask_impl(user_input, user=user)
+            finally:
+                self._active_run_thread_id = previous_thread_id
+
+    def _ask_impl(self, user_input: str, user: str = "anonymous") -> AgentRunResult:
         trace = Trace(user=user)
         self.audit.open(trace)
         trace.metadata.update({"backend": self.llm.name})
@@ -411,12 +422,12 @@ class Agent:
             )
 
         if verdict.decision is Decision.CONFIRM:
-            # 兜底：confirm() 必然在主线程执行。_is_parallel_safe 已经在
-            # 主线程拦掉这条路径，这里防御非确定性 reviewer 让 worker 线程
-            # 意外拿到 CONFIRM 的极端情况——直接按 deny 处理，绝不让 stdin
-            # 被多个 worker 抢，确保审计链上"谁授权了什么"不会错位。
-            if threading.current_thread() is not threading.main_thread():
-                notes.append(f"非主线程下 CONFIRM 默认拒绝 {tu.name}")
+            # 兜底：confirm() 只能在当前 Agent.ask turn 的拥有线程执行。
+            # TUI/CLI 通常是 MainThread；Web/FastAPI 会把 ask 放进 worker
+            # 线程。并行工具池线程即使意外拿到 CONFIRM 也必须拒绝，
+            # 防止多个 tool worker 争抢同一个交互通道。
+            if threading.get_ident() != self._active_run_thread_id:
+                notes.append(f"非主线程/非运行线程下 CONFIRM 默认拒绝 {tu.name}")
                 self.audit.event(trace, EventKind.ERROR,
                                  {"reason": "confirm_in_worker_denied", "tool": tu.name})
                 return ToolResultBlock(

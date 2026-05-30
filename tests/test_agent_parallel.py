@@ -178,3 +178,38 @@ def test_handle_tool_use_denies_confirm_off_main_thread(tmp_path):
 
     error_events = [e for e in trace.events if e.kind is EventKind.ERROR]
     assert any(e.payload.get("reason") == "confirm_in_worker_denied" for e in error_events)
+
+
+def test_agent_run_thread_may_handle_confirm_when_not_main_thread(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Web runs Agent.ask in a worker thread; that owning run thread may confirm.
+
+    The guard still has to reject confirm attempts from parallel tool workers,
+    but the thread that is synchronously executing the turn is the right place
+    for Web's blocking approval callback.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    executor = RecordingExecutor(supports_parallel_tool_execution=True)
+    confirm_threads: list[str] = []
+
+    def approve_confirm(req):  # noqa: ANN001, ARG001
+        confirm_threads.append(threading.current_thread().name)
+        return True
+
+    agent = _agent(
+        tmp_path,
+        ScriptedBackend([("svc_reload", {"unit": "nginx"})]),
+        executor,
+        confirm=approve_confirm,
+    )
+    monkeypatch.setattr(core.sys, "platform", "linux")
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="web-run") as pool:
+        result = pool.submit(agent.ask, "reload nginx").result()
+
+    assert not result.denied
+    assert confirm_threads and confirm_threads[0].startswith("web-run")
+    assert executor.thread_names and executor.thread_names[0].startswith("web-run")
