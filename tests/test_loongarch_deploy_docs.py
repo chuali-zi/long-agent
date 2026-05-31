@@ -140,12 +140,13 @@ def test_backend_docs_list_httpx_variants() -> None:
 
 def test_tui_demo_documented_for_loongarch() -> None:
     readme = read_repo("README.md")
+    project_docs = read_repo("docs/kyagent/README.md")
     deployment = read_repo("docs/deployment/loongarch.md")
 
     assert "kyagent tui" in readme
-    assert "prompt_toolkit + rich" in readme
-    assert "/tools" in readme
-    assert "/audit" in readme
+    assert "prompt_toolkit + rich" in project_docs
+    assert "/tools" in project_docs
+    assert "/audit" in project_docs
     assert "kyagent tui" in deployment
     assert "prompt_toolkit + rich" in deployment
     assert "tree-sitter" in deployment
@@ -154,6 +155,7 @@ def test_tui_demo_documented_for_loongarch() -> None:
 def test_web_start_script_and_docs_are_present() -> None:
     script = read_repo("scripts/start-web.sh")
     readme = read_repo("README.md")
+    web_docs = read_repo("docs/deployment/web.md")
     deployment = read_repo("docs/deployment/loongarch.md")
 
     for token in (
@@ -167,13 +169,19 @@ def test_web_start_script_and_docs_are_present() -> None:
         assert token in script
 
     for phrase in (
+        "bash scripts/kyagent.sh web --mock",
+        "docs/deployment/web.md",
+    ):
+        assert phrase in readme
+
+    for phrase in (
         "bash scripts/start-web.sh --install-web --mock",
         "approval_required",
         "approval_resolved",
         "POST /api/approvals/{approval_id}/approve",
         "POST /api/approvals/{approval_id}/reject",
     ):
-        assert phrase in readme
+        assert phrase in web_docs
 
     assert "`--with-web`" in deployment
     assert "FastAPI" in deployment

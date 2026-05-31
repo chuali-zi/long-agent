@@ -38,7 +38,7 @@
 | 可选 SDK | `anthropic==0.39.0` | 不作为默认依赖；SDK 依赖 `jiter`，流式接口还会触碰相关路径。 |
 | 可选 SDK | `mcp>=1.0` | 不作为默认依赖；可能引入 pydantic v2 / `pydantic-core`。本仓库已有自研 MCP stdio server。 |
 | 系统命令 | `ps`、`lsof`、`ss`、`ping`、`journalctl`、`dmesg`、`systemctl`、`df`、`du`、`ls`、`find`、`rpm/dpkg/dnf/yum/apt` | 都是 Linux 发行版包；部署脚本会安装或检查核心命令。 |
-| 权限 | `sudo` + `/etc/sudoers.d/kyagent` | `setup-sudoers.sh` 先临时校验再安装，失败回滚。 |
+| 权限 | `sudo` + `/etc/sudoers.d/kyagent` | `setup-sudoers.sh` 固定 `LC_ALL=C` 检查版本，先临时校验再安装，失败回滚。 |
 | 审计 | SQLite + JSONL | 默认开发路径写 `./var`；生产环境写 `/var/lib/kyagent` 和 `/var/log/kyagent`。 |
 
 ## 4. 一键部署
@@ -156,7 +156,7 @@ PY
 sudo bash scripts/setup-sudoers.sh
 ```
 
-动态参数 sudoers 规则使用锚定正则，要求目标机安装 `sudo >= 1.9.10`。安装脚本会通过 `visudo -cf` 校验模板；版本过旧时不会覆盖现有 sudoers 配置。
+动态参数 sudoers 规则使用锚定正则，要求目标机安装 `sudo >= 1.9.10`。安装脚本会通过 `visudo -cf` 校验模板；版本过旧时不会覆盖现有 sudoers 配置。权限脚本的完整执行内容、验证和排障见 [最小权限部署](permissions.md)。
 
 ## 7. 验收命令
 
@@ -187,6 +187,8 @@ sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.
 该入口使用 `prompt_toolkit + rich`，不引入 Textual 或 tree-sitter。内部命令包括 `/tools`、`/audit`、`/reset`、`/exit`，确认面板仍复用 `ConfirmRequest`，默认拒绝高风险操作。v2 流式 TUI 的 LLM 流式输出走 `httpx.stream` + `iter_lines`（纯 Python，零 Rust），与 LoongArch 默认零 Rust 路径一致。
 
 ### Web 控制台
+
+Web 控制台与安装过程解耦。下面保留 LoongArch 生产路径；通用启动参数和浏览器审核接口见 [Web 控制台部署](web.md)。
 
 需要浏览器端演示时，安装阶段显式打开可选 extra：
 

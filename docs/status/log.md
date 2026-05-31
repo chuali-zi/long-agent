@@ -1,5 +1,11 @@
 # 工作日志
 
+## 2026-05-31
+
+- 新增 `scripts/kyagent.sh` 统一入口，抽象 `install / permissions / chat / tui / web / tools` 常用操作；安装与 Web 启动保持解耦。
+- 修复 `setup-sudoers.sh` 在本地化 sudo 输出下把版本误判为 `unknown` 的问题：版本检查固定使用 `LC_ALL=C sudo -V`，无法识别时保留原始首行。
+- 将根 `README.md` 收缩为上层导航，并新增 `docs/deployment/permissions.md` 与 `docs/deployment/web.md` 承载详细操作。
+
 ## 2026-05-29 10:17:06 +08:00
 
 - 按用户要求对根目录文档做整体整理：根目录保留 `README.md` 和必要的 agent 指令文件，详细说明、LoongArch 审查、状态与日志迁入 `docs/`。

@@ -1,8 +1,10 @@
+import subprocess
 from pathlib import Path
 
 
 SUDOERS = Path(__file__).parents[1] / "configs" / "sudoers.kyagent"
 SETUP_SUDOERS = Path(__file__).parents[1] / "scripts" / "setup-sudoers.sh"
+ROOT = Path(__file__).parents[1]
 
 
 def _sudoers() -> str:
@@ -80,9 +82,24 @@ def test_custom_runtime_account_rewrites_self_audit_target() -> None:
 
 def test_setup_rejects_sudo_without_regex_support() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
-    assert "sudo -V" in script
+    assert "LC_ALL=C sudo -V" in script
     assert "sort -V -C" in script
     assert "1.9.10" in script
+
+
+def test_setup_parses_sudo_version_with_c_locale() -> None:
+    result = subprocess.run(
+        ["bash", "tests/fixtures/sudo_version_locale.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "1.9.13p3"
 
 
 def test_setup_validates_custom_runtime_account_before_sed() -> None:

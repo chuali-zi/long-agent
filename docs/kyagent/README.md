@@ -70,6 +70,9 @@ kyagent 是部署在麒麟操作系统上的智能运维 Agent，把"自然语�
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
+# 也可以使用统一入口
+bash scripts/kyagent.sh install
+
 # 2. 看看 Agent 能调哪些工具
 kyagent tools list
 
@@ -164,9 +167,11 @@ kyagent ask "..."
 ### 在 Kylin / Linux 上启用最小权限代理
 
 ```bash
-sudo bash scripts/setup-sudoers.sh   # 建 kyagent 系统账户 + sudoers 白名单
+sudo bash scripts/kyagent.sh permissions  # 建 kyagent 系统账户 + sudoers 白名单
 sudo -u kyagent kyagent chat         # 用受限账户跑
 ```
+
+详细执行内容和故障排查见 [最小权限部署](../deployment/permissions.md)。
 
 ## 4. 安全护栏怎么工作（核心）
 
@@ -305,7 +310,7 @@ Agent 主循环里有一条 *并行多工具调度* 链路（`Agent._is_parallel
 `kyagent web serve` 提供 FastAPI B/S 接入层。页面继续复用 `Agent.on_progress`，不会绕开意图过滤、Guardrail、ExecutionProxy 或 Audit。用于比赛演示时推荐：
 
 ```bash
-bash scripts/start-web.sh --install-web --mock
+bash scripts/kyagent.sh web --install-web --mock
 ```
 
 页面区分用户输入、浅色 `thinking_delta`、红色 `tool_call_start/end` 和加粗最终回复。高风险命令通过 SSE 发出 `approval_required`，浏览器调用 `/api/approvals/{approval_id}/approve` 或 `/reject` 后，服务端再推送 `approval_resolved` 并继续或终止 Agent turn。
@@ -319,9 +324,11 @@ sudo -u kyagent bash /opt/kyagent/scripts/start-web.sh --env-file /etc/kyagent/e
 
 `.[web]` 只包含兼容 pydantic v1 的 FastAPI 与标准版 uvicorn；不要安装 `uvicorn[standard]`。
 
+通用 Web 参数和浏览器审核接口见 [Web 控制台部署](../deployment/web.md)。
+
 ## 7. 工具清单
 
-**当前共 92 个内置工具，按 10 个域分组**（详情见根 [README §5.5](../../README.md)）。核心代表如下：
+**当前共 92 个内置工具，按 10 个域分组**。核心代表如下：
 
 | 工具 | risk | root | 用途 |
 |---|---|---|---|

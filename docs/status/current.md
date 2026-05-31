@@ -62,7 +62,7 @@ docs/
 
 ## 5. 本轮文档整理结果
 
-- 根 `README.md` 已重写为使用手册入口：部署、脚本、LLM key、启动、使用、CLI、配置和验收命令都在同一个入口里。
+- 根 `README.md` 已收缩为上层入口：统一脚本、最小权限、Chat/TUI/Web 启动和文档导航；复杂参数下沉到 `docs/deployment/`。
 - 根目录长文档已迁移：
   - `docs/kyagent/README.md`
   - `docs/deployment/loongarch.md`
