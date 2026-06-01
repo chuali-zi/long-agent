@@ -4,8 +4,10 @@ from __future__ import annotations
 import pytest
 
 from kyagent.mcp.tools.base import ToolError
+from kyagent.mcp.tools.filesystem import DfTool, DuTool, FindTool, LsTool
 from kyagent.mcp.tools.logs import DmesgTool, JournalctlTool
 from kyagent.mcp.tools.network import NetLinkStatsTool, PingTool
+from kyagent.mcp.tools.process import ProcessTreeTool, PsListTool
 from kyagent.mcp.tools.service import SvcReloadTool, SvcRestartTool, SvcStatusTool
 
 
@@ -75,3 +77,22 @@ def test_log_journal_accepts_normal_external_strings():
         "since": "2026-05-30 10:00:00",
         "grep": r"Failed password|invalid user",
     }
+
+
+@pytest.mark.parametrize("tool_cls", [DfTool, DuTool, LsTool, FindTool])
+@pytest.mark.parametrize("path", ["-delete", "--help", "relative/path", "/tmp/\nunsafe"])
+def test_filesystem_tools_reject_unsafe_paths(tool_cls, path):
+    with pytest.raises(ToolError):
+        tool_cls().validate({"path": path})
+
+
+@pytest.mark.parametrize("tool_cls", [PsListTool, ProcessTreeTool])
+@pytest.mark.parametrize("user", ["--help", "-e", "root;id", "not a user"])
+def test_process_tools_reject_unsafe_users(tool_cls, user):
+    with pytest.raises(ToolError):
+        tool_cls().validate({"user": user})
+
+
+def test_tool_schema_rejects_unknown_fields_by_default():
+    with pytest.raises(ToolError):
+        PingTool().validate({"host": "127.0.0.1", "surprise": "ignored-before"})

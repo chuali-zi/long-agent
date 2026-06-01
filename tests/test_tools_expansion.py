@@ -45,8 +45,9 @@ def registry():
 
 
 @pytest.fixture
-def rpm_family():
+def rpm_family(monkeypatch):
     """Pin pkg_family() to RPM for the duration of one test."""
+    monkeypatch.setattr(package_mod, "_detect_rpm_frontend", lambda: "dnf")
     set_pkg_family_for_tests(PkgFamily.RPM)
     yield PkgFamily.RPM
     set_pkg_family_for_tests(None)
@@ -647,8 +648,8 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_93_tools(self, registry):
-        assert len(registry.names()) == 93
+    def test_default_registry_has_94_tools(self, registry):
+        assert len(registry.names()) == 94
 
     def test_all_tools_have_description(self, registry):
         bad = [

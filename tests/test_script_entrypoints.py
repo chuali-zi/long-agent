@@ -13,11 +13,13 @@ def read_repo(path: str) -> str:
 def test_unified_entrypoint_exposes_abstract_commands() -> None:
     script = ENTRYPOINT.read_text(encoding="utf-8")
 
-    for command in ("install", "permissions", "chat", "tui", "web", "tools"):
+    for command in ("install", "permissions", "chat", "tui", "web", "web-backend", "web-open", "tools"):
         assert f"{command})" in script
 
     assert 'exec bash "$SCRIPT_DIR/setup-sudoers.sh"' in script
     assert 'exec bash "$SCRIPT_DIR/start-web.sh"' in script
+    assert 'exec bash "$SCRIPT_DIR/start-web-backend.sh"' in script
+    assert 'exec bash "$SCRIPT_DIR/open-web.sh"' in script
     assert 'exec "$KYAGENT_BIN" chat' in script
     assert 'exec "$KYAGENT_BIN" tui' in script
     assert "load_runtime_env" in script

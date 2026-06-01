@@ -193,7 +193,7 @@ mcp:
 
   <div class="bullets">
     <div class="bul"><span class="b-num">1</span><div><strong>默认 llm_backend: deepseek_httpx</strong>，优先走真实 DeepSeek httpx 后端</div></div>
-    <div class="bul"><span class="b-num">2</span><div>DeepSeek key 可来自 <code>DEEPSEEK_API_KEY</code> 或项目根 <code>kyagent.json</code> 的 <code>deepseek_api_key</code> / <code>deepseek.api_key</code></div></div>
+    <div class="bul"><span class="b-num">2</span><div>DeepSeek key 只允许通过 <code>DEEPSEEK_API_KEY</code> 或受控部署 env 文件注入；项目文件中的密钥字段会被忽略</div></div>
     <div class="bul"><span class="b-num">3</span><div>两处都缺 key 时直接报错；离线演示需显式设置 <code>llm_backend=mock</code></div></div>
     <div class="bul"><span class="b-num">4</span><div>项目根 <code>kyagent.json</code> 可写 <code>{"llm_backend":"qwen_httpx"}</code> 覆盖默认 YAML</div></div>
     <div class="bul"><span class="b-num">4</span><div>显式 <code>KYAGENT_LLM_BACKEND</code> 优先级最高（<code>KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."</code>）</div></div>

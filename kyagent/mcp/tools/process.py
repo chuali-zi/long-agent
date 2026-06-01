@@ -6,6 +6,7 @@ from typing import Any
 from kyagent.mcp.tools.base import Tool, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
 
+_USER_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
 
 class PsListTool(Tool):
     name = "process_list"
@@ -15,7 +16,7 @@ class PsListTool(Tool):
         "properties": {
             "sort_by": {"type": "string", "description": "排序字段：cpu | mem | pid", "enum": ["cpu", "mem", "pid"]},
             "limit": {"type": "integer", "description": "返回行数，默认 20", "minimum": 1, "maximum": 200},
-            "user": {"type": "string", "description": "仅返回该用户的进程"},
+            "user": {"type": "string", "pattern": _USER_PATTERN, "description": "仅返回该用户的进程"},
         },
     }
     risk_level = RiskLevel.LOW
@@ -121,7 +122,7 @@ class ProcessTreeTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "user": {"type": "string", "description": "仅显示该用户的进程"},
+            "user": {"type": "string", "pattern": _USER_PATTERN, "description": "仅显示该用户的进程"},
         },
     }
     risk_level = RiskLevel.LOW

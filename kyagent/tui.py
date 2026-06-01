@@ -32,7 +32,6 @@ from rich.table import Table
 from rich.text import Text
 
 from kyagent.agent.core import Agent
-from kyagent.audit.store import AuditStore
 from kyagent.config import Config, load_config
 from kyagent.confirm import ConfirmRequest
 from kyagent.interactive import UserChoice, UserChoiceFn
@@ -595,8 +594,12 @@ class TuiApp:
             self.console.print("[dim]无法读取 audit（agent.cfg 未暴露）[/]")
             return
         try:
-            store = AuditStore(cfg.resolve(cfg.audit.database))
-            rows = store.list_traces(limit=10)
+            from kyagent.runtime import build_audit_store
+            store = build_audit_store(cfg)
+            try:
+                rows = store.list_traces(limit=10)
+            finally:
+                store.close()
         except Exception as e:
             self.console.print(f"[red]读取 audit 失败：{e}[/]")
             return

@@ -70,17 +70,52 @@ def test_loongarch_install_script_exists_and_has_safety_gates() -> None:
         "detect_arch",
         "detect_python",
         "KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx",
-        "KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db",
-        "KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl",
+        "write_shell_assignment KYAGENT_AUDIT_DB /var/lib/kyagent/audit.db",
+        "write_shell_assignment KYAGENT_AUDIT_JSONL /var/log/kyagent/audit.jsonl",
         "visudo -cf",
         "--dry-run",
         "--yes",
         "--with-web",
-        "pip install --no-binary PyYAML -r requirements-loongarch.txt",
+        "pip install --no-binary PyYAML,pydantic -r requirements-loongarch.txt",
     ]
 
     for token in required_tokens:
         assert token in script
+
+
+def test_loongarch_installer_uses_linux_only_audited_dependency_path() -> None:
+    script = read_repo("scripts/install-loongarch.sh")
+
+    for token in (
+        "uname -s",
+        "--allow-non-loongarch requires --dry-run",
+        "SKIP_CYTHON=1",
+        "--no-binary PyYAML,pydantic",
+        "requirements-loongarch-web.txt",
+        "--no-deps -e .",
+        "printf '%q'",
+        "KYAGENT_EXECUTOR_ACCOUNT",
+    ):
+        assert token in script
+
+
+def test_loongarch_installer_reports_optional_command_inventory() -> None:
+    script = read_repo("scripts/install-loongarch.sh")
+    deployment = read_repo("docs/deployment/loongarch.md")
+
+    assert "report_optional_commands" in script
+    for command in ("smartctl", "crontab", "aureport", "aide", "dmidecode", "iptables", "nft"):
+        assert command in script
+    assert "可选系统命令" in deployment
+
+
+def test_loongarch_web_requirements_are_separate_and_sdk_free() -> None:
+    requirements = read_repo("requirements-loongarch-web.txt")
+
+    assert "fastapi>=0.95,<0.100" in requirements
+    assert "uvicorn>=0.23,<0.30" in requirements
+    for token in ("openai", "anthropic", "mcp", "jiter", "pydantic-core", "uvicorn[standard]"):
+        assert token not in requirements
 
 
 def test_loongarch_default_requirements_avoid_sdk_and_rust_extensions() -> None:
@@ -153,7 +188,7 @@ def test_tui_demo_documented_for_loongarch() -> None:
 
 
 def test_web_start_script_and_docs_are_present() -> None:
-    script = read_repo("scripts/start-web.sh")
+    script = read_repo("scripts/start-web.sh") + read_repo("scripts/start-web-backend.sh")
     readme = read_repo("README.md")
     web_docs = read_repo("docs/deployment/web.md")
     deployment = read_repo("docs/deployment/loongarch.md")
@@ -162,6 +197,7 @@ def test_web_start_script_and_docs_are_present() -> None:
         "set -euo pipefail",
         "--install-web",
         "--mock",
+        "--no-open-browser",
         "KYAGENT_LLM_BACKEND=mock",
         "kyagent web serve",
         "pip install -e .[web]",
@@ -176,6 +212,8 @@ def test_web_start_script_and_docs_are_present() -> None:
 
     for phrase in (
         "bash scripts/start-web.sh --install-web --mock",
+        "bash scripts/start-web-backend.sh",
+        "bash scripts/open-web.sh",
         "approval_required",
         "approval_resolved",
         "POST /api/approvals/{approval_id}/approve",
@@ -186,6 +224,17 @@ def test_web_start_script_and_docs_are_present() -> None:
     assert "`--with-web`" in deployment
     assert "FastAPI" in deployment
     assert "uvicorn" in deployment
+
+
+def test_root_readme_is_loongarch_first_and_documents_web_layers() -> None:
+    readme = read_repo("README.md")
+
+    assert "LoongArch Linux" in readme
+    assert "bash scripts/kyagent.sh web --mock" in readme
+    assert "自动打开浏览器" in readme
+    assert "bash scripts/start-web-backend.sh" in readme
+    assert "bash scripts/open-web.sh" in readme
+    assert "## Windows" not in readme
 
 
 def test_shell_scripts_use_lf_line_endings() -> None:

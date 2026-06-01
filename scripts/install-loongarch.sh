@@ -17,6 +17,14 @@ SKIP_SUDOERS=0
 RUN_DEEPSEEK_CHECK=0
 WITH_WEB=0
 DEEPSEEK_KEY="${DEEPSEEK_API_KEY:-}"
+DEEPSEEK_KEY_FILE=""
+INLINE_DEEPSEEK_KEY_SET=0
+SERVICE_ALLOWLIST="${KYAGENT_SERVICE_ALLOWLIST:-}"
+OFFLINE=0
+WHEELHOUSE=""
+COMMAND_INVENTORY_MODE="best-effort"
+PIP_OFFLINE_ARGS=()
+AUDIT_HMAC_KEY_FILE="${KYAGENT_AUDIT_HMAC_KEY_FILE:-/etc/kyagent/audit-hmac.key}"
 
 log() {
   printf '[kyagent-loongarch] %s\n' "$*"
@@ -53,13 +61,18 @@ Options:
   --python PATH                 Python 3.10-3.13 interpreter to use.
   --skip-system-packages        Do not install OS packages.
   --skip-sudoers                Do not create account/sudoers/audit dirs.
-  --deepseek-key KEY            Write DEEPSEEK_API_KEY to /etc/kyagent/env.
+  --offline                     Install Python packages without network access.
+  --wheelhouse DIR              Local wheel/source directory required by --offline.
+  --deepseek-key-file FILE      Read DEEPSEEK_API_KEY from a local file.
+  --deepseek-key KEY            Not recommended: key is visible in process arguments.
   --run-deepseek-check          Run a real DeepSeek request after install.
   --with-web                    Install the optional FastAPI/uvicorn Web extra.
+  --command-inventory MODE      best-effort (default), competition, or strict.
+  --service-allowlist LIST      Comma-separated systemd services allowed for restart/reload.
   --help                        Show this help.
 
 Default LoongArch path:
-  pip install --no-binary PyYAML -r requirements-loongarch.txt
+  SKIP_CYTHON=1 pip install --no-binary PyYAML,pydantic -r requirements-loongarch.txt
   KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
 EOF
 }
@@ -98,8 +111,21 @@ while [[ $# -gt 0 ]]; do
       SKIP_SUDOERS=1
       shift
       ;;
+    --offline)
+      OFFLINE=1
+      shift
+      ;;
+    --wheelhouse)
+      WHEELHOUSE="${2:?missing value for --wheelhouse}"
+      shift 2
+      ;;
+    --deepseek-key-file)
+      DEEPSEEK_KEY_FILE="${2:?missing value for --deepseek-key-file}"
+      shift 2
+      ;;
     --deepseek-key)
       DEEPSEEK_KEY="${2:?missing value for --deepseek-key}"
+      INLINE_DEEPSEEK_KEY_SET=1
       shift 2
       ;;
     --run-deepseek-check)
@@ -109,6 +135,14 @@ while [[ $# -gt 0 ]]; do
     --with-web)
       WITH_WEB=1
       shift
+      ;;
+    --command-inventory)
+      COMMAND_INVENTORY_MODE="${2:?missing value for --command-inventory}"
+      shift 2
+      ;;
+    --service-allowlist)
+      SERVICE_ALLOWLIST="${2:?missing value for --service-allowlist}"
+      shift 2
       ;;
     --help)
       usage
@@ -121,6 +155,37 @@ while [[ $# -gt 0 ]]; do
 done
 
 trap 'die "failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
+
+load_deepseek_key_file() {
+  local key_file="$1"
+  [[ -f "$key_file" && -r "$key_file" ]] || die "cannot read --deepseek-key-file: $key_file"
+  DEEPSEEK_KEY="$(cat -- "$key_file")"
+  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\r'}"
+  if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
+    die "DEEPSEEK_API_KEY file must contain exactly one line"
+  fi
+}
+
+configure_options() {
+  case "$COMMAND_INVENTORY_MODE" in
+    best-effort|competition|strict) ;;
+    *) die "--command-inventory must be best-effort, competition, or strict" ;;
+  esac
+
+  if [[ "$OFFLINE" == "1" ]]; then
+    [[ -n "$WHEELHOUSE" ]] || die "--offline requires --wheelhouse DIR"
+    [[ -d "$WHEELHOUSE" ]] || die "wheelhouse directory not found: $WHEELHOUSE"
+    WHEELHOUSE="$(cd "$WHEELHOUSE" && pwd)"
+    PIP_OFFLINE_ARGS=(--no-index --find-links "$WHEELHOUSE")
+  fi
+
+  if [[ -n "$DEEPSEEK_KEY_FILE" ]]; then
+    [[ "$INLINE_DEEPSEEK_KEY_SET" == "0" ]] || die "use only one of --deepseek-key-file or --deepseek-key"
+    load_deepseek_key_file "$DEEPSEEK_KEY_FILE"
+  elif [[ "$INLINE_DEEPSEEK_KEY_SET" == "1" ]]; then
+    log "warning: --deepseek-key is not recommended; prefer --deepseek-key-file"
+  fi
+}
 
 confirm() {
   if [[ "$ASSUME_YES" == "1" || "$DRY_RUN" == "1" ]]; then
@@ -160,15 +225,25 @@ version_ge() {
 }
 
 detect_arch() {
-  local arch kernel glibc_line glibc_version
+  local os arch kernel glibc_line glibc_version
+  os="$(uname -s)"
   arch="$(uname -m)"
   kernel="$(uname -r)"
   glibc_line="$(ldd --version 2>/dev/null | head -1 || true)"
   glibc_version="$(printf '%s\n' "$glibc_line" | grep -Eo '[0-9]+\.[0-9]+' | head -1 || true)"
 
+  log "os:           $os"
   log "architecture: $arch"
   log "kernel:       $kernel"
   log "glibc:        ${glibc_line:-unknown}"
+
+  if [[ "$os" != "Linux" ]]; then
+    die "this installer supports LoongArch Linux only"
+  fi
+
+  if [[ "$ALLOW_NON_LOONGARCH" == "1" && "$DRY_RUN" != "1" ]]; then
+    die "--allow-non-loongarch requires --dry-run"
+  fi
 
   if [[ "$arch" != "loongarch64" && "$ALLOW_NON_LOONGARCH" != "1" ]]; then
     die "this installer targets loongarch64; pass --allow-non-loongarch only for dry-run/testing"
@@ -222,6 +297,41 @@ install_system_packages() {
   esac
 }
 
+report_optional_commands() {
+  local mode="${1:-$COMMAND_INVENTORY_MODE}"
+  local -a commands critical missing critical_missing
+  local command
+  commands=(
+    smartctl crontab aureport aide dmidecode iptables nft
+    iostat lsblk findmnt lsattr debsums kysec_getenforce getenforce sestatus
+  )
+  critical=(smartctl crontab aureport aide dmidecode iptables nft)
+  missing=()
+  critical_missing=()
+  for command in "${commands[@]}"; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+      missing+=("$command")
+    fi
+  done
+  for command in "${critical[@]}"; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+      critical_missing+=("$command")
+    fi
+  done
+  if ((${#missing[@]} > 0)); then
+    log "optional commands missing: ${missing[*]}"
+    log "corresponding MCP tools remain unavailable until distro packages are installed"
+  else
+    log "optional command inventory: complete"
+  fi
+  if [[ "$mode" == "competition" && ${#critical_missing[@]} -gt 0 ]]; then
+    die "competition command inventory missing critical commands: ${critical_missing[*]}"
+  fi
+  if [[ "$mode" == "strict" && ${#missing[@]} -gt 0 ]]; then
+    die "strict command inventory missing commands: ${missing[*]}"
+  fi
+}
+
 detect_python() {
   local candidates=()
   if [[ -n "$PYTHON_BIN" ]]; then
@@ -256,7 +366,7 @@ PY
 
 create_venv_and_install() {
   cd "$INSTALL_PREFIX"
-  if [[ ! -f "pyproject.toml" || ! -f "requirements-loongarch.txt" ]]; then
+  if [[ ! -f "pyproject.toml" || ! -f "requirements-loongarch.txt" || ! -f "requirements-loongarch-web.txt" ]]; then
     die "prefix does not look like the kyagent repo: $INSTALL_PREFIX"
   fi
 
@@ -266,25 +376,32 @@ create_venv_and_install() {
   fi
 
   local vpy="$INSTALL_PREFIX/.venv/bin/python"
-  log "upgrading pip/setuptools/wheel"
-  run "$vpy" -m pip install --upgrade "pip>=23" setuptools wheel
+  if [[ "$OFFLINE" == "1" ]]; then
+    log "offline mode: skipping pip/setuptools/wheel upgrade"
+  else
+    log "upgrading pip/setuptools/wheel"
+    run "$vpy" -m pip install --upgrade "pip>=23" setuptools wheel
+  fi
 
   log "installing LoongArch-audited default requirements"
-  run "$vpy" -m pip install --no-binary PyYAML -r requirements-loongarch.txt
+  run env SKIP_CYTHON=1 "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --no-binary PyYAML,pydantic -r requirements-loongarch.txt
 
-  log "installing kyagent editable package without optional SDK extras"
-  run "$vpy" -m pip install -e .
+  log "installing kyagent editable package without dependency re-resolution"
+  run "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --no-deps -e .
 
   if [[ "$WITH_WEB" == "1" ]]; then
-    log "installing optional FastAPI/uvicorn Web extra"
-    run "$vpy" -m pip install -e ".[web]"
+    log "installing audited optional FastAPI/uvicorn Web requirements"
+    run "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" -r requirements-loongarch-web.txt
+    run "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --no-deps -e ".[web]"
   fi
 
   log "verifying default dependency graph"
   if [[ "$DRY_RUN" != "1" ]]; then
-    "$vpy" -m pip freeze | grep -Eiq '^(openai|anthropic|mcp|jiter|pydantic-core)==' \
-      && die "forbidden optional SDK/Rust dependency found in default LoongArch venv" \
-      || true
+    local freeze_output
+    freeze_output="$("$vpy" -m pip freeze)" || die "pip freeze failed during dependency audit"
+    if printf '%s\n' "$freeze_output" | grep -Eiq '^(openai|anthropic|mcp|jiter|pydantic-core)=='; then
+      die "forbidden optional SDK/Rust dependency found in default LoongArch venv"
+    fi
   fi
 }
 
@@ -296,8 +413,17 @@ setup_sudoers_and_dirs() {
   need_root_for_system_changes
 
   log "installing runtime account, sudoers, and audit directories"
-  run env KYAGENT_USER="$KYAGENT_USER" bash "$INSTALL_PREFIX/scripts/setup-sudoers.sh"
+  run env \
+    KYAGENT_USER="$KYAGENT_USER" \
+    KYAGENT_SERVICE_ALLOWLIST="$SERVICE_ALLOWLIST" \
+    bash "$INSTALL_PREFIX/scripts/setup-sudoers.sh"
   run visudo -cf /etc/sudoers.d/kyagent
+}
+
+write_shell_assignment() {
+  printf '%s=' "$1"
+  printf '%q' "$2"
+  printf '\n'
 }
 
 write_env_file() {
@@ -310,23 +436,41 @@ write_env_file() {
   local env_dir="/etc/kyagent"
   local env_file="$env_dir/env"
   local tmp
+  if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
+    die "DEEPSEEK_API_KEY must not contain newlines"
+  fi
   tmp="$(mktemp)"
   chmod 0600 "$tmp"
 
+  run install -d -m 0750 -o root -g "$KYAGENT_USER" "$env_dir"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "dry-run: would preserve or generate $AUDIT_HMAC_KEY_FILE"
+  elif [[ ! -s "$AUDIT_HMAC_KEY_FILE" ]]; then
+    local key_tmp
+    key_tmp="$(mktemp)"
+    chmod 0600 "$key_tmp"
+    openssl rand -hex 32 >"$key_tmp"
+    install -m 0640 -o root -g "$KYAGENT_USER" "$key_tmp" "$AUDIT_HMAC_KEY_FILE"
+    rm -f "$key_tmp"
+  fi
+
   {
-    printf 'KYAGENT_CONFIG=%s/configs/deepseek.yaml\n' "$INSTALL_PREFIX"
-    printf 'KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx\n'
-    printf 'KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db\n'
-    printf 'KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl\n'
+    write_shell_assignment KYAGENT_CONFIG "$INSTALL_PREFIX/configs/deepseek.yaml"
+    write_shell_assignment KYAGENT_DEEPSEEK_TRANSPORT deepseek_httpx
+    write_shell_assignment KYAGENT_EXECUTOR_ACCOUNT "$KYAGENT_USER"
+    write_shell_assignment KYAGENT_AUDIT_DB /var/lib/kyagent/audit.db
+    write_shell_assignment KYAGENT_AUDIT_JSONL /var/log/kyagent/audit.jsonl
+    write_shell_assignment KYAGENT_AUDIT_INTEGRITY_ENABLED 1
+    write_shell_assignment KYAGENT_AUDIT_HMAC_KEY_FILE "$AUDIT_HMAC_KEY_FILE"
+    write_shell_assignment KYAGENT_AUDIT_HMAC_KEY_ID local-v1
     if [[ -n "$DEEPSEEK_KEY" ]]; then
-      printf 'DEEPSEEK_API_KEY=%s\n' "$DEEPSEEK_KEY"
+      write_shell_assignment DEEPSEEK_API_KEY "$DEEPSEEK_KEY"
     else
       printf '# DEEPSEEK_API_KEY=sk-...\n'
     fi
   } >"$tmp"
 
-  run install -d -m 0750 -o "$KYAGENT_USER" -g "$KYAGENT_USER" "$env_dir"
-  run install -m 0600 -o "$KYAGENT_USER" -g "$KYAGENT_USER" "$tmp" "$env_file"
+  run install -m 0640 -o root -g "$KYAGENT_USER" "$tmp" "$env_file"
   rm -f "$tmp"
   log "wrote $env_file"
 }
@@ -348,6 +492,8 @@ import pydantic
 import yaml
 
 print("pydantic", pydantic.VERSION)
+if getattr(pydantic, "compiled", False):
+    raise SystemExit("pydantic must use the SKIP_CYTHON=1 pure-Python path")
 print("yaml libyaml", getattr(yaml, "__with_libyaml__", None))
 print("httpx", httpx.__version__)
 print("kyagent", kyagent.__version__ if hasattr(kyagent, "__version__") else "import-ok")
@@ -360,7 +506,7 @@ PY
   if [[ "$SKIP_SUDOERS" != "1" ]]; then
     log "runtime-account selfcheck"
     sudo -u "$KYAGENT_USER" \
-      --preserve-env=PATH,KYAGENT_CONFIG,KYAGENT_DEEPSEEK_TRANSPORT,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL \
+      --preserve-env=PATH,KYAGENT_CONFIG,KYAGENT_DEEPSEEK_TRANSPORT,KYAGENT_EXECUTOR_ACCOUNT,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL \
       "$ky" tools list >/dev/null
   fi
 
@@ -383,6 +529,7 @@ PY
 }
 
 main() {
+  configure_options
   INSTALL_PREFIX="$(cd "$INSTALL_PREFIX" && pwd)"
   log "prefix:       $INSTALL_PREFIX"
   log "user:         $KYAGENT_USER"
@@ -390,6 +537,7 @@ main() {
   confirm "Install kyagent for LoongArch using prefix $INSTALL_PREFIX?" || die "aborted"
   detect_arch
   install_system_packages
+  report_optional_commands
   detect_python
   create_venv_and_install
   setup_sudoers_and_dirs
@@ -404,4 +552,6 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

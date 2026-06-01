@@ -160,6 +160,15 @@ def test_declared_risk_does_not_downgrade(guardrail: Guardrail):
     assert v.risk is RiskLevel.CRITICAL
 
 
+@pytest.mark.parametrize("argv", [
+    ["sudo", "--", "rm", "-rf", "/etc"],
+    ["env", "FOO=bar", "rm", "-rf", "/etc"],
+])
+def test_wrapper_commands_do_not_bypass_guardrail(guardrail: Guardrail, argv):
+    verdict = guardrail.check_argv(argv)
+    assert verdict.decision is Decision.DENY
+
+
 # ---- 等价改写覆盖（codex 报告的全部 5 个绕过） ----------------------
 
 @pytest.mark.parametrize("cmd,want_decision", [

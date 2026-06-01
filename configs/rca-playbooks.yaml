@@ -1,0 +1,36 @@
+playbooks:
+  zombie_process:
+    description: Identify defunct processes and the parents that failed to reap them.
+    evidence:
+      - process_list snapshot
+      - parent process details
+    checks:
+      - Find processes in zombie state.
+      - Group zombies by parent PID and service.
+
+  disk_io:
+    description: Identify workloads responsible for elevated disk latency or utilization.
+    evidence:
+      - disk utilization snapshot
+      - block device latency sample
+    checks:
+      - Compare utilization and await across block devices.
+      - Correlate the busiest device with active workloads.
+
+  config_drift:
+    description: Identify unexpected changes to managed system configuration.
+    evidence:
+      - file hash snapshot
+      - timestamp audit snapshot
+    checks:
+      - Compare hashes against the approved baseline.
+      - Review modification timestamps for changed files.
+
+  large_logs:
+    description: Identify logs consuming unexpected filesystem capacity.
+    evidence:
+      - largest files snapshot
+      - filesystem utilization snapshot
+    checks:
+      - Rank oversized logs by bytes consumed.
+      - Check whether rotation policy is missing or ineffective.

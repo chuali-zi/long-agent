@@ -477,7 +477,7 @@ def build_backend(cfg) -> LlmBackend:
     raise ValueError(f"未知 LLM 后端：{name}")
 ```
 
-`cfg.agent.llm_backend` 默认来自 `configs/default.yaml` 的 `deepseek_httpx`，也可以由项目根 `kyagent.json` 顶层 `llm_backend` 覆盖；显式环境变量 `KYAGENT_LLM_BACKEND` 优先级最高。DeepSeek key 可来自 `DEEPSEEK_API_KEY`，也可来自项目根 `kyagent.json` 的 `deepseek_api_key` 或 `deepseek.api_key`；环境变量优先。真实后端缺 key 时直接报错；如需离线演示，必须显式设置 `llm_backend=mock`。拼写错误仍直接报错。
+`cfg.agent.llm_backend` 默认来自 `configs/default.yaml` 的 `deepseek_httpx`，也可以由项目根 `kyagent.json` 顶层 `llm_backend` 覆盖；显式环境变量 `KYAGENT_LLM_BACKEND` 优先级最高。DeepSeek key 只允许通过 `DEEPSEEK_API_KEY` 或受控部署 env 文件注入，项目文件中的密钥字段会被忽略。真实后端缺 key 时直接报错；如需离线演示，必须显式设置 `llm_backend=mock`。拼写错误仍直接报错。
 
 ---
 

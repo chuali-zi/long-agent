@@ -30,7 +30,7 @@ agent:
   max_iterations: 8
 
 executor:
-  account: kyagent
+  account: ${KYAGENT_EXECUTOR_ACCOUNT:-kyagent}
   timeout: 30
   output_cap: 65536
   forbid_root: true
@@ -56,8 +56,15 @@ audit:
   database: ${KYAGENT_AUDIT_DB:-./var/audit.db}
   jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   retain_days: 90
+  integrity_enabled: ${KYAGENT_AUDIT_INTEGRITY_ENABLED:-false}
+  hmac_key_file: ${KYAGENT_AUDIT_HMAC_KEY_FILE:-}
+  hmac_key_id: ${KYAGENT_AUDIT_HMAC_KEY_ID:-local-v1}
+
+rca:
+  playbooks_file: configs/rca-playbooks.yaml
 
 mcp:
   enable_tools: []
+  plugin_entry_points: []
   server_name: kyagent
   server_version: 0.1.0

@@ -93,7 +93,10 @@ def build_clean_env(cfg: SandboxConfig, extra: dict[str, str] | None = None) -> 
         base["PATH"] = os.environ.get("PATH", os.pathsep.join(cfg.path_whitelist))
     if extra:
         # 严禁覆盖以下高风险变量
-        forbidden = {"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "BASH_ENV"}
+        forbidden = {
+            "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "BASH_ENV",
+            "PATH", "HOME", "SHELL", "USER", "LOGNAME",
+        }
         for k, v in extra.items():
             if k in forbidden:
                 continue

@@ -1,6 +1,6 @@
 # kyagent — 面向麒麟操作系统的安全智能运维 Agent
 
-> A2 赛题作品 · 分支 `claude-a` 版本（包路径 `kyagent/`，与同仓 `kylin_ops_agent/` 并行用于灰度对比）
+> A2 赛题作品 · 面向 LoongArch64 Linux 与麒麟高级服务器版
 
 ## 1. 项目定位
 
@@ -13,8 +13,8 @@ kyagent 是部署在麒麟操作系统上的智能运维 Agent，把"自然语�
 | ② MCP 运维插件化 | `Tool` 基类（**严格 JSON Schema 校验：enum/min/max/pattern**）+ stdio MCP 服务器（**MCP 2024-11-05 lifecycle 合规**） | `kyagent/mcp/{tools/base.py, server.py}` |
 | ③ 安全意图校验器 — **双层** | **意图层（一次过滤 + 抗 Prompt Injection）**：中文词表 + Unicode 归一化 + 12 类注入正则<br>**argv 层（二次过滤）**：正则 + argv + 目标地板 + 工具声明 risk + 可选 LLM 复审 | `kyagent/safety/intent.py`，`configs/intent-rules.yaml`，`kyagent/safety/{guardrail,rules,patterns,policy}.py`，`configs/safety-rules.yaml` |
 | ④ 最小权限代理执行 | `ExecutionProxy` + `SandboxConfig` + sudoers 白名单。`forbid_root=true` 是"非必要不 root"，requires_root 工具走 sudoers；`forbid_root_strict=true` 才彻底拒绝 | `kyagent/executor/*.py`，`configs/sudoers.kyagent` |
-| ⑤ 推理链路溯源（**5 段闭环**） | `USER_INPUT → INTENT_CHECK → PERCEPTION → LLM_THOUGHT → TOOL_REQUEST → SAFETY_CHECK → EXECUTION → EXECUTION_RESULT → AGENT_REPLY`，SQLite + JSONL 双通道 | `kyagent/audit/*.py` |
-| **大模型选型**（赛题鼓励国产开源） | 默认 DeepSeek + `deepseek_httpx` 纯 httpx 路径；key 可来自 `DEEPSEEK_API_KEY` 或项目根 `kyagent.json`；缺 key 直接报错，离线演示需显式切到 Mock | `kyagent/agent/llm.py`，`configs/default.yaml`，`kyagent.json` |
+| ⑤ 推理链路溯源（**5 段闭环**） | `USER_INPUT → INTENT_CHECK → PERCEPTION → LLM_THOUGHT → TOOL_REQUEST → SAFETY_CHECK → EXECUTION → EXECUTION_RESULT → DIAGNOSIS → AGENT_REPLY`，SQLite + JSONL 双通道、哈希链 + 可选 HMAC 封印 | `kyagent/audit/*.py`，`kyagent/rca/*.py` |
+| **大模型选型**（赛题鼓励国产开源） | 默认 DeepSeek + `deepseek_httpx` 纯 httpx 路径；key 仅通过 `DEEPSEEK_API_KEY` 注入；缺 key 直接报错，离线演示需显式切到 Mock | `kyagent/agent/llm.py`，`configs/default.yaml` |
 
 ## 2. 架构总览
 
@@ -91,7 +91,7 @@ kyagent chat
 # 5.5 轻量 TUI demo（持续交互 / 工具视图 / 确认 / trace 回放）
 kyagent tui
 
-# 5.6 FastAPI Web 控制台（SSE 流式输出 / 浏览器审核）
+# 5.6 FastAPI Web 控制台（SSE 流式输出 / 自动弹页 / 浏览器审核）
 bash scripts/start-web.sh --install-web --mock
 
 # 6. 把审计链路完整打出来
@@ -111,27 +111,15 @@ export DEEPSEEK_API_KEY=sk-...
 kyagent ask "把最近一小时的 sshd 错误日志总结一下"
 ```
 
-项目根目录的 `kyagent.json` 可用顶层 key 覆盖默认后端，也可作为 DeepSeek key 的备用读取位置：
+项目根目录的 `kyagent.json` 只可用顶层 key 覆盖默认后端，不读取任何密钥：
 
 ```json
 {
-  "llm_backend": "deepseek_httpx",
-  "deepseek_api_key": "sk-..."
+  "llm_backend": "deepseek_httpx"
 }
 ```
 
-也支持嵌套写法：
-
-```json
-{
-  "llm_backend": "deepseek_httpx",
-  "deepseek": {
-    "api_key": "sk-..."
-  }
-}
-```
-
-`DEEPSEEK_API_KEY` 优先级高于 `kyagent.json` 里的 DeepSeek key；含真实 key 的 `kyagent.json` 应按密钥文件管理，避免提交到仓库。
+`kyagent.json` 已加入 `.gitignore`，但不要把密钥写入项目目录。生产密钥通过受控的 `/etc/kyagent/env` 或进程环境变量注入。
 
 显式环境变量 `KYAGENT_LLM_BACKEND` 优先级更高；例如临时切到 mock：
 
@@ -164,7 +152,7 @@ kyagent ask "..."
 > 代码层面支持 `openai / deepseek / qwen` SDK 路径，也支持 `openai_httpx / deepseek_httpx / qwen_httpx` 纯 httpx 路径。
 > 当前阶段（含龙芯部署）仅推 DeepSeek 一个真实后端；LoongArch Old World 不安装 `.[openai]`、`.[anthropic]`、`.[mcp]`，详见 [LoongArch/Kylin 部署审查](../deployment/loongarch.md)。
 
-### 在 Kylin / Linux 上启用最小权限代理
+### 在 LoongArch Linux / Kylin 上启用最小权限代理
 
 ```bash
 sudo bash scripts/kyagent.sh permissions  # 建 kyagent 系统账户 + sudoers 白名单
@@ -258,10 +246,11 @@ TOOL_REQUEST        ← 3b. LLM 提议调用工具
 SAFETY_CHECK        ← 4. 安全校验（argv 层）
 EXECUTION           ← 5. 命令实际执行（落地账户、cmdline）
 EXECUTION_RESULT    ← 5b. 执行结果
+DIAGNOSIS           ← 5c. 结构化 RCA 结论（引用本 trace 的 PERCEPTION evidence_id）
 AGENT_REPLY         ← 6. Agent 最终回复给用户
 ```
 
-每个事件都带 `seq / ts / kind / payload`，按 `trace_id` 串联。
+每个事件都带 `seq / ts / kind / payload / prev_hash / event_hash`，按 `trace_id` 串联。生产部署由安装器开启 HMAC 封印，并生成 `/etc/kyagent/audit-hmac.key`。
 被意图层拦截的请求 trace 只到 `INTENT_CHECK + AGENT_REPLY(blocked_at=intent)` 为止，绝不进 LLM。
 
 存储：
@@ -271,6 +260,7 @@ AGENT_REPLY         ← 6. Agent 最终回复给用户
 回放：
 ```bash
 kyagent audit show trace-abc123
+kyagent audit verify trace-abc123
 # → 把这条 trace 的每个事件 panel 化打印出来，可直接做事故复盘
 ```
 
@@ -313,6 +303,13 @@ Agent 主循环里有一条 *并行多工具调度* 链路（`Agent._is_parallel
 bash scripts/kyagent.sh web --install-web --mock
 ```
 
+统一入口会启动后端、等待健康检查并自动打开浏览器。无桌面环境时后端继续运行并打印 URL。调试时可以拆开执行：
+
+```bash
+bash scripts/start-web-backend.sh --mock
+bash scripts/open-web.sh --url http://127.0.0.1:8000
+```
+
 页面区分用户输入、浅色 `thinking_delta`、红色 `tool_call_start/end` 和加粗最终回复。高风险命令通过 SSE 发出 `approval_required`，浏览器调用 `/api/approvals/{approval_id}/approve` 或 `/reject` 后，服务端再推送 `approval_resolved` 并继续或终止 Agent turn。
 
 LoongArch 默认安装不会自动拉 Web extra。需要浏览器控制台时显式执行：
@@ -322,7 +319,7 @@ sudo bash scripts/install-loongarch.sh --yes --with-web
 sudo -u kyagent bash /opt/kyagent/scripts/start-web.sh --env-file /etc/kyagent/env
 ```
 
-`.[web]` 只包含兼容 pydantic v1 的 FastAPI 与标准版 uvicorn；不要安装 `uvicorn[standard]`。
+Web 默认只监听 `127.0.0.1`。`requirements-loongarch-web.txt` 只包含兼容 pydantic v1 的 FastAPI 与标准版 uvicorn；不要安装 `uvicorn[standard]`。
 
 通用 Web 参数和浏览器审核接口见 [Web 控制台部署](../deployment/web.md)。
 
@@ -375,7 +372,7 @@ pytest tests -q
 | `test_agent_parallel.py` | 4 | 并行预检 + per-trace 锁 + worker 拒绝 CONFIRM |
 | `test_tools_expansion.py` | 123 | v2 工具扩展（73 个新工具）build_argv + JSON Schema 拒绝路径全静态烟雾 |
 
-**当前本地收集：419 passed / 2 skipped（POSIX 相关）。**
+测试数量随工具集演进；提交前以当前 `pytest tests -q` 输出为准。
 
 ## 9. 把 MCP 服务挂到 Claude Desktop
 
@@ -416,7 +413,9 @@ D:\race\long\
 │   ├── install.sh
 │   ├── install-loongarch.sh  # LoongArch/Kylin 一键部署脚本
 │   ├── setup-sudoers.sh
-│   ├── start-web.sh          # FastAPI Web 控制台一键启动
+│   ├── start-web.sh          # FastAPI Web 控制台一键启动 + 自动弹页
+│   ├── start-web-backend.sh  # 仅启动 FastAPI 后端
+│   ├── open-web.sh           # 仅等待健康检查并打开页面
 │   └── demo.sh
 ├── tests/
 │   ├── test_safety.py        # 30+ 危险样例 + 良性样例

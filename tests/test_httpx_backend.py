@@ -459,25 +459,18 @@ def test_build_backend_deepseek_httpx_user_override(monkeypatch):
     assert captured["base_url"] == "https://my-proxy.example.com/v1/"
 
 
-def test_build_backend_deepseek_httpx_uses_config_api_key_when_env_missing(monkeypatch):
-    captured: dict = {}
-
-    class _CaptureClient:
-        def __init__(self, base_url, headers, **_):
-            captured["base_url"] = base_url
-            captured["headers"] = headers
-
-    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
+def test_build_backend_deepseek_httpx_ignores_config_api_key_when_env_missing(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
-    cfg = Config()
-    cfg.agent.llm_backend = "deepseek_httpx"
-    cfg.agent.deepseek.api_key = "sk-json"
+    cfg = Config.parse_obj({
+        "agent": {
+            "llm_backend": "deepseek_httpx",
+            "deepseek": {"api_key": "sk-json"},
+        },
+    })
 
-    be = build_backend(cfg)
-
-    assert isinstance(be, HttpxBackend)
-    assert captured["headers"]["Authorization"] == "Bearer sk-json"
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        build_backend(cfg)
 
 
 def test_build_backend_deepseek_httpx_env_key_takes_precedence_over_config_key(monkeypatch):
@@ -491,9 +484,12 @@ def test_build_backend_deepseek_httpx_env_key_takes_precedence_over_config_key(m
     monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env")
 
-    cfg = Config()
-    cfg.agent.llm_backend = "deepseek_httpx"
-    cfg.agent.deepseek.api_key = "sk-json"
+    cfg = Config.parse_obj({
+        "agent": {
+            "llm_backend": "deepseek_httpx",
+            "deepseek": {"api_key": "sk-json"},
+        },
+    })
 
     build_backend(cfg)
 

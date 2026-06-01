@@ -1,6 +1,21 @@
 # 工作日志
 
+## 2026-06-01
+
+- 按 A2 赛题和 LoongArch64 Linux 部署目标完成安全修复：项目密钥文件进入 `.gitignore`，`kyagent.json` 从 Git 跟踪移除，运行时不再从项目 JSON 读取 key。
+- 收紧工具输入、执行器 wrapper、环境变量和工具输出信任边界；只读工具结果落为 `PERCEPTION evidence_id`，结构化 RCA 通过 `submit_rca_report` 校验引用并写入 `DIAGNOSIS`。
+- MCP stdio 服务补齐 JSON-RPC 校验、初始化生命周期、通知静默、插件显式 allowlist 和退出资源释放。
+- Web 控制台加入角色 token、Origin 校验、DNS rebinding Host 约束、非回环监听 fail-closed、主体隔离会话、限界审核/选择队列和非阻塞 SSE。
+- LoongArch 安装器补齐离线 wheelhouse、命令库存检查、Old/New World 判定、`dnf > yum > rpm` 适配和审计 HMAC key 文件生成。
+
 ## 2026-05-31
+
+- 对 README、部署文档、部署脚本、sudoers、Web 启动链路和 LoongArch 依赖做完整复核；派出 4 个 `gpt-5.5 medium` 子 agent 分别审查文档、脚本、架构兼容性和测试覆盖。
+- 将 `scripts/start-web.sh` 改为 Web 组合入口：启动后端、等待健康检查并自动打开浏览器；无桌面环境时继续运行并打印 URL。新增 `scripts/start-web-backend.sh` 与 `scripts/open-web.sh` 作为分开脚本。
+- Web 默认监听从 `0.0.0.0` 收紧为 `127.0.0.1`；局域网暴露必须显式传参，后续在 2026-06-01 已升级为认证 fail-closed。
+- LoongArch 安装器新增 Linux-only 闸门、`SKIP_CYTHON=1` 纯 Python pydantic 路径、独立 Web requirements、editable `--no-deps`、安全 env 序列化和自定义执行账户同步。
+- sudoers 默认移除任意 systemd unit 重启/reload 权限；确需服务变更时通过 `KYAGENT_SERVICE_ALLOWLIST` 显式生成固定命令 allowlist。
+- 重写根 README 为 LoongArch Linux 高层入口，部署细节继续下沉到 `docs/deployment/`。
 
 - 新增 `scripts/kyagent.sh` 统一入口，抽象 `install / permissions / chat / tui / web / tools` 常用操作；安装与 Web 启动保持解耦。
 - 修复 `setup-sudoers.sh` 在本地化 sudo 输出下把版本误判为 `unknown` 的问题：版本检查固定使用 `LC_ALL=C sudo -V`，无法识别时保留原始首行。

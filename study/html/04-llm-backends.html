@@ -244,7 +244,7 @@ if tools and self.prompt_cache:
     <div class="body">
       <code>cfg.agent.llm_backend</code> 默认取自 <code>default.yaml</code> 的 <code>deepseek_httpx</code>，
       也可由项目根 <code>kyagent.json</code> 顶层 <code>llm_backend</code> 覆盖；显式环境变量 <code>KYAGENT_LLM_BACKEND</code> 优先级最高。
-      DeepSeek key 可来自 <code>DEEPSEEK_API_KEY</code>，也可来自项目根 <code>kyagent.json</code> 的 <code>deepseek_api_key</code> 或 <code>deepseek.api_key</code>；环境变量优先。真实后端缺 key 时直接报错；如需离线演示，必须显式设置 <code>llm_backend=mock</code>。拼写错误直接报错。
+      DeepSeek key 只允许通过 <code>DEEPSEEK_API_KEY</code> 或受控部署 env 文件注入，项目文件中的密钥字段会被忽略。真实后端缺 key 时直接报错；如需离线演示，必须显式设置 <code>llm_backend=mock</code>。拼写错误直接报错。
     </div>
   </div>
 </section>

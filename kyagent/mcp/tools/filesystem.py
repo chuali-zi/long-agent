@@ -9,11 +9,14 @@ from kyagent.safety.patterns import RiskLevel
 
 
 _PROTECTED_READ = {"/etc/shadow", "/etc/gshadow", "/etc/sudoers"}
+_ABS_PATH_PATTERN = r"^/(?!.*[\x00-\x1f\x7f])"
 
 
 def _safe_path(p: str) -> str:
     if not p:
         raise ToolError("path 不能为空")
+    if not p.startswith("/"):
+        raise ToolError(f"path 必须是绝对路径: {p!r}")
     # 目标系统是 Linux/麒麟，统一用 posix 归一化（避免 Windows 开发态把 / 翻成 \）
     p = posixpath.normpath(p)
     if any(c in p for c in [";", "|", "&", "$", "`", "\n"]):
@@ -29,7 +32,7 @@ class DfTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "可选，限定某挂载点"},
+            "path": {"type": "string", "pattern": _ABS_PATH_PATTERN, "description": "可选，限定某挂载点"},
         },
     }
     risk_level = RiskLevel.LOW
@@ -37,7 +40,7 @@ class DfTool(Tool):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         argv = ["df", "-h", "-x", "tmpfs", "-x", "devtmpfs"]
         if p := args.get("path"):
-            argv.append(_safe_path(p))
+            argv.extend(["--", _safe_path(p)])
         return argv
 
 
@@ -48,7 +51,7 @@ class DuTool(Tool):
         "type": "object",
         "required": ["path"],
         "properties": {
-            "path": {"type": "string"},
+            "path": {"type": "string", "pattern": _ABS_PATH_PATTERN},
             "depth": {"type": "integer", "minimum": 1, "maximum": 5, "description": "默认 1"},
         },
     }
@@ -56,7 +59,7 @@ class DuTool(Tool):
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         depth = int(args.get("depth", 1))
-        return ["du", "-h", f"--max-depth={depth}", _safe_path(args["path"])]
+        return ["du", "-h", f"--max-depth={depth}", "--", _safe_path(args["path"])]
 
 
 class LsTool(Tool):
@@ -65,12 +68,12 @@ class LsTool(Tool):
     input_schema = {
         "type": "object",
         "required": ["path"],
-        "properties": {"path": {"type": "string"}},
+        "properties": {"path": {"type": "string", "pattern": _ABS_PATH_PATTERN}},
     }
     risk_level = RiskLevel.LOW
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
-        return ["ls", "-lah", "--color=never", _safe_path(args["path"])]
+        return ["ls", "-lah", "--color=never", "--", _safe_path(args["path"])]
 
 
 class FindTool(Tool):
@@ -80,7 +83,7 @@ class FindTool(Tool):
         "type": "object",
         "required": ["path"],
         "properties": {
-            "path": {"type": "string"},
+            "path": {"type": "string", "pattern": _ABS_PATH_PATTERN},
             "name": {"type": "string", "description": "glob，如 '*.log'"},
             "mtime_days": {"type": "integer", "description": "最近 N 天内修改"},
             "max_depth": {"type": "integer", "minimum": 1, "maximum": 8, "description": "默认 3"},

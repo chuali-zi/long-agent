@@ -90,7 +90,16 @@ class ExecutionProxy:
         cached = self._which_cache.get(cmd)
         if cached is not None or cmd in self._which_cache:
             return cached
-        located = shutil.which(cmd, path=os.pathsep.join(self.cfg.path_whitelist))
+        if os.path.isabs(cmd):
+            real_cmd = os.path.realpath(cmd)
+            allowed = any(
+                real_cmd == os.path.realpath(prefix)
+                or real_cmd.startswith(os.path.realpath(prefix).rstrip(os.sep) + os.sep)
+                for prefix in self.cfg.path_whitelist
+            )
+            located = real_cmd if allowed else None
+        else:
+            located = shutil.which(cmd, path=os.pathsep.join(self.cfg.path_whitelist))
         self._which_cache[cmd] = located
         return located
 
@@ -111,6 +120,13 @@ class ExecutionProxy:
                 truncated=False, duration=0.0, skipped_reason="empty_argv",
                 run_as=self._current_user,
             )
+        invalid = self._validate_argv(argv)
+        if invalid is not None:
+            return ExecutionResult(
+                argv=argv, returncode=2, stdout="", stderr=invalid,
+                truncated=False, duration=0.0, skipped_reason="invalid_argv",
+                run_as=self._current_user,
+            )
 
         # Windows: 没有 POSIX 权限模型，进入 mock 模式
         if sys.platform == "win32":
@@ -129,8 +145,17 @@ class ExecutionProxy:
         env: dict[str, str] | None,
         stdin: str | None,
     ) -> ExecutionResult:
-        # 1. 解析最终 argv（按需 sudo 包裹）
-        final_argv, sudo_used, run_as = self._wrap_privilege(argv, requires_root)
+        # 1. 在 sudo 包装之前解析真实工具命令。绝对路径同样必须位于白名单目录。
+        resolved = self._resolve_command(argv[0])
+        if resolved is None:
+            return ExecutionResult(
+                argv=list(argv), returncode=127, stdout="",
+                stderr=f"command not in whitelist PATH: {argv[0]}",
+                truncated=False, duration=0.0, skipped_reason="not_in_path",
+                run_as=self._current_user,
+            )
+        original_argv = [resolved, *argv[1:]]
+        final_argv, sudo_used, run_as = self._wrap_privilege(original_argv, requires_root)
 
         # 2. 命令必须能在 PATH 中找到（防注入）
         cmd = final_argv[0]
@@ -274,7 +299,20 @@ class ExecutionProxy:
 
     def _sudo_wrap(self, argv: list[str], target_user: str) -> list[str]:
         # -n: 非交互式；-u: 指定运行用户；-E 不带，因为我们自建 env
-        return ["sudo", "-n", "-u", target_user, "--"] + list(argv)
+        return ["/usr/bin/sudo", "-n", "-u", target_user, "--"] + list(argv)
+
+    @staticmethod
+    def _validate_argv(argv: list[str]) -> str | None:
+        if len(argv) > 256:
+            return "too many argv elements"
+        for idx, arg in enumerate(argv):
+            if not isinstance(arg, str):
+                return f"argv[{idx}] must be string"
+            if not arg or "\0" in arg:
+                return f"argv[{idx}] is empty or contains NUL"
+            if len(arg) > 8192:
+                return f"argv[{idx}] is too long"
+        return None
 
     def _truncate(self, raw: bytes) -> tuple[str, bool]:
         truncated = False

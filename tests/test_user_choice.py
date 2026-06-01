@@ -207,6 +207,31 @@ def test_agent_user_choice_rejects_invalid_value(tmp_path: Path):
     assert refusal["is_error"] is True
 
 
+def test_agent_user_choice_validates_schema_before_callback(tmp_path: Path):
+    backend = _ChoiceBackend()
+    backend.tool_args["options"] = [{"value": "y", "label": "Only option"}]
+    callback_called = False
+
+    def choose(_choice):
+        nonlocal callback_called
+        callback_called = True
+        return "y"
+
+    agent = _agent_for_choice(tmp_path, backend, on_user_choice=choose)
+    agent.ask("please decide")
+
+    assert callback_called is False
+    tool_result = next(
+        item
+        for message in agent.messages
+        if message["role"] == "user" and isinstance(message["content"], list)
+        for item in message["content"]
+        if isinstance(item, dict) and item.get("type") == "tool_result"
+    )
+    assert tool_result["is_error"] is True
+    assert "参数" in tool_result["content"]
+
+
 # ---- 3. thinking_delta fallback ------------------------------------------
 
 

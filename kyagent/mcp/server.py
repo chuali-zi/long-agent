@@ -24,6 +24,12 @@ from kyagent.audit.logger import AuditLogger
 from kyagent.audit.trace import EventKind, Trace
 from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
+from kyagent.mcp.protocol import (
+    ProtocolError,
+    validate_initialize,
+    validate_request,
+    validate_tool_call,
+)
 from kyagent.mcp.tools.base import ToolRegistry
 from kyagent.mcp.tools.pipeline import (
     PipelineError,
@@ -50,19 +56,6 @@ def _err(req_id: Any, code: int, message: str, data: Any = None) -> dict[str, An
     return {"jsonrpc": "2.0", "id": req_id, "error": e}
 
 
-def _safe_exc_summary(exc: BaseException) -> str:
-    """异常摘要，剥离文件路径（防泄漏内部目录结构 / 用户名）。
-
-    MCP Security Considerations 要求服务端 sanitize 输出，不把内部细节回写给客户端。
-    """
-    name = type(exc).__name__
-    msg = str(exc)
-    # 截断长度上限
-    if len(msg) > 200:
-        msg = msg[:200] + "...[truncated]"
-    return f"{name}: {msg}"
-
-
 # ---- 服务器 ----------------------------------------------------------------
 
 
@@ -84,7 +77,7 @@ class McpServer:
         self.guardrail = guardrail
         self.executor = executor
         self.audit = audit
-        self._initialized = False
+        self._state = "new"
 
     # ---- 入口 ----------------------------------------------------------
 
@@ -100,16 +93,16 @@ class McpServer:
                 self._write(_err(None, -32700, "parse error"))
                 continue
 
-            is_notification = "id" not in msg
+            is_notification = isinstance(msg, dict) and "id" not in msg
             try:
                 response = self._dispatch(msg)
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 # 通知出错绝不回复（JSON-RPC 2.0 强制）。
                 # 请求出错只回简短摘要，不暴露 traceback / 内部路径。
                 if is_notification:
                     continue
-                response = _err(msg.get("id"), -32603, "internal error",
-                                {"exc": _safe_exc_summary(e)})
+                req_id = msg.get("id") if isinstance(msg, dict) else None
+                response = _err(req_id, -32603, "internal error")
             if response is not None:
                 self._write(response)
 
@@ -119,44 +112,68 @@ class McpServer:
 
     # ---- 路由 ----------------------------------------------------------
 
-    def _dispatch(self, msg: dict[str, Any]) -> dict[str, Any] | None:
-        method = msg.get("method")
-        req_id = msg.get("id")
-        params = msg.get("params") or {}
-
-        # 通知 = 无 id 字段。JSON-RPC 2.0 规定服务端 MUST NOT 回复通知。
-        is_notification = "id" not in msg
+    def _dispatch(self, msg: Any) -> dict[str, Any] | None:
+        try:
+            request = validate_request(msg)
+        except ProtocolError as exc:
+            if (
+                isinstance(msg, dict)
+                and "id" not in msg
+                and msg.get("jsonrpc") == "2.0"
+                and isinstance(msg.get("method"), str)
+            ):
+                return None
+            return _err(exc.req_id, exc.code, exc.message)
+        method = request.method
+        req_id = request.req_id
+        params = request.params
 
         # ---- 通知 ----（必须返回 None，禁止有任何输出，错的方法名也不报错）
-        if is_notification:
-            if method == "notifications/initialized":
+        if request.is_notification:
+            if method == "notifications/initialized" and self._state == "initializing":
                 # MCP 2024-11-05 lifecycle：客户端就绪信号
-                self._initialized = True
+                self._state = "initialized"
             elif method == "notifications/cancelled":
                 # 可选：客户端取消请求；我们目前同步处理，no-op
                 pass
-            elif method == "initialized":
-                # 兼容：老式裸 "initialized"（不合规，但有些自制客户端这么发）
-                self._initialized = True
             # 任何其它通知：静默忽略，绝不返回 error response
             return None
 
         # ---- 请求 ----（必有 id，必须返回 response）
         if method == "initialize":
-            return _resp(req_id, self._initialize(params))
+            try:
+                validate_initialize(params, self.PROTOCOL_VERSION)
+            except ProtocolError as exc:
+                return _err(req_id, exc.code, exc.message)
+            self._state = "initializing"
+            return _resp(req_id, self._initialize())
         if method == "ping":
             # MCP utilities/ping：用于探活，固定返回空对象
             return _resp(req_id, {})
+        if method in {"tools/list", "tools/call"} and self._state != "initialized":
+            return _err(req_id, -32600, "server is not initialized")
         if method == "tools/list":
             return _resp(req_id, {"tools": self.registry.to_mcp_list()})
         if method == "tools/call":
-            return _resp(req_id, self._call_tool(params))
+            try:
+                name, args = validate_tool_call(params)
+                tool = self.registry.get(name)
+                if tool is None:
+                    raise ProtocolError(-32602, f"unknown tool: {name}")
+                if name in {"ask_user_choice", "submit_rca_report"}:
+                    return _resp(req_id, {
+                        "content": [{"type": "text", "text": "该逻辑工具仅供 Agent 交互闭环使用"}],
+                        "isError": True,
+                    })
+                return _resp(req_id, self._call_tool(tool, name, args))
+            except ProtocolError as exc:
+                return _err(req_id, exc.code, exc.message)
 
         return _err(req_id, -32601, f"method not found: {method}")
 
     # ---- 处理器 --------------------------------------------------------
 
-    def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _initialize(self) -> dict[str, Any]:
         return {
             "protocolVersion": self.PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
@@ -166,67 +183,53 @@ class McpServer:
             },
         }
 
-    def _call_tool(self, params: dict[str, Any]) -> dict[str, Any]:
-        name = params.get("name")
-        args = params.get("arguments") or {}
-        tool = self.registry.get(name) if isinstance(name, str) else None
-
+    def _call_tool(self, tool: Any, name: str, args: dict[str, Any]) -> dict[str, Any]:
         # 为每次 tool 调用建一条 trace（外部 LLM 调进来时这是最完整的审计单元）
         trace = Trace(user="mcp-client")
         self.audit.open(trace)
         trace.metadata.update({"channel": "mcp", "tool": name})
 
-        if tool is None:
-            self.audit.event(trace, EventKind.ERROR, {"reason": "unknown_tool", "name": name})
-            self.audit.close(trace)
+        try:
+            # validate + build_argv + TOOL_REQUEST + PERCEPTION（共享流水线）
+            prep = prepare_call(tool, args, trace=trace, audit=self.audit)
+            if isinstance(prep, PipelineError):
+                return {"content": [{"type": "text", "text": prep.detail}], "isError": True}
+
+            verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
+
+            if verdict.decision is Decision.DENY:
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": f"已拦截：{verdict.risk.value}\n" + "\n".join(verdict.rationale),
+                    }],
+                    "isError": True,
+                }
+            if verdict.decision is Decision.CONFIRM:
+                # 通过 MCP 协议无法发起用户确认，按"拒绝"返回，并提示需走交互模式
+                self.audit.event(trace, EventKind.ERROR, {"reason": "needs_confirm_via_mcp"})
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (f"需用户确认才能执行（risk={verdict.risk.value}）；"
+                                 f"通过 MCP 通道默认不发起确认。请改走 kyagent chat。"),
+                    }],
+                    "isError": True,
+                }
+
+            # 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
+            _, formatted, content = execute_and_format(
+                prep, trace=trace, audit=self.audit, executor=self.executor,
+            )
+            self.audit.event(trace, EventKind.AGENT_REPLY,
+                             {"ok": formatted.ok, "len": len(formatted.content),
+                              "error": formatted.error})
             return {
-                "content": [{"type": "text", "text": f"unknown tool: {name}"}],
-                "isError": True,
+                "content": [{"type": "text", "text": content or (formatted.error or "")}],
+                "isError": not formatted.ok,
             }
-
-        # validate + build_argv + TOOL_REQUEST + PERCEPTION（共享流水线）
-        prep = prepare_call(tool, args, trace=trace, audit=self.audit)
-        if isinstance(prep, PipelineError):
+        finally:
             self.audit.close(trace)
-            return {"content": [{"type": "text", "text": prep.detail}], "isError": True}
-
-        verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
-
-        if verdict.decision is Decision.DENY:
-            self.audit.close(trace)
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": f"已拦截：{verdict.risk.value}\n" + "\n".join(verdict.rationale),
-                }],
-                "isError": True,
-            }
-        if verdict.decision is Decision.CONFIRM:
-            # 通过 MCP 协议无法发起用户确认，按"拒绝"返回，并提示需走交互模式
-            self.audit.event(trace, EventKind.ERROR, {"reason": "needs_confirm_via_mcp"})
-            self.audit.close(trace)
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": (f"需用户确认才能执行（risk={verdict.risk.value}）；"
-                             f"通过 MCP 通道默认不发起确认。请改走 kyagent chat。"),
-                }],
-                "isError": True,
-            }
-
-        # 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
-        _, formatted, content = execute_and_format(
-            prep, trace=trace, audit=self.audit, executor=self.executor,
-        )
-        self.audit.event(trace, EventKind.AGENT_REPLY,
-                         {"ok": formatted.ok, "len": len(formatted.content),
-                          "error": formatted.error})
-        self.audit.close(trace)
-
-        return {
-            "content": [{"type": "text", "text": content or (formatted.error or "")}],
-            "isError": not formatted.ok,
-        }
 
 
 # ---- 入口函数（被 pyproject.toml 的 script 引用） --------------------------
@@ -236,7 +239,11 @@ def main() -> None:
     cfg = load_config()
     rt = build_runtime(cfg)
     server = McpServer(cfg, rt.registry, rt.guardrail, rt.executor, rt.audit)
-    server.serve()
+    try:
+        server.serve()
+    finally:
+        rt.audit.close_file()
+        rt.audit.store.close()
 
 
 if __name__ == "__main__":

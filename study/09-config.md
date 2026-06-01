@@ -209,7 +209,7 @@ mcp:
 
 要点：
 - 默认 `llm_backend: deepseek_httpx`，优先使用真实 DeepSeek httpx 后端
-- DeepSeek key 可来自 `DEEPSEEK_API_KEY` 或项目根 `kyagent.json` 的 `deepseek_api_key` / `deepseek.api_key`
+- DeepSeek key 只允许通过 `DEEPSEEK_API_KEY` 或受控部署 env 文件注入；项目文件中的密钥字段会被忽略
 - 两处都缺 key 时直接报错；离线演示需显式设置 `llm_backend=mock`
 - 项目根 `kyagent.json` 可写 `{"llm_backend":"qwen_httpx"}` 覆盖默认 YAML
 - 显式环境变量 `KYAGENT_LLM_BACKEND` 覆盖 `kyagent.json`（`KYAGENT_LLM_BACKEND=anthropic kyagent ask "..."`）

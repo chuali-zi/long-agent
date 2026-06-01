@@ -32,13 +32,12 @@ from rich.table import Table
 from rich.text import Text
 
 from kyagent.agent.core import Agent
-from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import load_config
-from kyagent.mcp.tools import default_registry
+from kyagent.mcp.plugins import configured_registry
 from kyagent.confirm import ConfirmRequest
+from kyagent.runtime import build_audit_store
 from kyagent.safety.guardrail import Guardrail
-from kyagent.safety.policy import Decision
 
 app = typer.Typer(no_args_is_help=False, add_completion=False, help="kyagent — 麒麟安全运维 Agent CLI")
 tools_app = typer.Typer(help="工具相关")
@@ -103,37 +102,40 @@ def chat(
     ))
 
     last_trace_id: str | None = None
-    while True:
-        try:
-            text = Prompt.ask("[bold green]你[/]")
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]再见[/]")
-            break
-        text = text.strip()
-        if not text:
-            continue
-        if text in ("/exit", "/quit"):
-            break
-        if text == "/audit":
-            if last_trace_id:
-                _print_trace(cfg, last_trace_id)
-            else:
-                console.print("[dim]还没有 trace[/]")
-            continue
-        if text == "/reset":
-            agent.messages.clear()
-            console.print("[dim]上下文已清空[/]")
-            continue
+    try:
+        while True:
+            try:
+                text = Prompt.ask("[bold green]你[/]")
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]再见[/]")
+                break
+            text = text.strip()
+            if not text:
+                continue
+            if text in ("/exit", "/quit"):
+                break
+            if text == "/audit":
+                if last_trace_id:
+                    _print_trace(cfg, last_trace_id)
+                else:
+                    console.print("[dim]还没有 trace[/]")
+                continue
+            if text == "/reset":
+                agent.messages.clear()
+                console.print("[dim]上下文已清空[/]")
+                continue
 
-        result = agent.ask(text, user=user)
-        last_trace_id = result.trace.trace_id
-        console.print(Panel.fit(
-            result.final_text or "[dim](空)[/]",
-            title=f"kyagent · trace={result.trace.trace_id[:12]} · iter={result.tool_iterations}",
-            border_style="blue",
-        ))
-        if result.notes:
-            console.print("[dim]" + " | ".join(result.notes) + "[/]")
+            result = agent.ask(text, user=user)
+            last_trace_id = result.trace.trace_id
+            console.print(Panel.fit(
+                result.final_text or "[dim](空)[/]",
+                title=f"kyagent · trace={result.trace.trace_id[:12]} · iter={result.tool_iterations}",
+                border_style="blue",
+            ))
+            if result.notes:
+                console.print("[dim]" + " | ".join(result.notes) + "[/]")
+    finally:
+        agent.shutdown()
 
 
 @app.command()
@@ -146,20 +148,23 @@ def ask(
     """非交互式提问。"""
     cfg = load_config(config)
     agent = Agent.from_config(cfg, confirm=lambda *a, **k: False)  # 单轮模式不允许 confirm
-    result = agent.ask(text, user=user)
-    if json_out:
-        sys.stdout.write(json.dumps({
-            "trace_id": result.trace.trace_id,
-            "text": result.final_text,
-            "iterations": result.tool_iterations,
-            "denied": result.denied,
-            "notes": result.notes,
-            "backend": agent.llm.name,
-        }, ensure_ascii=False, indent=2) + "\n")
-        return
-    console.print(result.final_text)
-    if result.notes:
-        console.print("[dim]" + " | ".join(result.notes) + "[/]")
+    try:
+        result = agent.ask(text, user=user)
+        if json_out:
+            sys.stdout.write(json.dumps({
+                "trace_id": result.trace.trace_id,
+                "text": result.final_text,
+                "iterations": result.tool_iterations,
+                "denied": result.denied,
+                "notes": result.notes,
+                "backend": agent.llm.name,
+            }, ensure_ascii=False, indent=2) + "\n")
+            return
+        console.print(result.final_text)
+        if result.notes:
+            console.print("[dim]" + " | ".join(result.notes) + "[/]")
+    finally:
+        agent.shutdown()
 
 
 @app.command()
@@ -180,7 +185,7 @@ def tui(
 def tools_list(config: str | None = typer.Option(None, "--config", "-c")):
     """列出所有已注册工具与风险等级。"""
     cfg = load_config(config)
-    registry = default_registry()
+    registry = configured_registry(cfg)
     table = Table(title="kyagent 工具清单", show_lines=False)
     table.add_column("name", style="cyan")
     table.add_column("risk")
@@ -188,8 +193,6 @@ def tools_list(config: str | None = typer.Option(None, "--config", "-c")):
     table.add_column("read-only?")
     table.add_column("description")
     for tool in registry.all():
-        if cfg.mcp.enable_tools and tool.name not in cfg.mcp.enable_tools:
-            continue
         risk_style = {"low": "green", "medium": "yellow", "high": "red", "critical": "bold red"}
         rc = risk_style.get(tool.risk_level.value, "white")
         table.add_row(
@@ -307,8 +310,11 @@ def audit_list(
     config: str | None = typer.Option(None, "--config", "-c"),
 ):
     cfg = load_config(config)
-    store = AuditStore(cfg.resolve(cfg.audit.database))
-    rows = store.list_traces(limit=limit)
+    store = build_audit_store(cfg)
+    try:
+        rows = store.list_traces(limit=limit)
+    finally:
+        store.close()
     table = Table(title="最近 trace")
     table.add_column("trace_id")
     table.add_column("user")
@@ -332,15 +338,36 @@ def audit_show(
     _print_trace(cfg, trace_id)
 
 
+@audit_app.command("verify")
+def audit_verify(
+    trace_id: str = typer.Argument(...),
+    config: str | None = typer.Option(None, "--config", "-c"),
+):
+    """校验 trace 的哈希链、HMAC 和闭链尾封印。"""
+    cfg = load_config(config)
+    store = build_audit_store(cfg)
+    try:
+        result = store.verify_trace(trace_id)
+    finally:
+        store.close()
+    console.print_json(data=result)
+    if not result["ok"]:
+        raise typer.Exit(code=2)
+
+
 def _print_trace(cfg, trace_id: str) -> None:
-    store = AuditStore(cfg.resolve(cfg.audit.database))
-    events = store.get_events(trace_id)
+    store = build_audit_store(cfg)
+    try:
+        events = store.get_events(trace_id)
+    finally:
+        store.close()
     if not events:
         console.print(f"[red]找不到 trace {trace_id}[/]")
         return
     kind_color = {
         EventKind.USER_INPUT.value: "bold green",
         EventKind.PERCEPTION.value: "cyan",
+        EventKind.DIAGNOSIS.value: "bold cyan",
         EventKind.LLM_THOUGHT.value: "magenta",
         EventKind.TOOL_REQUEST.value: "blue",
         EventKind.SAFETY_CHECK.value: "yellow",
@@ -378,7 +405,7 @@ def mcp_serve(config: str | None = typer.Option(None, "--config", "-c")):
 
 @web_app.command("serve")
 def web_serve(
-    host: str = typer.Option("0.0.0.0", "--host", "-h", help="监听地址"),
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="监听地址"),
     port: int = typer.Option(8000, "--port", "-p", help="监听端口"),
     config: str | None = typer.Option(None, "--config", "-c"),
     reload: bool = typer.Option(False, "--reload", help="开发态自动重载"),
@@ -392,6 +419,12 @@ def web_serve(
     except ImportError:
         console.print("[red]缺少依赖：请先 [bold]pip install -e .[web][/]")
         raise typer.Exit(code=1)
+    from kyagent.web.security import UnsafeBindError, ensure_safe_bind
+    try:
+        ensure_safe_bind(host)
+    except UnsafeBindError as exc:
+        console.print(f"[red]拒绝启动：{exc}[/]")
+        raise typer.Exit(code=2) from exc
     from kyagent.web.server import build_app
     cfg = load_config(config)
     app_obj = build_app(cfg)

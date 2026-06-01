@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
-# One-click launcher for the kyagent FastAPI browser console.
+# One-click launcher: start the kyagent Web backend and open its browser UI.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOST="${KYAGENT_WEB_HOST:-0.0.0.0}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST="${KYAGENT_WEB_HOST:-127.0.0.1}"
 PORT="${KYAGENT_WEB_PORT:-8000}"
-CONFIG="${KYAGENT_CONFIG:-}"
-ENV_FILE="${KYAGENT_ENV_FILE:-}"
-INSTALL_WEB=0
-USE_MOCK=0
+BROWSER_URL="${KYAGENT_WEB_BROWSER_URL:-}"
+OPEN_BROWSER=1
+BACKEND_ARGS=()
 
 usage() {
   cat <<'EOF'
 Usage: bash scripts/start-web.sh [options]
 
+Starts the FastAPI backend, waits for /api/health, and opens the browser UI.
+On headless Linux the backend keeps running and the script prints the URL.
+
 Options:
-  --host HOST          Listen address. Defaults to 0.0.0.0.
+  --host HOST          Listen address. Defaults to 127.0.0.1.
   --port PORT          Listen port. Defaults to 8000.
+  --browser-url URL    URL to open. Defaults to the local listen URL.
+  --no-open-browser    Start the backend without trying to open a browser.
   --config PATH        kyagent YAML config path.
   --env-file PATH      Load environment variables before launch.
   --install-web        Install the optional FastAPI/uvicorn extra if missing.
   --mock               Force KYAGENT_LLM_BACKEND=mock for an offline demo.
   --help               Show this help.
 
-Examples:
-  bash scripts/start-web.sh --install-web --mock
-  bash scripts/start-web.sh --env-file /etc/kyagent/env --host 0.0.0.0 --port 8000
-
-Manual equivalent:
-  python -m pip install -e .[web]
-  kyagent web serve --host 0.0.0.0 --port 8000
+Separate scripts:
+  bash scripts/start-web-backend.sh --mock
+  bash scripts/open-web.sh --url http://127.0.0.1:8000
 EOF
 }
 
@@ -37,26 +37,20 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)
       HOST="${2:?missing value for --host}"
+      BACKEND_ARGS+=("$1" "$2")
       shift 2
       ;;
     --port)
       PORT="${2:?missing value for --port}"
+      BACKEND_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --config)
-      CONFIG="${2:?missing value for --config}"
+    --browser-url)
+      BROWSER_URL="${2:?missing value for --browser-url}"
       shift 2
       ;;
-    --env-file)
-      ENV_FILE="${2:?missing value for --env-file}"
-      shift 2
-      ;;
-    --install-web)
-      INSTALL_WEB=1
-      shift
-      ;;
-    --mock)
-      USE_MOCK=1
+    --no-open-browser)
+      OPEN_BROWSER=0
       shift
       ;;
     --help)
@@ -64,61 +58,44 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      printf '[kyagent-web][ERROR] unknown option: %s\n' "$1" >&2
-      usage >&2
-      exit 1
+      BACKEND_ARGS+=("$1")
+      shift
       ;;
   esac
 done
 
-cd "$ROOT"
-
-if [[ -z "$ENV_FILE" && -r /etc/kyagent/env ]]; then
-  ENV_FILE=/etc/kyagent/env
+if [[ -z "$BROWSER_URL" ]]; then
+  case "$HOST" in
+    0.0.0.0|::|\[::\])
+      BROWSER_URL="http://127.0.0.1:$PORT"
+      ;;
+    *)
+      BROWSER_URL="http://$HOST:$PORT"
+      ;;
+  esac
 fi
-if [[ -n "$ENV_FILE" ]]; then
-  if [[ ! -r "$ENV_FILE" ]]; then
-    printf '[kyagent-web][ERROR] env file is not readable: %s\n' "$ENV_FILE" >&2
-    exit 1
+
+bash "$SCRIPT_DIR/start-web-backend.sh" "${BACKEND_ARGS[@]}" &
+BACKEND_PID=$!
+
+cleanup() {
+  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
+    kill "$BACKEND_PID" >/dev/null 2>&1 || true
+    wait "$BACKEND_PID" >/dev/null 2>&1 || true
   fi
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
+}
+trap cleanup INT TERM EXIT
 
-if [[ -x "$ROOT/.venv/bin/python" ]]; then
-  PYTHON="$ROOT/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON=python3
+if [[ "$OPEN_BROWSER" == "1" ]]; then
+  bash "$SCRIPT_DIR/open-web.sh" \
+    --url "$BROWSER_URL" \
+    --health-url "$BROWSER_URL/api/health" \
+    --pid "$BACKEND_PID"
 else
-  PYTHON=python
+  printf '[kyagent-web] browser open disabled; open manually: %s\n' "$BROWSER_URL"
 fi
 
-if [[ "$INSTALL_WEB" == "1" ]]; then
-  printf '[kyagent-web] installing optional Web dependencies: pip install -e .[web]\n'
-  "$PYTHON" -m pip install -e ".[web]"
-fi
-
-if ! "$PYTHON" - <<'PY'
-import fastapi  # noqa: F401
-import uvicorn  # noqa: F401
-PY
-then
-  printf '[kyagent-web][ERROR] FastAPI/uvicorn missing. Re-run with --install-web.\n' >&2
-  exit 1
-fi
-
-if [[ "$USE_MOCK" == "1" ]]; then
-  export KYAGENT_LLM_BACKEND=mock
-fi
-if [[ -n "$CONFIG" ]]; then
-  export KYAGENT_CONFIG="$CONFIG"
-fi
-
-printf '[kyagent-web] open http://%s:%s\n' "$HOST" "$PORT"
-ARGS=(web serve --host "$HOST" --port "$PORT")
-if [[ -n "$CONFIG" ]]; then
-  ARGS+=(--config "$CONFIG")
-fi
-exec "$PYTHON" -m kyagent "${ARGS[@]}"
+wait "$BACKEND_PID"
+STATUS=$?
+trap - INT TERM EXIT
+exit "$STATUS"

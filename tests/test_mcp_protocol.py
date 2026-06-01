@@ -17,6 +17,7 @@ import pytest
 
 from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError
+from kyagent.mcp.tools.logs import LogSizeSampleTool
 
 
 # ---- JSON Schema 严格校验 -------------------------------------------------
@@ -83,6 +84,12 @@ def test_string_coerce_still_works():
     tool = default_registry().get("lsof_port")
     cleaned = tool.validate({"port": "80"})
     assert cleaned["port"] == 80
+
+
+@pytest.mark.parametrize("paths", [["relative"], ["--help"], [123]])
+def test_array_items_are_validated_recursively(paths):
+    with pytest.raises(ToolError):
+        LogSizeSampleTool().validate({"paths": paths})
 
 
 # ---- MCP stdio 协议层 ----------------------------------------------------

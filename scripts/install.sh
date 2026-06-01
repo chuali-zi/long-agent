@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 一键安装 kyagent（推荐 Python 3.10+）。
-# 默认主依赖全部纯 Python / 零 Rust 编译，所有架构（含 LoongArch64）安全。
+# 开发机便捷安装。LoongArch64 正式部署必须使用 install-loongarch.sh，
+# 由专用脚本固定纯 Python / 零 Rust 默认路径。
 # 真实 LLM 后端（anthropic / openai SDK）含 jiter(Rust)，移到可选依赖，按需装。
 set -euo pipefail
 
@@ -19,6 +20,7 @@ pip install -e .
 mkdir -p var
 
 echo ""
+echo "[NOTE] LoongArch64 正式部署请使用：sudo bash scripts/install-loongarch.sh --yes"
 echo "[OK] kyagent 已安装（默认 deepseek_httpx；缺 DEEPSEEK_API_KEY 会直接报错；HttpxBackend 可用，零 Rust 编译依赖）。"
 echo "    激活：source .venv/bin/activate"
 echo "    入门：kyagent tools list"

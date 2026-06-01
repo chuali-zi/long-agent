@@ -313,8 +313,7 @@ def test_build_backend_constructs_deepseek_preset(monkeypatch):
     assert captured["api_key"] == "sk-deepseek-test"
 
 
-def test_build_backend_deepseek_preset_uses_config_api_key_when_env_missing(monkeypatch):
-    """llm_backend=deepseek 也支持从配置对象读取 DeepSeek key。"""
+def test_build_backend_deepseek_preset_ignores_config_api_key_when_env_missing(monkeypatch):
     captured: dict[str, Any] = {}
 
     class _CapturingClient(_FakeOpenAIClient):
@@ -326,14 +325,15 @@ def test_build_backend_deepseek_preset_uses_config_api_key_when_env_missing(monk
     monkeypatch.setitem(__import__("sys").modules, "openai", fake_module)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
-    cfg = Config()
-    cfg.agent.llm_backend = "deepseek"
-    cfg.agent.deepseek.api_key = "sk-json"
+    cfg = Config.parse_obj({
+        "agent": {
+            "llm_backend": "deepseek",
+            "deepseek": {"api_key": "sk-json"},
+        },
+    })
 
-    be = build_backend(cfg)
-
-    assert isinstance(be, OpenAIBackend)
-    assert captured["api_key"] == "sk-json"
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        build_backend(cfg)
 
 
 def test_build_backend_constructs_qwen_preset(monkeypatch):

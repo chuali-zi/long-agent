@@ -84,17 +84,34 @@ class Guardrail:
     # ---- 主入口 --------------------------------------------------------
 
     def check_cmdline(self, cmdline: str, declared_risk: RiskLevel | None = None) -> Verdict:
-        return self._check(cmdline, declared_risk=declared_risk)
+        try:
+            argv = shlex.split(cmdline, posix=True)
+        except ValueError:
+            argv = []
+        return self._check(cmdline, declared_risk=declared_risk, argv=argv)
 
     def check_argv(self, argv: list[str], declared_risk: RiskLevel | None = None) -> Verdict:
         cmdline = " ".join(shlex.quote(a) for a in argv)
-        return self._check(cmdline, declared_risk=declared_risk)
+        return self._check(cmdline, declared_risk=declared_risk, argv=argv)
 
     # ---- 内部 ----------------------------------------------------------
 
-    def _check(self, cmdline: str, declared_risk: RiskLevel | None = None) -> Verdict:
+    def _check(
+        self,
+        cmdline: str,
+        declared_risk: RiskLevel | None = None,
+        argv: list[str] | None = None,
+    ) -> Verdict:
         rationale: list[str] = []
         hits = self.engine.scan_cmdline(cmdline)
+        canonical = _unwrap_command(argv or [])
+        if canonical and canonical != (argv or []):
+            seen = {h.rule_id for h in hits}
+            for hit in self.engine.scan_argv(canonical):
+                if hit.rule_id not in seen:
+                    hits.append(hit)
+                    seen.add(hit.rule_id)
+            rationale.append("已展开 sudo/env 包装器后复检")
 
         if hits:
             risk = RiskLevel.max([h.risk for h in hits])
@@ -137,3 +154,39 @@ class Guardrail:
             hits=hits,
             rationale=rationale,
         )
+
+
+def _unwrap_command(argv: list[str]) -> list[str]:
+    """展开少量常见包装器，避免危险命令藏在 sudo/env 后逃过规则扫描。"""
+    current = list(argv)
+    for _ in range(3):
+        if not current:
+            return current
+        command = current[0].rsplit("/", 1)[-1]
+        if command == "sudo":
+            idx = 1
+            while idx < len(current):
+                token = current[idx]
+                if token == "--":
+                    idx += 1
+                    break
+                if token in {"-n", "-E"}:
+                    idx += 1
+                    continue
+                if token in {"-u", "-g", "-h", "-p", "-C", "-T", "-R", "-D"}:
+                    idx += 2
+                    continue
+                if token.startswith("-"):
+                    idx += 1
+                    continue
+                break
+            current = current[idx:]
+            continue
+        if command == "env":
+            idx = 1
+            while idx < len(current) and ("=" in current[idx] or current[idx].startswith("-")):
+                idx += 1
+            current = current[idx:]
+            continue
+        return current
+    return current

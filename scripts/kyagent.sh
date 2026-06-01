@@ -15,7 +15,9 @@ Commands:
   permissions   Create the restricted runtime account and sudoers policy.
   chat          Start the interactive chat shell.
   tui           Start the streaming terminal UI.
-  web           Start the browser console.
+  web           Start the Web backend and open the browser UI.
+  web-backend   Start only the Web backend.
+  web-open      Open an already running Web UI.
   tools         List the enabled tools.
 
 Common examples:
@@ -24,6 +26,8 @@ Common examples:
   bash scripts/kyagent.sh chat
   bash scripts/kyagent.sh tui
   bash scripts/kyagent.sh web --mock
+  bash scripts/kyagent.sh web-backend --mock
+  bash scripts/kyagent.sh web-open
 
 LoongArch/Kylin deployment:
   sudo bash scripts/install-loongarch.sh --yes
@@ -79,6 +83,12 @@ case "$COMMAND" in
     ;;
   web)
     exec bash "$SCRIPT_DIR/start-web.sh" "$@"
+    ;;
+  web-backend)
+    exec bash "$SCRIPT_DIR/start-web-backend.sh" "$@"
+    ;;
+  web-open)
+    exec bash "$SCRIPT_DIR/open-web.sh" "$@"
     ;;
   tools)
     require_kyagent

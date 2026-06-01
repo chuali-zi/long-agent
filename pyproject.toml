@@ -14,7 +14,8 @@ keywords = ["mcp", "agent", "kylin", "ops", "security", "llm"]
 
 dependencies = [
     # 主依赖必须满足"默认路径零 Rust"约束（含 LoongArch64 Old World）：
-    # - pydantic v1 → 纯 Python wheel，绕开 pydantic-core Rust 编译
+    # - pydantic v1 → 避开 pydantic-core Rust；LoongArch 安装器再用 SKIP_CYTHON=1
+    #   和 --no-binary pydantic 固定纯 Python 路径
     # - PyYAML 6.0.1+ → sdist build deps 纯 Python，_yaml C 扩展编译失败时
     #   setup.py 自动回落纯 Python SafeLoader；因此没有必需 C 扩展
     # - httpx<1 → HttpxBackend 用（纯 Python，零 Rust，DeepSeek/Qwen 走 deepseek_httpx）

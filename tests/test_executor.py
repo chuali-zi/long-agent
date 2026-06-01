@@ -63,6 +63,35 @@ def test_clean_env_restricts_path():
         assert p in cfg.path_whitelist
 
 
+def test_clean_env_blocks_identity_and_path_overrides():
+    cfg = SandboxConfig()
+    env = build_clean_env(cfg, extra={
+        "PATH": "/tmp/evil",
+        "HOME": "/tmp/evil-home",
+        "SHELL": "/tmp/evil-shell",
+        "USER": "attacker",
+        "LOGNAME": "attacker",
+        "FOO": "allowed",
+    })
+    assert env["PATH"] != "/tmp/evil"
+    assert env["HOME"] != "/tmp/evil-home"
+    assert env["SHELL"] == "/bin/sh"
+    assert env["USER"] == cfg.account
+    assert env["LOGNAME"] == cfg.account
+    assert env["FOO"] == "allowed"
+
+
+def test_absolute_command_outside_whitelist_is_rejected():
+    proxy = _proxy()
+    assert proxy._resolve_command("/tmp/evil") is None
+
+
+def test_invalid_argv_is_rejected_before_platform_dispatch():
+    result = _proxy().run(["echo", "bad\0arg"])
+    assert result.skipped_reason == "invalid_argv"
+    assert result.returncode != 0
+
+
 def test_sudo_wrap_for_root_when_allowed():
     cfg = SandboxConfig(account="kyagent", forbid_root=False)
     proxy = ExecutionProxy(cfg)
@@ -70,7 +99,7 @@ def test_sudo_wrap_for_root_when_allowed():
                                                      requires_root=True)
     assert sudo_used
     assert run_as == "root"
-    assert final[:5] == ["sudo", "-n", "-u", "root", "--"]
+    assert final[:5] == ["/usr/bin/sudo", "-n", "-u", "root", "--"]
 
 
 def test_forbid_root_default_still_routes_through_sudoers():
@@ -86,7 +115,7 @@ def test_forbid_root_default_still_routes_through_sudoers():
     )
     assert sudo_used, "应通过 sudo 包裹"
     assert run_as == "root"
-    assert final[:5] == ["sudo", "-n", "-u", "root", "--"]
+    assert final[:5] == ["/usr/bin/sudo", "-n", "-u", "root", "--"]
     assert final[5:] == ["systemctl", "restart", "nginx"]
 
 
@@ -112,4 +141,4 @@ def test_forbid_root_disabled_runs_root_directly_via_sudo():
     )
     assert sudo_used
     assert run_as == "root"
-    assert final[:5] == ["sudo", "-n", "-u", "root", "--"]
+    assert final[:5] == ["/usr/bin/sudo", "-n", "-u", "root", "--"]

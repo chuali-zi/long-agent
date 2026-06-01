@@ -52,9 +52,9 @@ class LaArchInfoTool(Tool):
 class LaWorldCheckTool(Tool):
     name = "la_world_check"
     description = (
-        "判定 LoongArch 系统的 ABI 世界（Old World vs New World）。"
-        "原理：检查 /lib64/ld-linux-loongarch-lp64d.so.1 是否存在 —— 存在则 New World，"
-        "缺失（errno=2）则 Old World。Old World 与 New World 是 LoongArch 生态的关键"
+        "判定 LoongArch 系统的 ABI 世界（old / new / mixed / unknown）。"
+        "原理：同时检查 Old World 的 /lib64/ld.so.1 与 New World 的 "
+        "/lib64/ld-linux-loongarch-lp64d.so.1。Old World 与 New World 是 LoongArch 生态的关键"
         "分水岭，二者 ABI / glibc 不兼容，影响二进制可执行性。"
     )
     input_schema = {"type": "object", "properties": {}}
@@ -63,11 +63,16 @@ class LaWorldCheckTool(Tool):
     read_only = True
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
-        return ["ls", "-l", "/lib64/ld-linux-loongarch-lp64d.so.1"]
+        return [
+            "ls",
+            "-1",
+            "/lib64/ld.so.1",
+            "/lib64/ld-linux-loongarch-lp64d.so.1",
+        ]
 
     def format_result(self, exec_result):  # type: ignore[override]
-        # 注意：returncode 非零此处属于"业务结论 = Old World"，并非真正错误。
-        # 直接基于 ExecutionResult 自行组装，绕开 super 的 ok=False 路径。
+        # ``ls`` returns non-zero if either loader is absent. Parse the paths
+        # it did find instead of turning every non-zero status into Old World.
         if exec_result.skipped_reason == "windows_mock":
             from kyagent.mcp.tools.base import ToolResult as _TR
             return _TR(ok=True, content=exec_result.stdout, data=exec_result.to_dict())
@@ -77,11 +82,18 @@ class LaWorldCheckTool(Tool):
             return super().format_result(exec_result)
 
         from kyagent.mcp.tools.base import ToolResult as _TR
-        rc = exec_result.returncode
-        if rc == 0:
-            verdict = "New World"
+        old_loader = "/lib64/ld.so.1"
+        new_loader = "/lib64/ld-linux-loongarch-lp64d.so.1"
+        has_old = old_loader in exec_result.stdout
+        has_new = new_loader in exec_result.stdout
+        if has_old and has_new:
+            verdict = "mixed"
+        elif has_old:
+            verdict = "old"
+        elif has_new:
+            verdict = "new"
         else:
-            verdict = "Old World"
+            verdict = "unknown"
         body = f"verdict: {verdict}\n--- raw stdout ---\n{exec_result.stdout}"
         if exec_result.stderr:
             body += f"\n--- raw stderr ---\n{exec_result.stderr}"

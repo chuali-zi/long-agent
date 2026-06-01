@@ -73,5 +73,45 @@ class AskUserChoiceTool(Tool):
         return ["true"]
 
 
+class SubmitRcaReportTool(Tool):
+    """Persist a structured diagnosis that cites trace-local perception evidence."""
+
+    name = "submit_rca_report"
+    description = (
+        "提交结构化根因分析报告。必须选择内置 playbook，并引用当前 trace 中"
+        "已产生的 evidence_id；没有感知证据时不要调用。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": [
+            "playbook", "summary", "root_cause", "confidence",
+            "evidence_ids", "recommendations",
+        ],
+        "properties": {
+            "playbook": {"type": "string", "minLength": 1, "maxLength": 64},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "root_cause": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1, "maxLength": 128},
+            },
+            "recommendations": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+            },
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+    requires_root = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["true"]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(AskUserChoiceTool())
+    registry.register(SubmitRcaReportTool())

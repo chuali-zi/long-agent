@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import threading
 import time
 from pathlib import Path
@@ -30,9 +31,25 @@ from kyagent.web.server import build_app  # noqa: E402
 
 @pytest.fixture(scope="module")
 def client():
+    old_reviewer = os.environ.get("KYAGENT_WEB_REVIEWER_TOKEN")
+    old_auditor = os.environ.get("KYAGENT_WEB_AUDITOR_TOKEN")
+    os.environ["KYAGENT_WEB_REVIEWER_TOKEN"] = "test-reviewer-token"
+    os.environ["KYAGENT_WEB_AUDITOR_TOKEN"] = "test-auditor-token"
     cfg = load_config(None)
     app = build_app(cfg)
-    return TestClient(app)
+    yield TestClient(app)
+    if old_reviewer is None:
+        os.environ.pop("KYAGENT_WEB_REVIEWER_TOKEN", None)
+    else:
+        os.environ["KYAGENT_WEB_REVIEWER_TOKEN"] = old_reviewer
+    if old_auditor is None:
+        os.environ.pop("KYAGENT_WEB_AUDITOR_TOKEN", None)
+    else:
+        os.environ["KYAGENT_WEB_AUDITOR_TOKEN"] = old_auditor
+
+
+REVIEWER_HEADERS = {"Authorization": "Bearer test-reviewer-token"}
+AUDITOR_HEADERS = {"Authorization": "Bearer test-auditor-token"}
 
 
 def test_static_index_exists():
@@ -43,7 +60,7 @@ def test_health(client):
     r = client.get("/api/health")
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"status", "version", "backend", "tools", "audit_db"}
+    assert set(body.keys()) == {"status", "version"}
     assert body["status"] == "ok"
 
 
@@ -97,7 +114,7 @@ def test_ask_uses_threadpool_and_returns_trace(client, monkeypatch):
 
 
 def test_audit_404(client):
-    r = client.get("/api/audit/traces/this-id-does-not-exist")
+    r = client.get("/api/audit/traces/this-id-does-not-exist", headers=AUDITOR_HEADERS)
     assert r.status_code == 404
 
 
@@ -168,7 +185,7 @@ def test_stream_confirmation_roundtrip_allows_browser_decision(client, monkeypat
     approval = None
     deadline = time.time() + 5
     while time.time() < deadline:
-        pending = client.get("/api/approvals", params={"status": "pending"})
+        pending = client.get("/api/approvals", params={"status": "pending"}, headers=REVIEWER_HEADERS)
         assert pending.status_code == 200
         rows = pending.json()["approvals"]
         if rows:
@@ -183,6 +200,7 @@ def test_stream_confirmation_roundtrip_allows_browser_decision(client, monkeypat
 
     approve = client.post(
         f"/api/approvals/{approval['approval_id']}/approve",
+        headers=REVIEWER_HEADERS,
         json={"reviewer": "tester", "reason": "demo approval"},
     )
     assert approve.status_code == 200
@@ -210,7 +228,7 @@ def test_stream_confirmation_roundtrip_allows_browser_decision(client, monkeypat
 
 
 def test_approvals_list_endpoint_exists(client):
-    r = client.get("/api/approvals")
+    r = client.get("/api/approvals", headers=REVIEWER_HEADERS)
     assert r.status_code == 200
     body = r.json()
     assert set(body.keys()) == {"count", "approvals"}
@@ -223,6 +241,10 @@ def test_static_index_exposes_live_shell_review_ui():
     )
     assert "approval_required" in html
     assert "approval_resolved" in html
+    assert "choice_required" in html
+    assert "choice_resolved" in html
+    assert "selectChoice" in html
+    assert "apiHeaders" in html
     assert "approveApproval" in html
     assert "rejectApproval" in html
     assert ".msg.tool" in html and "var(--red)" in html

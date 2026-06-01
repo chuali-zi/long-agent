@@ -1152,8 +1152,7 @@ def _construct_backend(cfg) -> LlmBackend:
         # 国产 LLM：走 OpenAI 协议兼容路径
         sub = getattr(cfg.agent, name)
         env = sub.api_key_env
-        api_key = getattr(sub, "api_key", None)
-        if not (os.environ.get(env) or api_key):
+        if not os.environ.get(env):
             raise _MissingKeyError(env)
         return OpenAIBackend.preset(
             provider=name,
@@ -1161,7 +1160,6 @@ def _construct_backend(cfg) -> LlmBackend:
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,
             api_key_env=env,
-            api_key=api_key,
             base_url_override=sub.base_url or None,
         )
 
@@ -1185,8 +1183,7 @@ def _construct_backend(cfg) -> LlmBackend:
             )
         sub = getattr(cfg.agent, provider)
         env = sub.api_key_env
-        api_key = getattr(sub, "api_key", None)
-        if not (os.environ.get(env) or api_key):
+        if not os.environ.get(env):
             raise _MissingKeyError(env)
         return HttpxBackend.preset(
             provider=provider,
@@ -1194,7 +1191,6 @@ def _construct_backend(cfg) -> LlmBackend:
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,
             api_key_env=env,
-            api_key=api_key,
             base_url_override=sub.base_url or None,
         )
 

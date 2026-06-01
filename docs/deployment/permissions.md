@@ -1,26 +1,34 @@
 # kyagent 最小权限部署
 
-kyagent 不应以 root 身份持续运行。推荐创建独立的受限系统账户，并只通过 sudoers 白名单放行确实需要 root 的查询或服务操作。
+kyagent 不应以 root 身份持续运行。推荐创建独立受限账户，并只通过 sudoers 白名单放行确实需要 root 的查询。
 
 ## 一键配置
-
-在仓库根目录执行：
 
 ```bash
 sudo bash scripts/kyagent.sh permissions
 ```
 
-该入口会调用 `scripts/setup-sudoers.sh`，依次完成：
+脚本会：
 
-1. 要求 root 权限，并检查 `visudo` 和 `sudo`。
-2. 使用 `LC_ALL=C sudo -V` 获取稳定的英文版本输出。
-3. 要求 `sudo >= 1.9.10`，因为动态参数白名单使用 sudoers 锚定正则。
-4. 创建默认运行账户 `kyagent`，并在系统存在 `systemd-journal` 组时加入该组。
-5. 用 `visudo -cf` 校验临时文件，再安装 `/etc/sudoers.d/kyagent`。
-6. 对安装后的文件再次校验；失败时自动回滚。
-7. 创建 `/var/lib/kyagent`、`/var/log/kyagent` 和 `/var/log/sudo-io`。
+1. 检查 `visudo`、`sudo` 和 `sudo >= 1.9.10`。
+2. 使用 `LC_ALL=C sudo -V` 获取稳定版本输出。
+3. 创建默认运行账户 `kyagent`，并在存在时加入 `systemd-journal` 组。
+4. 用 `visudo -cf` 校验临时文件，再安装 `/etc/sudoers.d/kyagent`。
+5. 对安装后的文件再次校验，失败时自动回滚。
+6. 创建 `/var/lib/kyagent`、`/var/log/kyagent` 和 `/var/log/sudo-io`。
 
-这不是任意 root 提权。模板只允许 [configs/sudoers.kyagent](../../configs/sudoers.kyagent) 中列出的命令和参数。
+默认模板 [configs/sudoers.kyagent](../../configs/sudoers.kyagent) 不授予任意 systemd 服务变更能力。
+
+## 服务 allowlist
+
+确需让 Agent 重启或 reload 少量业务服务时，在安装阶段显式指定：
+
+```bash
+sudo env KYAGENT_SERVICE_ALLOWLIST=nginx.service,sshd.service \
+  bash scripts/kyagent.sh permissions
+```
+
+脚本只接受普通服务名或 `.service` unit，并拒绝 `.target`、`.socket`、核心 systemd 服务和 shell 元字符。生成的 sudoers 规则逐项列出固定命令，不使用任意 unit 正则。
 
 ## 验证
 
@@ -38,8 +46,6 @@ sudo -u kyagent bash scripts/kyagent.sh tui
 sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env
 ```
 
-统一入口会为 `chat`、`tui` 和 `tools` 自动加载可读的 `/etc/kyagent/env`；Web 入口由 `start-web.sh` 加载同一文件。
-
 ## 自定义账户
 
 默认账户名是 `kyagent`。需要改名时：
@@ -48,16 +54,12 @@ sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env
 sudo env KYAGENT_USER=opsagent bash scripts/kyagent.sh permissions
 ```
 
-脚本会同步改写 sudoers 模板中的目标账户和自审计规则。
+LoongArch 安装器会把同一个账户写入 `/etc/kyagent/env` 的 `KYAGENT_EXECUTOR_ACCOUNT`。手工配置自定义账户时也要设置该变量。
 
 ## sudo 版本排障
-
-查看脚本实际使用的版本输出：
 
 ```bash
 LC_ALL=C sudo -V | head -1
 ```
 
-动态参数正则要求 `sudo >= 1.9.10`。旧版本 sudo 无法可靠表达当前白名单边界，脚本会在写入 `/etc/sudoers.d/kyagent` 前停止。
-
-如果仍提示无法识别版本，错误信息会带上原始首行。先确认系统中的 `sudo` 不是包装脚本，再升级发行版 sudo 包。
+动态查询参数正则要求 `sudo >= 1.9.10`。旧版本 sudo 无法可靠表达当前白名单边界，脚本会在覆盖 `/etc/sudoers.d/kyagent` 前停止。

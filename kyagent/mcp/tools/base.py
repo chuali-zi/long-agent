@@ -73,7 +73,7 @@ class Tool(abc.ABC):
 
         props = self.input_schema.get("properties", {})
         required = self.input_schema.get("required", [])
-        additional = self.input_schema.get("additionalProperties", True)
+        additional = self.input_schema.get("additionalProperties", False)
         cleaned: dict[str, Any] = {}
 
         for key in required:
@@ -129,11 +129,34 @@ class Tool(abc.ABC):
         if expected == "array":
             if not isinstance(value, list):
                 raise ToolError(f"{key} 期望 array")
+            item_schema = schema.get("items")
+            if isinstance(item_schema, dict):
+                return [
+                    Tool._coerce_and_validate(item, item_schema, f"{key}[{idx}]")
+                    for idx, item in enumerate(value)
+                ]
             return value
         if expected == "object":
             if not isinstance(value, dict):
                 raise ToolError(f"{key} 期望 object")
-            return value
+            props = schema.get("properties", {})
+            required = schema.get("required", [])
+            additional = schema.get("additionalProperties", False)
+            cleaned: dict[str, Any] = {}
+            for required_key in required:
+                if required_key not in value:
+                    raise ToolError(f"{key}.{required_key!r} 必填")
+            for child_key, child_value in value.items():
+                child_schema = props.get(child_key)
+                if child_schema is None:
+                    if additional is False:
+                        raise ToolError(f"{key} 含未声明字段 {child_key!r}")
+                    cleaned[child_key] = child_value
+                    continue
+                cleaned[child_key] = Tool._coerce_and_validate(
+                    child_value, child_schema, f"{key}.{child_key}"
+                )
+            return cleaned
         return value
 
     @staticmethod
@@ -239,6 +262,13 @@ class ToolRegistry:
 
     def all(self) -> list[Tool]:
         return list(self._tools.values())
+
+    def enable_tools(self, names: list[str]) -> "ToolRegistry":
+        """Keep only configured tools; an empty allowlist leaves all tools enabled."""
+        if names:
+            keep = set(names)
+            self._tools = {name: tool for name, tool in self._tools.items() if name in keep}
+        return self
 
     def to_mcp_list(self) -> list[dict[str, Any]]:
         """tools/list 的标准响应内容。"""

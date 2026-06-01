@@ -34,6 +34,10 @@ Cmnd_Alias KY_ROOT_OBSERVE = \
 Cmnd_Alias KY_ROOT_REGEX_OBSERVE = \
     /usr/bin/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$, \
     /usr/bin/smartctl ^-H -A -- /dev/nvme[0-9]+n[0-9]+(p[0-9]+)?$, \
+    /usr/sbin/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$, \
+    /usr/sbin/smartctl ^-H -A -- /dev/nvme[0-9]+n[0-9]+(p[0-9]+)?$, \
+    /sbin/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$, \
+    /sbin/smartctl ^-H -A -- /dev/nvme[0-9]+n[0-9]+(p[0-9]+)?$, \
     /usr/bin/crontab ^-l -u [a-z_][a-z0-9_-]{0,31}$
 
 # ---- 只读 root 查询：sudoers 自审计 -------------------------------------
@@ -41,16 +45,8 @@ Cmnd_Alias KY_ROOT_REGEX_OBSERVE = \
 Cmnd_Alias KY_SELF_AUDIT = \
     /usr/bin/sudo -l -U kyagent
 
-# ---- 服务变更（高风险，需要 confirm，由 Guardrail 拦） ------------------
-# 单个 unit 参数限定为常见 systemd 名称字符；不允许额外 argv 或以 '-' 开头的选项。
-Cmnd_Alias KY_SVC_MUTATE = \
-    /usr/bin/systemctl ^restart [A-Za-z0-9@._+:][-A-Za-z0-9@._+:]*$, \
-    /usr/bin/systemctl ^reload [A-Za-z0-9@._+:][-A-Za-z0-9@._+:]*$, \
-    !/usr/bin/systemctl ^(restart|reload) (systemd-logind|systemd-journald|systemd-udevd|dbus|polkit)([.]service)?$
-
 # ---- 授权 --------------------------------------------------------------
 kyagent  ALL=(root)  NOPASSWD: KY_ROOT_OBSERVE, KY_ROOT_REGEX_OBSERVE, KY_SELF_AUDIT
-kyagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE
 
 Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
                   log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}

@@ -3,9 +3,9 @@ agent:
   name: kyagent
   # 后端：mock / anthropic / openai / deepseek / qwen /
   #       openai_httpx / deepseek_httpx / qwen_httpx
-  # 默认走真实 DeepSeek httpx 后端；缺 DEEPSEEK_API_KEY 且 kyagent.json 未写 deepseek_api_key 时直接报错。
+  # 默认走真实 DeepSeek httpx 后端；缺 DEEPSEEK_API_KEY 时直接报错。
   # 离线演示请显式设置 KYAGENT_LLM_BACKEND=mock。
-  # 也可在项目根 kyagent.json 写 {"llm_backend": "deepseek_httpx", "deepseek_api_key": "sk-..."}。
+  # 项目根 kyagent.json 仅允许覆盖 llm_backend，不读取任何 key。
   llm_backend: ${KYAGENT_LLM_BACKEND:-deepseek_httpx}
   fallback_to_mock: false
   anthropic:
@@ -16,7 +16,7 @@ agent:
 
 executor:
   # 受限运行账户。若不存在则降级为当前用户但限制 sudoers 白名单
-  account: kyagent
+  account: ${KYAGENT_EXECUTOR_ACCOUNT:-kyagent}
   # 全局命令超时（秒）
   timeout: 30
   # 单次输出截断字节
@@ -54,10 +54,19 @@ audit:
   jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   # 保留事件天数
   retain_days: 90
+  # 生产部署应开启 HMAC 链封印；安装脚本会生成仅运行账户可读的本地 key 文件。
+  integrity_enabled: ${KYAGENT_AUDIT_INTEGRITY_ENABLED:-false}
+  hmac_key_file: ${KYAGENT_AUDIT_HMAC_KEY_FILE:-}
+  hmac_key_id: ${KYAGENT_AUDIT_HMAC_KEY_ID:-local-v1}
+
+rca:
+  playbooks_file: configs/rca-playbooks.yaml
 
 mcp:
   # 暴露的工具白名单（空则全部启用）
   enable_tools: []
+  # 仅加载显式允许的第三方 entry point；默认完全禁用。
+  plugin_entry_points: []
   # stdio 协议握手 banner
   server_name: kyagent
   server_version: 0.1.0

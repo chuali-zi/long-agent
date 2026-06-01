@@ -12,7 +12,8 @@ from typing import Any
 class EventKind(str, Enum):
     USER_INPUT = "user_input"          # 1. 接收指令
     INTENT_CHECK = "intent_check"      # 1b. 自然语言意图风险预过滤 + 注入检测（赛题第 3 条）
-    PERCEPTION = "perception"          # 2. 感知环境（只读工具被动收集的上下文）
+    PERCEPTION = "perception"          # 只读工具执行后的结果型证据
+    DIAGNOSIS = "diagnosis"            # RCA 结论，必须引用已落库感知证据
     LLM_THOUGHT = "llm_thought"        # 3. 推理决策（LLM 思维链 / 文本输出）
     TOOL_REQUEST = "tool_request"      # 3b. LLM 提议调用工具（含原始参数）
     SAFETY_CHECK = "safety_check"      # 4. 安全校验（命中规则 + verdict）
@@ -29,6 +30,10 @@ class TraceEvent:
     kind: EventKind
     ts: float
     payload: dict[str, Any]
+    prev_hash: str | None = None
+    event_hash: str | None = None
+    event_hmac: str | None = None
+    key_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +41,10 @@ class TraceEvent:
             "kind": self.kind.value,
             "ts": self.ts,
             "payload": self.payload,
+            "prev_hash": self.prev_hash,
+            "event_hash": self.event_hash,
+            "event_hmac": self.event_hmac,
+            "key_id": self.key_id,
         }
 
 

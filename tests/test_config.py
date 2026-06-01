@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from kyagent.config import Config, load_config
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_config_default_llm_backend_is_real_httpx_backend():
@@ -50,7 +54,7 @@ def test_env_llm_backend_takes_precedence_over_project_root_json(tmp_path, monke
     assert cfg.agent.llm_backend == "openai_httpx"
 
 
-def test_project_root_json_deepseek_api_key_is_loaded(tmp_path, monkeypatch):
+def test_project_root_json_deepseek_api_key_is_ignored(tmp_path, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     config_dir = tmp_path / "configs"
     config_dir.mkdir()
@@ -67,10 +71,10 @@ def test_project_root_json_deepseek_api_key_is_loaded(tmp_path, monkeypatch):
 
     cfg = load_config(config_path)
 
-    assert cfg.agent.deepseek.api_key == "sk-json"
+    assert not hasattr(cfg.agent.deepseek, "api_key")
 
 
-def test_project_root_json_nested_deepseek_api_key_is_loaded(tmp_path, monkeypatch):
+def test_project_root_json_nested_deepseek_api_key_is_ignored(tmp_path, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     config_dir = tmp_path / "configs"
     config_dir.mkdir()
@@ -87,4 +91,12 @@ def test_project_root_json_nested_deepseek_api_key_is_loaded(tmp_path, monkeypat
 
     cfg = load_config(config_path)
 
-    assert cfg.agent.deepseek.api_key == "sk-nested"
+    assert not hasattr(cfg.agent.deepseek, "api_key")
+
+
+def test_default_config_executor_account_can_follow_runtime_env(monkeypatch):
+    monkeypatch.setenv("KYAGENT_EXECUTOR_ACCOUNT", "opsagent")
+
+    cfg = load_config(ROOT / "configs" / "default.yaml")
+
+    assert cfg.executor.account == "opsagent"

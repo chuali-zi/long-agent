@@ -5,9 +5,11 @@
 # and Rust extension dependencies. Real LLM access on LoongArch Old World should
 # use configs/deepseek.yaml with KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx.
 #
-# PyYAML note:
+# Pydantic/PyYAML note:
 #   The installer uses:
-#     pip install --no-binary PyYAML -r requirements-loongarch.txt
+#     SKIP_CYTHON=1 pip install --no-binary PyYAML,pydantic -r requirements-loongarch.txt
+#   Pydantic v1 can optionally compile Cython extensions. SKIP_CYTHON=1 keeps
+#   the conservative LoongArch path pure Python.
 #   On LoongArch, PyYAML may try to build the optional libyaml C extension.
 #   If libyaml headers are missing, setup falls back to the pure Python loader;
 #   this is acceptable for kyagent. The default path is zero Rust and has no

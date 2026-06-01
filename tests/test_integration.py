@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from kyagent.agent.core import Agent
-from kyagent.audit.logger import AuditLogger
 from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import Config
@@ -51,8 +50,8 @@ def test_low_risk_query_flows_through(agent):
     assert kinds[-1] == EventKind.AGENT_REPLY.value
     # INTENT_CHECK 在 USER_INPUT 之后、LLM_THOUGHT 之前
     assert kinds.index(EventKind.INTENT_CHECK.value) < kinds.index(EventKind.LLM_THOUGHT.value)
-    # PERCEPTION 在 TOOL_REQUEST 之后、EXECUTION 之前（标注本次工具调用是"感知"）
-    assert kinds.index(EventKind.PERCEPTION.value) < kinds.index(EventKind.EXECUTION.value)
+    # PERCEPTION 是结果型证据：必须在真实 EXECUTION_RESULT 之后落库。
+    assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
 def test_nl_intent_blocks_destructive_request(agent):

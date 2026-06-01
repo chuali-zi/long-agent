@@ -6,9 +6,8 @@
 #   3. export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
 #   4. kyagent ask "哪个进程 CPU 占用最高？"
 #
-# DeepSeek key 优先读取 DEEPSEEK_API_KEY；也可在项目根 kyagent.json 写
-# {"deepseek_api_key": "sk-..."} 或 {"deepseek": {"api_key": "sk-..."}}。
-# 两处都没有 key 时会直接报错；离线演示请显式设置 llm_backend=mock。
+# DeepSeek key 仅从 DEEPSEEK_API_KEY 读取。项目根 kyagent.json 不读取 key。
+# 没有 key 时会直接报错；离线演示请显式设置 llm_backend=mock。
 #
 # 两条传输路径（由 KYAGENT_DEEPSEEK_TRANSPORT 切换）：
 #   - deepseek         (默认)：走 OpenAIBackend，依赖 openai SDK；非 LoongArch 可用
@@ -35,13 +34,13 @@ agent:
     max_tokens: 4096
     temperature: 0.2
     api_key_env: DEEPSEEK_API_KEY
-    # 运行时也可从项目根 kyagent.json 写入 api_key；环境变量优先级更高。
+    # key 仅通过 DEEPSEEK_API_KEY 注入，不写入项目文件。
     # 留空走 https://api.deepseek.com；仅在使用反代时填
     base_url: ${KYAGENT_DEEPSEEK_BASE_URL:-}
   max_iterations: 8
 
 executor:
-  account: kyagent
+  account: ${KYAGENT_EXECUTOR_ACCOUNT:-kyagent}
   timeout: 30
   output_cap: 65536
   forbid_root: true
@@ -67,8 +66,15 @@ audit:
   database: ${KYAGENT_AUDIT_DB:-./var/audit.db}
   jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}
   retain_days: 90
+  integrity_enabled: ${KYAGENT_AUDIT_INTEGRITY_ENABLED:-false}
+  hmac_key_file: ${KYAGENT_AUDIT_HMAC_KEY_FILE:-}
+  hmac_key_id: ${KYAGENT_AUDIT_HMAC_KEY_ID:-local-v1}
+
+rca:
+  playbooks_file: configs/rca-playbooks.yaml
 
 mcp:
   enable_tools: []
+  plugin_entry_points: []
   server_name: kyagent
   server_version: 0.1.0

@@ -25,26 +25,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
 import threading
+import time
+from collections import OrderedDict
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from kyagent.agent.core import Agent
-from kyagent.audit.store import AuditStore
 from kyagent.config import Config, load_config
 from kyagent.confirm import auto_deny
-from kyagent.mcp.tools import default_registry
+from kyagent.mcp.plugins import configured_registry
 from kyagent.progress import ProgressEvent
+from kyagent.runtime import build_audit_store
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.intent import IntentGuard
 from kyagent.web.approvals import ApprovalBroker
+from kyagent.web.choices import ChoiceBroker
+from kyagent.web.security import WebSecurity
 from kyagent.web import schemas as S
 
 _VERSION = "0.1.0"
@@ -61,27 +67,67 @@ class _AgentSessionRegistry:
     每个 session_id 一个 Agent；无 session_id 的请求每次新建（一次性）。
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, *, max_sessions: int = 128, ttl_seconds: float = 1800.0):
         self._cfg = cfg
+        self._max_sessions = max(1, max_sessions)
+        self._ttl_seconds = max(0.0, ttl_seconds)
         self._lock = threading.Lock()
-        self._agents: dict[str, Agent] = {}
+        self._agents: OrderedDict[str, tuple[Agent, float]] = OrderedDict()
 
-    def get_or_create(self, session_id: Optional[str]) -> Agent:
+    def get_or_create(self, session_id: Optional[str], *, owner: str = "local-web") -> Agent:
         if not session_id:
             return self._fresh()
+        cache_key = f"{owner}:{session_id}"
+        evicted: list[Agent] = []
         with self._lock:
-            agent = self._agents.get(session_id)
-            if agent is None:
+            now = time.monotonic()
+            evicted.extend(self._expire_locked(now))
+            entry = self._agents.pop(cache_key, None)
+            if entry is None:
                 agent = self._fresh()
-                self._agents[session_id] = agent
-            return agent
+            else:
+                agent = entry[0]
+            self._agents[cache_key] = (agent, now)
+            while len(self._agents) > self._max_sessions:
+                _, (old_agent, _) = self._agents.popitem(last=False)
+                evicted.append(old_agent)
+        self._shutdown_all(evicted)
+        return agent
 
-    def reset(self, session_id: str) -> bool:
+    def reset(self, session_id: str, *, owner: str = "local-web") -> bool | str:
         with self._lock:
-            if session_id in self._agents:
-                self._agents[session_id].messages.clear()
-                return True
-            return False
+            entry = self._agents.get(f"{owner}:{session_id}")
+            if entry is None:
+                return False
+            agent = entry[0]
+        run_lock = getattr(agent, "_run_lock", None)
+        if run_lock is not None and not run_lock.acquire(blocking=False):
+            return "busy"
+        try:
+            agent.messages.clear()
+            return True
+        finally:
+            if run_lock is not None:
+                run_lock.release()
+
+    def shutdown(self) -> None:
+        with self._lock:
+            agents = [entry[0] for entry in self._agents.values()]
+            self._agents.clear()
+        self._shutdown_all(agents)
+
+    def _expire_locked(self, now: float) -> list[Agent]:
+        expired = []
+        for session_id, (agent, touched_at) in list(self._agents.items()):
+            if now - touched_at >= self._ttl_seconds:
+                self._agents.pop(session_id)
+                expired.append(agent)
+        return expired
+
+    @staticmethod
+    def _shutdown_all(agents: list[Agent]) -> None:
+        for agent in agents:
+            agent.shutdown()
 
     def _fresh(self) -> Agent:
         # web 通道默认拒绝所有 confirm（无人值守路径）；
@@ -99,22 +145,43 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
     可显式注入预构建的 Config。
     """
     cfg = cfg or load_config(None)
-    sessions = _AgentSessionRegistry(cfg)
-    approvals = ApprovalBroker()
+    sessions = _AgentSessionRegistry(
+        cfg,
+        max_sessions=_env_int("KYAGENT_WEB_MAX_SESSIONS", 128),
+        ttl_seconds=_env_float("KYAGENT_WEB_SESSION_TTL_SECONDS", 1800.0),
+    )
+    approvals = ApprovalBroker(max_records=_env_int("KYAGENT_WEB_MAX_APPROVALS", 256))
+    choices = ChoiceBroker(max_records=_env_int("KYAGENT_WEB_MAX_CHOICES", 256))
+    security = WebSecurity.from_env()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            sessions.shutdown()
 
     app = FastAPI(
         title="kyagent",
         version=_VERSION,
         description="麒麟安全运维 Agent — B/S 接入层",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
     )
-    # 同源部署时不需要 CORS，但本地前端开发常跑在不同端口；放宽到 *
-    # 注意：所有写入路径仍走安全护栏，CORS 放宽并不放宽授权
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=list(security.allowed_origins),
         allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_headers=["Authorization", "Content-Type"],
     )
+
+    @app.middleware("http")
+    async def enforce_web_security(request: Request, call_next):
+        request.state.web_principal = security.role_for_request(request) or "local-web"
+        denied = security.check(request)
+        return denied if denied is not None else await call_next(request)
 
     # ---- 路由：health -----------------------------------------------------
 
@@ -123,21 +190,15 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
         return S.HealthResponse(
             status="ok",
             version=_VERSION,
-            backend=cfg.agent.llm_backend,
-            tools=len(default_registry().all()),
-            audit_db=str(cfg.resolve(cfg.audit.database)),
         )
 
     # ---- 路由：tools ------------------------------------------------------
 
     @app.get("/api/tools", response_model=S.ToolListResponse)
     async def list_tools():
-        reg = default_registry()
+        reg = configured_registry(cfg)
         items = []
-        enable = set(cfg.mcp.enable_tools or [])
         for t in reg.all():
-            if enable and t.name not in enable:
-                continue
             items.append(S.ToolDescriptor(
                 name=t.name,
                 description=t.description,
@@ -151,21 +212,32 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
     # ---- 路由：ask（同步） -------------------------------------------------
 
     @app.post("/api/ask", response_model=S.AskResponse)
-    async def ask(req: S.AskRequest):
-        agent = sessions.get_or_create(req.session_id)
-        result = await run_in_threadpool(agent.ask, req.text, req.user)
-        return S.AskResponse(
-            trace_id=result.trace.trace_id,
-            text=result.final_text,
-            tool_iterations=result.tool_iterations,
-            denied=result.denied,
-            notes=result.notes,
-            backend=agent.llm.name,
-        )
+    async def ask(req: S.AskRequest, request: Request):
+        user = request.state.web_principal
+        agent = sessions.get_or_create(req.session_id, owner=user)
+        try:
+            result = await run_in_threadpool(agent.ask, req.text, user)
+            return S.AskResponse(
+                trace_id=result.trace.trace_id,
+                text=result.final_text,
+                tool_iterations=result.tool_iterations,
+                denied=result.denied,
+                notes=result.notes,
+                backend=agent.llm.name,
+            )
+        finally:
+            if not req.session_id:
+                agent.shutdown()
 
     @app.post("/api/sessions/{session_id}/reset")
-    async def reset_session(session_id: str):
-        ok = sessions.reset(session_id)
+    async def reset_session(session_id: str, request: Request):
+        try:
+            S.validate_session_id(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        ok = sessions.reset(session_id, owner=request.state.web_principal)
+        if ok == "busy":
+            raise HTTPException(status_code=409, detail="session is busy")
         return {"reset": ok}
 
     # ---- 路由：approvals --------------------------------------------------
@@ -186,11 +258,11 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
         return S.ApprovalRecordResponse(**rec.to_dict())
 
     @app.post("/api/approvals/{approval_id}/approve", response_model=S.ApprovalRecordResponse)
-    async def approve_approval(approval_id: str, req: S.ApprovalActionRequest):
+    async def approve_approval(approval_id: str, req: S.ApprovalActionRequest, request: Request):
         rec = approvals.resolve(
             approval_id,
             approved=True,
-            reviewer=req.reviewer,
+            reviewer=request.state.web_principal,
             reason=req.reason,
         )
         if rec is None:
@@ -198,29 +270,47 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
         return S.ApprovalRecordResponse(**rec.to_dict())
 
     @app.post("/api/approvals/{approval_id}/reject", response_model=S.ApprovalRecordResponse)
-    async def reject_approval(approval_id: str, req: S.ApprovalActionRequest):
+    async def reject_approval(approval_id: str, req: S.ApprovalActionRequest, request: Request):
         rec = approvals.resolve(
             approval_id,
             approved=False,
-            reviewer=req.reviewer,
+            reviewer=request.state.web_principal,
             reason=req.reason,
         )
         if rec is None:
             raise HTTPException(status_code=404, detail=f"approval {approval_id} not found")
         return S.ApprovalRecordResponse(**rec.to_dict())
 
+    # ---- 路由：choices ----------------------------------------------------
+
+    @app.get("/api/choices", response_model=S.ChoiceListResponse)
+    async def list_choices(status: Optional[str] = Query(None)):
+        records = choices.list_records(status=status)
+        return S.ChoiceListResponse(
+            count=len(records),
+            choices=[S.ChoiceRecordResponse(**record.to_dict()) for record in records],
+        )
+
+    @app.post("/api/choices/{choice_id}/select", response_model=S.ChoiceRecordResponse)
+    async def select_choice(choice_id: str, req: S.ChoiceActionRequest, request: Request):
+        record = choices.resolve(
+            choice_id, value=req.value, reviewer=request.state.web_principal
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"choice {choice_id} not found")
+        if record.status != "selected":
+            raise HTTPException(status_code=409, detail=f"choice {choice_id} is not pending")
+        return S.ChoiceRecordResponse(**record.to_dict())
+
     # ---- 路由：ask/stream（SSE） ------------------------------------------
 
     @app.post("/api/ask/stream")
-    async def ask_stream(req: S.AskRequest):
-        agent = sessions.get_or_create(req.session_id)
+    async def ask_stream(req: S.AskRequest, request: Request):
+        user = request.state.web_principal
+        agent = sessions.get_or_create(req.session_id, owner=user)
         q: queue.Queue = queue.Queue(maxsize=512)
-        _SENTINEL = object()
 
         def enqueue(event: str, data: dict[str, Any]) -> None:
-            if event.startswith("approval_"):
-                q.put((event, data))
-                return
             try:
                 q.put_nowait((event, data))
             except queue.Full:
@@ -241,11 +331,16 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
             rec = approvals.create(
                 confirm_req,
                 session_id=req.session_id,
-                user=req.user,
+                user=user,
                 emit=enqueue,
             )
             enqueue("approval_required", rec.to_dict())
             return approvals.wait(rec.approval_id)
+
+        def web_user_choice(choice):
+            rec = choices.create(choice, session_id=req.session_id, user=user, emit=enqueue)
+            enqueue("choice_required", rec.to_dict())
+            return choices.wait(rec.choice_id)
 
         def worker() -> dict[str, Any]:
             run_lock = getattr(agent, "_run_lock", threading.RLock())
@@ -254,10 +349,12 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
                 # 在同一把 Agent 运行锁里，避免同 session 并发 stream 串事件。
                 prev_cb = agent.on_progress
                 prev_confirm = agent.confirm
+                prev_choice = agent.on_user_choice
                 agent.on_progress = on_progress
                 agent.confirm = web_confirm
+                agent.on_user_choice = web_user_choice
                 try:
-                    result = agent.ask(req.text, user=req.user)
+                    result = agent.ask(req.text, user=user)
                     return {
                         "trace_id": result.trace.trace_id,
                         "text": result.final_text,
@@ -265,11 +362,15 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
                         "denied": result.denied,
                         "notes": result.notes,
                     }
+                except Exception as exc:
+                    payload = {"error": str(exc), "text": str(exc)}
+                    return {**payload, "denied": True, "notes": ["worker exception"]}
                 finally:
-                    # 不管成败都恢复回调并投毒终止 generator
                     agent.on_progress = prev_cb
                     agent.confirm = prev_confirm
-                    q.put(_SENTINEL)
+                    agent.on_user_choice = prev_choice
+                    if not req.session_id:
+                        agent.shutdown()
 
         loop = asyncio.get_running_loop()
         fut = loop.run_in_executor(None, worker)
@@ -281,15 +382,16 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
                     try:
                         item = q.get_nowait()
                     except queue.Empty:
+                        if fut.done():
+                            result = await fut
+                            if result.get("error"):
+                                yield _sse_pack("error", {"text": result["error"]})
+                            yield _sse_pack("final", result)
+                            break
                         await asyncio.sleep(0.02)
                         continue
-                    if item is _SENTINEL:
-                        break
                     event_name, payload = item
                     yield _sse_pack(event_name, payload)
-                # worker 收尾后再吐一次 final
-                result = await fut
-                yield _sse_pack("final", result)
             except asyncio.CancelledError:
                 # 客户端断开 — 不阻止后台 worker 跑完（审计要完整落库）
                 raise
@@ -362,12 +464,23 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
 
     # ---- 路由：audit ------------------------------------------------------
 
-    def _store() -> AuditStore:
-        return AuditStore(cfg.resolve(cfg.audit.database))
+    def _list_traces(limit: int):
+        store = build_audit_store(cfg)
+        try:
+            return store.list_traces(limit)
+        finally:
+            store.close()
+
+    def _get_events(trace_id: str):
+        store = build_audit_store(cfg)
+        try:
+            return store.get_events(trace_id)
+        finally:
+            store.close()
 
     @app.get("/api/audit/traces", response_model=S.TraceListResponse)
     async def audit_traces(limit: int = Query(20, ge=1, le=200)):
-        rows = await run_in_threadpool(_store().list_traces, limit)
+        rows = await run_in_threadpool(_list_traces, limit)
         summaries = []
         for r in rows:
             meta = r.get("metadata") or {}
@@ -381,7 +494,7 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
 
     @app.get("/api/audit/traces/{trace_id}", response_model=S.TraceDetailResponse)
     async def audit_trace_detail(trace_id: str):
-        events = await run_in_threadpool(_store().get_events, trace_id)
+        events = await run_in_threadpool(_get_events, trace_id)
         if not events:
             raise HTTPException(status_code=404, detail=f"trace {trace_id} not found")
         return S.TraceDetailResponse(
@@ -413,3 +526,17 @@ def _sse_pack(event: str, data: Any) -> str:
     """SSE 协议帧：event:<name>\\ndata:<json>\\n\\n"""
     payload = json.dumps(data, ensure_ascii=False, default=str)
     return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default

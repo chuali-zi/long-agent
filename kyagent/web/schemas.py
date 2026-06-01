@@ -6,6 +6,7 @@ churn.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, validator
@@ -13,13 +14,28 @@ from pydantic import BaseModel, Field, validator
 
 # ---- /api/ask -------------------------------------------------------------
 
+def validate_session_id(value: Optional[str]) -> Optional[str]:
+    if value is not None and (
+        len(value) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value)
+    ):
+        raise ValueError("session_id format is invalid")
+    return value
+
 
 class AskRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000, description="用户提问")
     user: str = Field("web", min_length=1, max_length=64)
     session_id: Optional[str] = Field(
-        None, description="可选会话 ID；同一 session_id 共享 Agent.messages 上下文"
+        None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        description="可选会话 ID；同一 session_id 共享 Agent.messages 上下文",
     )
+
+    @validator("session_id")
+    def _check_session_id(cls, value: Optional[str]) -> Optional[str]:  # noqa: N805
+        return validate_session_id(value)
 
 
 class AskResponse(BaseModel):
@@ -60,6 +76,39 @@ class ApprovalListResponse(BaseModel):
 class ApprovalActionRequest(BaseModel):
     reviewer: str = Field("web", min_length=1, max_length=64)
     reason: str = Field("", max_length=500)
+
+
+# ---- /api/choices ---------------------------------------------------------
+
+
+class ChoiceOptionResponse(BaseModel):
+    value: str
+    label: str
+    description: str = ""
+
+
+class ChoiceRecordResponse(BaseModel):
+    choice_id: str
+    question: str
+    options: list[ChoiceOptionResponse]
+    session_id: Optional[str] = None
+    user: str
+    created_at: float
+    expires_at: float
+    status: str
+    value: str = ""
+    reviewer: str = ""
+    resolved_at: Optional[float] = None
+
+
+class ChoiceListResponse(BaseModel):
+    count: int
+    choices: list[ChoiceRecordResponse]
+
+
+class ChoiceActionRequest(BaseModel):
+    value: str = Field(..., min_length=1, max_length=128)
+    reviewer: str = Field("web", min_length=1, max_length=64)
 
 
 # ---- /api/tools -----------------------------------------------------------
@@ -153,6 +202,3 @@ class TraceDetailResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str
-    backend: str
-    tools: int
-    audit_db: str

@@ -1,84 +1,52 @@
 # 仓库当前状态 - A2 麒麟安全智能运维 Agent
 
-生成时间：2026-05-29 10:17:06 +08:00
+生成时间：2026-06-01 +08:00
 
-## 1. 当前定位
+## 当前定位
 
-本仓库对应 A2 赛题“面向麒麟操作系统的安全智能运维 Agent”。交付重点是在麒麟/Linux 上实现可控运维闭环：自然语言输入、意图过滤、LLM 或 mock 推理、MCP 风格工具调用、argv 二次安全过滤、最小权限执行、SQLite/JSONL 审计和最终回复。
+本仓库对应 A2 赛题“面向麒麟操作系统的安全智能运维 Agent”。正式交付目标是 LoongArch64 Linux + 麒麟高级服务器版 V11；安装器同时保留面向 Old World 环境的保守路径。
 
-## 2. 文档布局
+## 部署入口
 
-根目录现在只保留项目入口和必要根文件：
+根 `README.md` 保持高度抽象，只呈现正式入口：
 
-```text
-D:\race\long
-├── README.md               # 使用手册入口
-├── AGENT.md                # agent 协作约束
-├── kyagent.json            # 项目根 LLM backend 轻量配置
-├── pyproject.toml
-├── requirements*.txt
-├── configs/
-├── scripts/
-├── kyagent/
-├── tests/
-└── docs/
+```bash
+sudo bash scripts/install-loongarch.sh --yes --with-web
+sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env
 ```
 
-主要文档都在 `docs/`：
+`web` 会启动 FastAPI 后端、等待健康检查并自动打开浏览器。无桌面环境时，服务继续运行并打印访问 URL。
 
-```text
-docs/
-├── kyagent/
-│   ├── README.md           # 完整项目说明
-│   ├── architecture.md     # 架构文档
-│   └── safety-model.md     # 安全模型
-├── deployment/
-│   └── loongarch.md        # LoongArch/Kylin 部署审查
-├── status/
-│   ├── current.md          # 当前状态
-│   └── log.md              # 工作日志
-└── superpowers/
+分开脚本：
+
+```bash
+bash scripts/start-web-backend.sh --mock
+bash scripts/open-web.sh --url http://127.0.0.1:8000
 ```
 
-## 3. 当前默认运行路径
+## LoongArch 边界
 
-- 默认 `llm_backend` 是 `deepseek_httpx`。
-- `DEEPSEEK_API_KEY` 或项目根 `kyagent.json` 的 `deepseek_api_key` / `deepseek.api_key` 存在时走真实 DeepSeek OpenAI-compatible HTTP 接口。
-- 两处都未配置 key 时直接报错，避免生产环境静默使用 mock；离线演示需显式设置 `llm_backend=mock`。
-- LoongArch Old World 默认不安装 `.[openai]`、`.[anthropic]`、`.[mcp]`，避免 `jiter`、`pydantic-core` 等 Rust 扩展风险。
-- FastAPI Web 控制台是可选 extra；使用 `scripts/start-web.sh --install-web --mock` 可一键启动离线演示，LoongArch 安装器通过 `--with-web` 显式开启。
+- 安装器只支持 LoongArch Linux；非龙芯 Linux 只允许 `--dry-run --allow-non-loongarch`。
+- 默认依赖路径不安装 `openai`、`anthropic`、`mcp`、`jiter`、`pydantic-core`。
+- `pydantic v1` 使用 `SKIP_CYTHON=1` 和 `--no-binary pydantic` 固定纯 Python 安装。
+- Web extra 独立放在 `requirements-loongarch-web.txt`，不安装 `uvicorn[standard]`。
+- editable 安装使用 `--no-deps`，避免重新解析未审计依赖。
 
-## 4. 赛题要求贴合度
+## 最小权限
 
-| 赛题要求 | 当前实现状态 | 关键位置 |
-| --- | --- | --- |
-| OS 环境深度感知 | 已覆盖进程、端口、网络、日志、服务、文件系统、包管理工具 | `kyagent/mcp/tools/*.py` |
-| MCP 运维插件化 | 自研 `Tool`/`ToolRegistry` + stdio JSON-RPC MCP server | `kyagent/mcp/` |
-| 安全意图校验器 | 自然语言意图层 + LLM 输出 argv 层 | `kyagent/safety/`、`configs/*rules.yaml` |
-| 最小权限代理执行 | PATH 白名单、clean env、timeout、rlimit、sudoers 白名单 | `kyagent/executor/`、`configs/sudoers.kyagent` |
-| 推理链路溯源 | SQLite + JSONL 双通道 | `kyagent/audit/` |
-| 国产模型路径 | DeepSeek + `deepseek_httpx` | `kyagent/agent/llm.py`、`configs/deepseek.yaml` |
-| B/S 演示入口 | FastAPI + SSE + 浏览器人工审核 | `kyagent/web/`、`scripts/start-web.sh` |
+- Web 默认监听 `127.0.0.1`；显式使用 `0.0.0.0` 时必须开启认证并配置四类角色 token，否则启动失败。
+- 默认 sudoers 不允许任意 systemd 服务变更。
+- 业务服务重启或 reload 必须在部署阶段通过 `KYAGENT_SERVICE_ALLOWLIST` 显式列出。
+- `/etc/kyagent/env` 使用 shell 安全转义格式写入，并同步 `KYAGENT_EXECUTOR_ACCOUNT`。
+- 安装器生成 `/etc/kyagent/audit-hmac.key`，审计事件使用哈希链和 HMAC 封印；`kyagent audit verify <trace-id>` 可校验完整性。
+- RCA 通过内置 playbook 和 `submit_rca_report` 逻辑工具落库，只接受当前 trace 已存在的 `PERCEPTION evidence_id`。
 
-## 5. 本轮文档整理结果
+## 文档布局
 
-- 根 `README.md` 已收缩为上层入口：统一脚本、最小权限、Chat/TUI/Web 启动和文档导航；复杂参数下沉到 `docs/deployment/`。
-- 根目录长文档已迁移：
-  - `docs/kyagent/README.md`
-  - `docs/deployment/loongarch.md`
-  - `docs/status/log.md`
-  - `docs/status/current.md`
-- `AGENT.md` 已改为指向 `docs/status/`。
-- LoongArch/Kylin 部署说明不再放在根目录，根 README 只链接它。
-
-## 6. 验证重点
-
-本轮变更完成后应至少验证：
-
-```powershell
-python -m pytest tests -q
-Get-ChildItem -File
-```
-
-历史测试临时目录 `pytest_tmp_run/` 在当前 Windows 环境下仍可能提示 permission denied；它是测试产物，不属于文档整理范围。
-`.gitignore` 已忽略 `pytest_tmp*/`，避免新的 pytest 临时目录进入未跟踪文件列表。
+| 文档 | 职责 |
+| --- | --- |
+| `README.md` | LoongArch Linux 高层入口 |
+| `docs/deployment/loongarch.md` | 依赖边界、安装器、手工兜底、验收 |
+| `docs/deployment/web.md` | Web 一键启动、分开脚本、局域网风险 |
+| `docs/deployment/permissions.md` | sudoers、服务 allowlist、验证 |
+| `docs/kyagent/README.md` | 完整能力说明 |

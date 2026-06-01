@@ -13,11 +13,19 @@ from kyagent.safety.patterns import RiskLevel
 
 
 def _detect_pm() -> str:
-    """优先 dnf > yum > apt > rpm > dpkg。"""
-    for name in ("dnf", "yum", "apt", "rpm", "dpkg"):
+    """优先选择 Kylin Server 可用的 dnf > yum > rpm。"""
+    for name in ("dnf", "yum", "rpm"):
         if shutil.which(name):
             return name
-    return "dnf"  # 默认 dnf（麒麟主流）
+    raise ToolError("未检测到可用的 RPM 包命令（需要 dnf/yum/rpm）")
+
+
+def _detect_rpm_frontend() -> str:
+    """Choose the available RPM repository frontend for read-only queries."""
+    for name in ("dnf", "yum"):
+        if shutil.which(name):
+            return name
+    raise ToolError("未检测到 RPM 仓库前端（需要 dnf 或 yum）")
 
 
 class PkgInfoTool(Tool):
@@ -37,13 +45,9 @@ class PkgInfoTool(Tool):
         pm = _detect_pm()
         if pm in ("dnf", "yum"):
             return [pm, "info", name]
-        if pm == "apt":
-            return ["apt", "show", name]
         if pm == "rpm":
             return ["rpm", "-qi", name]
-        if pm == "dpkg":
-            return ["dpkg", "-s", name]
-        raise ToolError("未检测到可用的包管理器")
+        raise ToolError("未检测到可用的 RPM 包命令（需要 dnf/yum/rpm）")
 
 
 class PkgInstalledTool(Tool):
@@ -65,13 +69,9 @@ class PkgInstalledTool(Tool):
             if keyword:
                 argv.append(keyword)
             return argv
-        if pm == "apt":
-            return ["apt", "list", "--installed"] + ([keyword] if keyword else [])
         if pm == "rpm":
             return ["rpm", "-qa"]  # 调用方可结合 grep；这里只暴露原始命令
-        if pm == "dpkg":
-            return ["dpkg", "-l"]
-        raise ToolError("未检测到可用的包管理器")
+        raise ToolError("未检测到可用的 RPM 包命令（需要 dnf/yum/rpm）")
 
 
 # ---- 家族感知扩展工具（PkgFamilyMixin 自动切换 rpm/dpkg argv） -----------------
@@ -121,7 +121,7 @@ class PkgUpdatesTool(PkgFamilyMixin, Tool):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         f = self._require_known()
         if f is PkgFamily.RPM:
-            return ["dnf", "check-update", "--quiet"]
+            return [_detect_rpm_frontend(), "check-update", "--quiet"]
         return ["apt", "list", "--upgradable"]
 
     def format_result(self, exec_result):  # type: ignore[override]
@@ -152,7 +152,7 @@ class PkgSecurityUpdatesTool(PkgFamilyMixin, Tool):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         f = self._require_known()
         if f is PkgFamily.RPM:
-            return ["dnf", "updateinfo", "list", "security"]
+            return [_detect_rpm_frontend(), "updateinfo", "list", "security"]
         # DPKG fallback: apt 没有原生的 security 过滤（需要 unattended-upgrades
         # 的 origin 配置才能区分）。这里退化为列出全部 upgradable，由调用方/LLM
         # 进一步判断。注释保留以提醒后续接入 ubuntu-security-notices。
@@ -197,7 +197,7 @@ class PkgRepoListTool(PkgFamilyMixin, Tool):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         f = self._require_known()
         if f is PkgFamily.RPM:
-            return ["dnf", "repolist"]
+            return [_detect_rpm_frontend(), "repolist"]
         return ["apt-cache", "policy"]
 
 
@@ -231,7 +231,7 @@ class PkgHistoryTool(PkgFamilyMixin, Tool):
         self._last_limit = limit
         if f is PkgFamily.RPM:
             # dnf history list 不接受 --limit；这里只发命令，截断放到 format_result。
-            return ["dnf", "history", "list"]
+            return [_detect_rpm_frontend(), "history", "list"]
         # DPKG: tail -n <limit> 直接生效，且不依赖 root（apt 历史日志默认可读）。
         return ["tail", "-n", str(limit), "/var/log/apt/history.log"]
 

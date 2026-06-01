@@ -28,6 +28,42 @@ detect_sudo_version() {
   printf '%s\n' "$SUDO_VERSION"
 }
 
+render_service_allowlist() {
+  local user_name="$1"
+  local allowlist="${2:-}"
+  local -a units commands
+  local unit command separator
+
+  [[ -z "$allowlist" ]] && return 0
+  IFS=',' read -r -a units <<<"$allowlist"
+  for unit in "${units[@]}"; do
+    unit="${unit#"${unit%%[![:space:]]*}"}"
+    unit="${unit%"${unit##*[![:space:]]}"}"
+    if [[ ! "$unit" =~ ^[A-Za-z0-9@_+:][-A-Za-z0-9@._+:]*$ ]]; then
+      die "非法服务 allowlist unit：$unit"
+    fi
+    if [[ "$unit" == *.* && "$unit" != *.service ]]; then
+      die "非法服务 allowlist unit：$unit；仅允许 service unit"
+    fi
+    case "$unit" in
+      systemd-*|dbus|dbus.service|polkit|polkit.service)
+        die "非法服务 allowlist unit：$unit；核心服务禁止授权"
+        ;;
+    esac
+    commands+=("/usr/bin/systemctl restart $unit")
+    commands+=("/usr/bin/systemctl reload $unit")
+  done
+
+  printf '\n# Explicit service mutations generated from KYAGENT_SERVICE_ALLOWLIST.\n'
+  printf 'Cmnd_Alias KY_SVC_MUTATE = '
+  separator=""
+  for command in "${commands[@]}"; do
+    printf '%s%s' "$separator" "$command"
+    separator=", "
+  done
+  printf '\n%s  ALL=(root)  NOPASSWD: KY_SVC_MUTATE\n' "$user_name"
+}
+
 main() {
   if [[ $EUID -ne 0 ]]; then
     die "此脚本需要 root；请执行 sudo bash scripts/kyagent.sh permissions"
@@ -78,6 +114,7 @@ main() {
       -e "s#/usr/bin/sudo -l -U kyagent#/usr/bin/sudo -l -U ${USER_NAME}#" \
       "$SUDOERS_SRC" >"$TMP_SUDOERS"
   fi
+  render_service_allowlist "$USER_NAME" "${KYAGENT_SERVICE_ALLOWLIST:-}" >>"$TMP_SUDOERS"
   chmod 0440 "$TMP_SUDOERS"
 
   if ! visudo -cf "$TMP_SUDOERS"; then
@@ -103,9 +140,9 @@ main() {
   [[ -n "$BACKUP" ]] && rm -f "$BACKUP"
 
   mkdir -p /var/log/sudo-io
-  chmod 0750 /var/log/sudo-io
-  mkdir -p "/var/lib/kyagent" /var/log/kyagent
-  chown -R "$USER_NAME":"$USER_NAME" "/var/lib/kyagent" /var/log/kyagent
+  chmod 0700 /var/log/sudo-io
+  install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" "/var/lib/kyagent"
+  install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" /var/log/kyagent
 
   echo "[OK] kyagent 最小权限账户部署完成。"
   echo "    账户:        $USER_NAME"

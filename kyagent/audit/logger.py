@@ -17,10 +17,17 @@ from pathlib import Path
 from typing import Any, IO
 
 from kyagent.audit.store import AuditStore
-from kyagent.audit.trace import EventKind, Trace
+from kyagent.audit.trace import EventKind, Trace, TraceEvent
 
 
 _logger = logging.getLogger("kyagent.audit")
+
+
+def _chmod_owner_only(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 class AuditLogger:
@@ -38,11 +45,16 @@ class AuditLogger:
         self._jsonl_fp: IO[str] | None = None
         self._jsonl_lock = threading.Lock()
         if self._jsonl_path is not None:
-            self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            self._jsonl_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                self._jsonl_path.parent.chmod(0o700)
+            except OSError:
+                pass
             # line-buffered append handle，'\n' 触发 flush 到 OS。
             self._jsonl_fp = self._jsonl_path.open(
                 "a", encoding="utf-8", buffering=1
             )
+            _chmod_owner_only(self._jsonl_path)
             # 进程退出时兜底 flush+close（弱引用避免阻止 GC）。
             atexit.register(_atexit_close, weakref.ref(self))
 
@@ -56,7 +68,7 @@ class AuditLogger:
         trace: Trace,
         kind: EventKind,
         payload: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> TraceEvent:
         with trace._lock:
             ev = trace.add(kind, payload)
             self.store.append_event(trace.trace_id, ev)
@@ -74,6 +86,7 @@ class AuditLogger:
                         fp.write(line + "\n")
             if self.verbose:
                 _logger.info("[%s] %s payload=%s", trace.trace_id[:8], kind.value, payload)
+            return ev
 
     def close(self, trace: Trace) -> None:
         self.store.close_trace(trace)

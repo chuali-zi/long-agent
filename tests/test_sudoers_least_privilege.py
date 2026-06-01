@@ -43,13 +43,14 @@ def test_non_root_readonly_commands_are_not_granted_via_sudo() -> None:
 
 def test_dynamic_root_commands_use_anchored_argument_regexes() -> None:
     text = _sudoers()
-    required = [
-        r"/usr/bin/systemctl ^restart [A-Za-z0-9@._+:][-A-Za-z0-9@._+:]*$",
-        r"/usr/bin/systemctl ^reload [A-Za-z0-9@._+:][-A-Za-z0-9@._+:]*$",
-        r"/usr/bin/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$",
-        r"/usr/bin/smartctl ^-H -A -- /dev/nvme[0-9]+n[0-9]+(p[0-9]+)?$",
-        r"/usr/bin/crontab ^-l -u [a-z_][a-z0-9_-]{0,31}$",
-    ]
+    required = [r"/usr/bin/crontab ^-l -u [a-z_][a-z0-9_-]{0,31}$"]
+    for path in ("/usr/bin", "/usr/sbin", "/sbin"):
+        required.extend(
+            [
+                rf"{path}/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$",
+                rf"{path}/smartctl ^-H -A -- /dev/nvme[0-9]+n[0-9]+(p[0-9]+)?$",
+            ]
+        )
 
     for rule in required:
         assert rule in text, f"missing anchored sudoers rule: {rule}"
@@ -109,24 +110,62 @@ def test_setup_validates_custom_runtime_account_before_sed() -> None:
     assert script.index(validation) < script.index('if [[ "$USER_NAME" == "kyagent" ]]')
 
 
-def test_service_mutation_regex_accepts_same_unit_characters_as_tool_schema() -> None:
+def test_default_sudoers_does_not_grant_service_mutation() -> None:
     text = _sudoers()
-    assert (
-        r"/usr/bin/systemctl ^restart [A-Za-z0-9@._+:][-A-Za-z0-9@._+:]*$"
-        in text
-    )
-    assert (
-        r"/usr/bin/systemctl ^reload [A-Za-z0-9@._+:][-A-Za-z0-9@._+:]*$"
-        in text
-    )
+    assert "KY_SVC_MUTATE" not in text
+    assert "/usr/bin/systemctl restart" not in text
+    assert "/usr/bin/systemctl reload" not in text
 
 
-def test_service_mutation_sudoers_denies_tool_forbidden_core_units() -> None:
-    text = _sudoers()
-    assert (
-        r"!/usr/bin/systemctl ^(restart|reload) (systemd-logind|systemd-journald|systemd-udevd|dbus|polkit)([.]service)?$"
-        in text
+def test_setup_renders_only_explicit_service_allowlist() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "render_service_allowlist opsagent 'nginx.service,sshd.service'",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
     )
+
+    assert result.returncode == 0, result.stderr
+    assert "/usr/bin/systemctl restart nginx.service" in result.stdout
+    assert "/usr/bin/systemctl reload sshd.service" in result.stdout
+    assert "opsagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE" in result.stdout
+
+
+def test_setup_rejects_non_service_allowlist_unit() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "render_service_allowlist kyagent 'rescue.target'",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+
+    assert result.returncode != 0
+    assert "非法服务 allowlist unit" in result.stderr
+
+
+def test_setup_creates_audit_directories_with_exact_0700_mode_without_recursive_chown() -> None:
+    script = SETUP_SUDOERS.read_text(encoding="utf-8")
+
+    assert "chmod 0700 /var/log/sudo-io" in script
+    assert 'install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" "/var/lib/kyagent"' in script
+    assert 'install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" /var/log/kyagent' in script
+    assert "chown -R" not in script
 
 
 def test_manual_install_instructions_validate_before_install() -> None:

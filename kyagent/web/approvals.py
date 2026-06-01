@@ -59,8 +59,9 @@ class ApprovalBroker:
     endpoints resolve the record, then the waiting Agent turn continues.
     """
 
-    def __init__(self, timeout_seconds: float = 300.0):
+    def __init__(self, timeout_seconds: float = 300.0, max_records: int = 256):
         self.timeout_seconds = timeout_seconds
+        self.max_records = max(1, max_records)
         self._lock = threading.Lock()
         self._records: dict[str, ApprovalRecord] = {}
 
@@ -86,15 +87,19 @@ class ApprovalBroker:
             _emit=emit,
         )
         with self._lock:
+            self._cleanup_locked(now)
             self._records[rec.approval_id] = rec
+            self._trim_locked()
         return rec
 
     def get(self, approval_id: str) -> ApprovalRecord | None:
         with self._lock:
+            self._cleanup_locked(time.time())
             return self._records.get(approval_id)
 
     def list_records(self, *, status: str | None = None) -> list[ApprovalRecord]:
         with self._lock:
+            self._cleanup_locked(time.time())
             records = list(self._records.values())
         if status:
             records = [r for r in records if r.status == status]
@@ -130,6 +135,10 @@ class ApprovalBroker:
             rec = self._records.get(approval_id)
             if rec is None:
                 return None
+            if rec.status == "pending" and time.time() >= rec.expires_at:
+                approved = False
+                reviewer = "system"
+                reason = "approval timeout"
             if rec.status == "pending":
                 rec.approved = approved
                 rec.status = "approved" if approved else "rejected"
@@ -146,3 +155,25 @@ class ApprovalBroker:
         if event_to_set is not None:
             event_to_set.set()
         return rec
+
+    def _cleanup_locked(self, now: float) -> None:
+        for rec in self._records.values():
+            if rec.status == "pending" and now >= rec.expires_at:
+                rec.approved = False
+                rec.status = "rejected"
+                rec.reviewer = "system"
+                rec.reason = "approval timeout"
+                rec.resolved_at = now
+                rec._event.set()
+
+    def _trim_locked(self) -> None:
+        while len(self._records) > self.max_records:
+            oldest = min(self._records.values(), key=lambda rec: rec.created_at)
+            if oldest.status == "pending":
+                oldest.approved = False
+                oldest.status = "rejected"
+                oldest.reviewer = "system"
+                oldest.reason = "approval record limit exceeded"
+                oldest.resolved_at = time.time()
+                oldest._event.set()
+            self._records.pop(oldest.approval_id, None)

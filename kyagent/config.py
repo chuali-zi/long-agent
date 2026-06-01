@@ -61,8 +61,6 @@ class DeepSeekConfig(BaseModel):
     max_tokens: int = 4096
     temperature: float = 0.2
     api_key_env: str = "DEEPSEEK_API_KEY"
-    # 可由项目根 kyagent.json 写入；环境变量 DEEPSEEK_API_KEY 优先级更高。
-    api_key: str | None = None
     # 留空则使用预设 https://api.deepseek.com；仅在使用第三方反代时填
     base_url: str | None = None
 
@@ -131,12 +129,21 @@ class AuditConfig(BaseModel):
     database: str = "./var/audit.db"
     jsonl_file: str | None = "./var/audit.jsonl"
     retain_days: int = 90
+    integrity_enabled: bool = False
+    hmac_key_env: str = "KYAGENT_AUDIT_HMAC_KEY"
+    hmac_key_file: str | None = None
+    hmac_key_id: str = "local-v1"
 
 
 class McpConfig(BaseModel):
     enable_tools: list[str] = Field(default_factory=list)
+    plugin_entry_points: list[str] = Field(default_factory=list)
     server_name: str = "kyagent"
     server_version: str = "0.1.0"
+
+
+class RcaConfig(BaseModel):
+    playbooks_file: str = "configs/rca-playbooks.yaml"
 
 
 class Config(BaseModel):
@@ -144,6 +151,7 @@ class Config(BaseModel):
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    rca: RcaConfig = Field(default_factory=RcaConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
 
     # 配置文件所在目录，用于解析其它相对路径
@@ -185,6 +193,7 @@ def _apply_project_json_overrides(raw: dict[str, Any], project_root: Path) -> di
       {"llm_backend": "deepseek_httpx"}
 
     为避免破坏现有环境变量部署，KYAGENT_LLM_BACKEND 显式设置时优先级更高。
+    项目文件中的任何密钥字段都会被忽略，密钥只能通过环境注入。
     """
     json_path = project_root / "kyagent.json"
     if not json_path.exists():
@@ -201,15 +210,8 @@ def _apply_project_json_overrides(raw: dict[str, Any], project_root: Path) -> di
     llm_backend = data.get("llm_backend")
     if llm_backend is not None and not os.environ.get("KYAGENT_LLM_BACKEND"):
         agent["llm_backend"] = llm_backend
-    deepseek_api_key = data.get("deepseek_api_key")
-    nested_deepseek = data.get("deepseek")
-    if deepseek_api_key is None and isinstance(nested_deepseek, dict):
-        deepseek_api_key = nested_deepseek.get("api_key")
-    if deepseek_api_key is not None and not os.environ.get("DEEPSEEK_API_KEY"):
-        deepseek = agent.setdefault("deepseek", {})
-        if not isinstance(deepseek, dict):
-            raise ValueError("配置项 agent.deepseek 必须是 object")
-        deepseek["api_key"] = deepseek_api_key
+    # 项目文件不再承载任何密钥。历史 kyagent.json 可能仍残留 key 字段；
+    # 为避免旧本地文件阻塞启动，静默忽略它们，只允许环境变量或部署 env 文件注入。
     return raw
 
 

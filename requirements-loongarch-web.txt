@@ -1,0 +1,7 @@
+# Optional Web dependency set for LoongArch Linux.
+#
+# Install only when scripts/install-loongarch.sh receives --with-web.
+# Keep this list free of SDK packages and optional native/Rust server extras.
+
+fastapi>=0.95,<0.100
+uvicorn>=0.23,<0.30

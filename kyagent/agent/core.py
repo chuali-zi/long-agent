@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import sys
 import threading
+import json
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from kyagent.agent.llm import (
     AssistantMessage,
@@ -39,6 +40,7 @@ from kyagent.interactive import (
     auto_cancel_choice,
 )
 from kyagent.runtime import build_runtime
+from kyagent.rca import load_playbooks, validate_report
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.intent import IntentGuard, IntentVerdict
 from kyagent.safety.policy import Decision
@@ -94,6 +96,7 @@ class Agent:
         # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
         # 在 Windows mock 后端这一开销会盖过并行带来的收益。
         self._tool_pool: ThreadPoolExecutor | None = None
+        self._shutdown = False
 
     def _ensure_pool(self) -> ThreadPoolExecutor:
         if self._tool_pool is None:
@@ -103,9 +106,14 @@ class Agent:
         return self._tool_pool
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
         if self._tool_pool is not None:
             self._tool_pool.shutdown(wait=False)
             self._tool_pool = None
+        self.audit.close_file()
+        self.audit.store.close()
 
     def _emit(self, event: ProgressEvent) -> None:
         """防御式包装：TUI/外部回调抛异常不应影响 Agent 主循环。
@@ -342,6 +350,8 @@ class Agent:
         未知工具也按"不可并行"处理；后续 _handle_tool_use 内会以 ERROR 兜底，
         保留原有错误信息。
         """
+        if tu.name in {"ask_user_choice", "submit_rca_report"}:
+            return False
         tool = self.registry.get(tu.name)
         if tool is None:
             return False
@@ -388,7 +398,38 @@ class Agent:
         # 特判：ask_user_choice 不走 ExecutionProxy / 安全护栏流水线，
         # 它是纯逻辑工具（UI 交互），单独路由。
         if tu.name == "ask_user_choice":
+            tool = self.registry.get(tu.name)
+            if tool is None:
+                return ToolResultBlock(
+                    tool_use_id=tu.id, is_error=True, content="未知工具：ask_user_choice"
+                )
+            try:
+                cleaned = tool.validate(tu.input or {})
+            except ToolError as e:
+                self.audit.event(trace, EventKind.ERROR, {
+                    "reason": "invalid_args", "tool": tu.name, "detail": str(e),
+                })
+                return ToolResultBlock(
+                    tool_use_id=tu.id, is_error=True, content=f"工具参数非法：{e}"
+                )
+            tu = ToolUseBlock(id=tu.id, name=tu.name, input=cleaned)
             return self._handle_user_choice(trace, tu)
+        if tu.name == "submit_rca_report":
+            tool = self.registry.get(tu.name)
+            if tool is None:
+                return ToolResultBlock(
+                    tool_use_id=tu.id, is_error=True, content="未知工具：submit_rca_report"
+                )
+            try:
+                cleaned = tool.validate(tu.input or {})
+            except ToolError as e:
+                self.audit.event(trace, EventKind.ERROR, {
+                    "reason": "invalid_args", "tool": tu.name, "detail": str(e),
+                })
+                return ToolResultBlock(
+                    tool_use_id=tu.id, is_error=True, content=f"工具参数非法：{e}"
+                )
+            return self._handle_rca_report(trace, tu.id, cleaned)
 
         tool = self.registry.get(tu.name)
         if tool is None:
@@ -522,6 +563,45 @@ class Agent:
         return ToolResultBlock(
             tool_use_id=tu.id, is_error=False,
             content=f"用户选择: {chosen}",
+        )
+
+    def _handle_rca_report(
+        self, trace: Trace, tool_use_id: str, report_args: dict
+    ) -> ToolResultBlock:
+        """Validate and persist an evidence-backed RCA diagnosis."""
+        self.audit.event(trace, EventKind.TOOL_REQUEST, {
+            "tool": "submit_rca_report",
+            "playbook": report_args.get("playbook"),
+            "evidence_ids": report_args.get("evidence_ids", []),
+        })
+        available = {
+            str(event.payload["evidence_id"])
+            for event in trace.events
+            if event.kind is EventKind.PERCEPTION and event.payload.get("evidence_id")
+        }
+        try:
+            report = validate_report(
+                report_args,
+                playbooks=load_playbooks(self.cfg.resolve(self.cfg.rca.playbooks_file)),
+                available_evidence=available,
+            )
+        except ValueError as exc:
+            self.audit.event(trace, EventKind.ERROR, {
+                "reason": "invalid_rca_report", "detail": str(exc),
+            })
+            return ToolResultBlock(
+                tool_use_id=tool_use_id,
+                is_error=True,
+                content=f"RCA 报告非法：{exc}",
+            )
+        payload = asdict(report)
+        payload["evidence_ids"] = list(report.evidence_ids)
+        payload["recommendations"] = list(report.recommendations)
+        self.audit.event(trace, EventKind.DIAGNOSIS, payload)
+        return ToolResultBlock(
+            tool_use_id=tool_use_id,
+            is_error=False,
+            content="RCA 报告已记录：" + json.dumps(payload, ensure_ascii=False),
         )
 
     @staticmethod

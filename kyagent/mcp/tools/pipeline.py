@@ -1,15 +1,15 @@
 """通道无关的工具调用流水线。
 
 Agent 主循环（kyagent.agent.core）与 MCP 服务器（kyagent.mcp.server）都需要执行
-同一组步骤：validate → build_argv → audit(TOOL_REQUEST) → audit(PERCEPTION?) →
-guardrail → execute → format → 输出包装。历史上两条路径各写了一份，结果出现了
+同一组步骤：validate → build_argv → audit(TOOL_REQUEST) → guardrail →
+execute → audit(PERCEPTION?) → format → 输出包装。历史上两条路径各写了一份，结果出现了
 行为漂移（PERCEPTION 只在 Agent 落，stderr 拼接和 6KB 截断只在 Agent 做）。
 
 本模块抽出"真重复"的部分，差异点（CONFIRM 通道行为、trace 生命周期、返回类型
 包装）仍由调用方各自决定，避免硬把 stdin/threading 这种 Agent-only 细节漏到 MCP。
 
 划分原则：
-  · prepare_call         参数校验 → TOOL_REQUEST → 可选 PERCEPTION
+  · prepare_call         参数校验 → TOOL_REQUEST
   · check_safety         guardrail → SAFETY_CHECK
   · execute_and_format   EXECUTION → format → 共享的 stderr 拼接 + 长度截断
   · 调用方负责：DENY/CONFIRM 处理、trace open/close、最终类型包装
@@ -17,6 +17,8 @@ guardrail → execute → format → 输出包装。历史上两条路径各写�
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import uuid
 from typing import Any
 
 from kyagent.audit.logger import AuditLogger
@@ -24,7 +26,7 @@ from kyagent.audit.trace import EventKind, Trace
 from kyagent.executor.proxy import ExecutionProxy, ExecutionResult
 from kyagent.mcp.tools.base import Tool, ToolError, ToolResult
 from kyagent.safety.guardrail import Guardrail, Verdict
-from kyagent.safety.patterns import RiskLevel
+from kyagent.safety.output import sanitize_tool_output_for_llm
 
 
 OUTPUT_CAP = 6000  # tool 输出统一截断长度（两条通道共享）
@@ -75,7 +77,7 @@ def prepare_call(
     trace: Trace,
     audit: AuditLogger,
 ) -> PreparedCall | PipelineError:
-    """参数校验 + argv 构造 + 落 TOOL_REQUEST + 可能的 PERCEPTION。
+    """参数校验 + argv 构造 + 落 TOOL_REQUEST。
 
     返回 PreparedCall 表示可以进入 guardrail；
     返回 PipelineError 表示已经早停（审计已记 ERROR，调用方直接打包返回即可）。
@@ -101,17 +103,6 @@ def prepare_call(
         "risk": tool.risk_level.value,
         "requires_root": tool.requires_root,
     })
-
-    # 赛题第 1/5 条 5 段闭环里的"感知环境"段：只读 + LOW 的 tool 调用打 PERCEPTION
-    # 事件，明确这是为决策收集系统状态，区别于变更类操作。
-    # 历史上这条只在 Agent 通道落；现在 MCP 通道也会落，对齐两条审计 timeline。
-    if tool.read_only and tool.risk_level is RiskLevel.LOW:
-        audit.event(trace, EventKind.PERCEPTION, {
-            "tool": tool.name,
-            "purpose": "环境感知",
-            "snapshot_kind": _snapshot_kind(tool.name),
-            "argv_preview": " ".join(argv[:4]),
-        })
 
     return PreparedCall(tool=tool, cleaned=cleaned, argv=argv)
 
@@ -156,12 +147,29 @@ def execute_and_format(
     })
     exec_result = executor.run(prepared.argv, requires_root=prepared.tool.requires_root)
     exec_result.extra["tool_args"] = prepared.cleaned
-    audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
+    execution_result = audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
 
     formatted = prepared.tool.format_result(exec_result)
+    if prepared.tool.read_only:
+        audit.event(trace, EventKind.PERCEPTION, {
+            "evidence_id": f"evidence-{uuid.uuid4().hex}",
+            "tool": prepared.tool.name,
+            "snapshot_kind": _snapshot_kind(prepared.tool.name),
+            "execution_result_seq": getattr(execution_result, "seq", None),
+            "ok": formatted.ok,
+            "truncated": exec_result.truncated,
+            "stdout_sha256": hashlib.sha256(exec_result.stdout.encode("utf-8")).hexdigest(),
+        })
     if formatted.ok:
         content = formatted.content
     else:
         content = f"{formatted.content}\n---\n[stderr]\n{formatted.error or ''}"
-    content = content[:OUTPUT_CAP]
+    sanitized = sanitize_tool_output_for_llm(content[:OUTPUT_CAP], tool_name=prepared.tool.name)
+    if sanitized.hits:
+        audit.event(trace, EventKind.ERROR, {
+            "reason": "tool_output_prompt_injection",
+            "tool": prepared.tool.name,
+            "redacted_lines": sanitized.hits,
+        })
+    content = sanitized.text[:OUTPUT_CAP]
     return exec_result, formatted, content
