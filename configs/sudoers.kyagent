@@ -48,5 +48,5 @@ Cmnd_Alias KY_SELF_AUDIT = \
 # ---- 授权 --------------------------------------------------------------
 kyagent  ALL=(root)  NOPASSWD: KY_ROOT_OBSERVE, KY_ROOT_REGEX_OBSERVE, KY_SELF_AUDIT
 
-Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
+Defaults:kyagent  !visiblepw, !env_keep, lecture=never, !requiretty, \
                   log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}

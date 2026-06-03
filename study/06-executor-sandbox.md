@@ -479,7 +479,7 @@ kyagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE
 kyagent  ALL=(ALL)   !/bin/sh, !/bin/bash, !/usr/bin/zsh, !/usr/bin/perl, !/usr/bin/python*, \
                      !/usr/bin/vi, !/usr/bin/vim, !/usr/bin/nano, !/usr/bin/awk, !/usr/bin/sed
 
-Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
+Defaults:kyagent  !visiblepw, !env_keep, lecture=never, !requiretty, \
                   log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}
 ```
 
@@ -488,7 +488,7 @@ Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
 2. **`NOPASSWD` 仅给只读 / 受控写**：危险的解释器（sh / python / awk）显式黑名单
 3. **`!env_keep`**：sudo 跨权限边界时不保留任何环境变量（双保险，executor 已经洗了一遍）
 4. **`log_input` / `log_output`**：sudo 自己也记审计（写到 `/var/log/sudo-io/`），与 kyagent 自己的 audit 互为对照
-5. **`requiretty=false`**：因为 kyagent 作为 daemon 跑时没有 tty
+5. **`!requiretty`**：因为 kyagent 作为 daemon 跑时没有 tty
 
 这个文件是 **系统管理员的纵深防御**：即便 kyagent 进程被劫持，攻击者也只能跑 sudoers 白名单里的命令；想拿 root shell 直接被 sudo 拒绝。
 

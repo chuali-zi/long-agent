@@ -73,6 +73,12 @@ def test_required_fixed_root_queries_remain_granted() -> None:
         assert rule in text, f"missing required root query: {rule}"
 
 
+def test_sudoers_uses_boolean_defaults_without_assignment() -> None:
+    text = _sudoers()
+    assert "requiretty=false" not in text
+    assert "!requiretty" in text
+
+
 def test_custom_runtime_account_rewrites_self_audit_target() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
     assert (

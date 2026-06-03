@@ -337,7 +337,7 @@ kyagent  ALL=(ALL)   !/bin/sh, !/bin/bash, !/usr/bin/zsh, !/usr/bin/perl, \
                      !/usr/bin/python*, !/usr/bin/vi, !/usr/bin/vim, \
                      !/usr/bin/nano, !/usr/bin/awk, !/usr/bin/sed
 
-Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
+Defaults:kyagent  !visiblepw, !env_keep, lecture=never, !requiretty, \
                   log_input, log_output, iolog_dir=/var/log/sudo-io/%{user}</code></pre>
   </div>
 
@@ -346,7 +346,7 @@ Defaults:kyagent  !visiblepw, !env_keep, lecture=never, requiretty=false, \
     <div class="bul ok"><span class="b-num">2</span><div><strong>NOPASSWD 仅给只读 / 受控写</strong>：危险解释器（sh/python/awk）显式黑名单</div></div>
     <div class="bul ok"><span class="b-num">3</span><div><strong>!env_keep</strong>：sudo 跨权限边界时不保留任何环境变量（双保险）</div></div>
     <div class="bul ok"><span class="b-num">4</span><div><strong>log_input / log_output</strong>：sudo 自己也记审计（/var/log/sudo-io/），与 kyagent audit 互为对照</div></div>
-    <div class="bul ok"><span class="b-num">5</span><div><strong>requiretty=false</strong>：因为 kyagent 作为 daemon 跑时没有 tty</div></div>
+    <div class="bul ok"><span class="b-num">5</span><div><strong>!requiretty</strong>：因为 kyagent 作为 daemon 跑时没有 tty</div></div>
   </div>
 
   <h3>安装步骤</h3>
