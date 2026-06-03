@@ -62,11 +62,62 @@ sudo bash scripts/install-loongarch.sh --yes --with-web
 
 真实调用需要 `DEEPSEEK_API_KEY`；离线演示请显式使用 `--mock`。
 
+## 配置 DeepSeek Key
+
+key **只从环境变量 `DEEPSEEK_API_KEY` 读取**，不从 YAML、也不从项目根 `kyagent.json` 读取（`kyagent.json` 只接受 `llm_backend` 字段，残留的 key 字段会被忽略）。`configs/deepseek.yaml` 里的 `api_key_env: DEEPSEEK_API_KEY` 存的是“环境变量名”，不是 key 本体。缺 key 时直接报错，不会静默降级；离线演示请显式 `--mock`。
+
+key 申请：<https://platform.deepseek.com>。
+
+### 本地开发 / 临时
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
+kyagent ask "80 端口被谁占了？"
+```
+
+### LoongArch 生产
+
+龙芯 Old World 必须走纯 httpx 路径（绕开 openai SDK 和 jiter）。把 key 写进 `/etc/kyagent/env`（`0600`，属主 `kyagent`），由 systemd 或 `source` 注入：
+
+```bash
+sudo install -m 0600 -o kyagent -g kyagent /dev/null /etc/kyagent/env
+sudo sh -c 'cat > /etc/kyagent/env' <<'EOF'
+KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml
+KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+DEEPSEEK_API_KEY=sk-...
+EOF
+sudo chown kyagent:kyagent /etc/kyagent/env
+
+# 自检
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent ask "查 80 端口被谁占了"'
+```
+
+`install-loongarch.sh` 会自动生成 `/etc/kyagent/env` 模板（含上面前两行），拿到 key 后补 `DEEPSEEK_API_KEY=sk-...` 即可。
+
+### 相关环境变量
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | key 本体，必需 | 无，缺则报错 |
+| `KYAGENT_CONFIG` | 指向 `configs/deepseek.yaml` | 自动查找 `default.yaml` |
+| `KYAGENT_DEEPSEEK_TRANSPORT` | `deepseek`（SDK）/ `deepseek_httpx`（龙芯） | `deepseek` |
+| `KYAGENT_DEEPSEEK_MODEL` | 模型 ID | `deepseek-v4-flash` |
+| `KYAGENT_DEEPSEEK_BASE_URL` | 反代地址 | 空 → `https://api.deepseek.com` |
+
+完整的龙芯部署、env 写入和验收命令见 [LoongArch Linux 部署审查](docs/deployment/loongarch.md)。
+
 ## 最小权限
+
+LoongArch 生产模式必须安装 `kyagent` 受限账户和 `/etc/sudoers.d/kyagent` 免密白名单。否则工具需要 root 只读信息时会失败，并在对话里看到 `sudo: a password is required`。
 
 ```bash
 sudo bash scripts/kyagent.sh permissions
+sudo visudo -cf /etc/sudoers.d/kyagent
+sudo -l -U kyagent
 ```
+
+不要在生产安装里使用 `--skip-sudoers`；它只适合本地静态检查或自己手工接管权限配置的场景。
 
 默认 sudoers 不允许重启或 reload 任意 systemd unit。确需服务变更时，在部署阶段显式配置 allowlist：
 

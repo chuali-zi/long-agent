@@ -240,6 +240,7 @@ python -m pytest --collect-only -q
 | PyYAML 日志出现 `yaml.h` 缺失 | 可选 C 扩展编译失败并 fallback | 只要最终安装成功即可；想消除日志可装 `libyaml-devel`。 |
 | `kyagent ask` 写审计时报权限错 | 没设置生产审计路径 | 设置 `/etc/kyagent/env` 中两个 `KYAGENT_AUDIT_*` 变量。 |
 | `sudo -u kyagent` 下找不到命令 | venv 路径没写绝对路径 | 使用 `/opt/kyagent/.venv/bin/kyagent`。 |
+| 工具提示 `sudo: a password is required` | 没安装 `/etc/sudoers.d/kyagent` 免密白名单，或安装时用了 `--skip-sudoers` | 在 `/opt/kyagent` 下执行 `sudo bash scripts/kyagent.sh permissions`，再跑 `sudo visudo -cf /etc/sudoers.d/kyagent` 和 `sudo -l -U kyagent` 验证。 |
 | `systemctl`/`journalctl` 权限异常 | sudoers 或 journal 组没生效 | 跑 `sudo visudo -cf /etc/sudoers.d/kyagent`，重新登录或重启相关会话。 |
 | `start-web.sh` 提示缺少 FastAPI/uvicorn | 默认最小安装未包含 Web extra | 重跑安装器并加 `--with-web`，或执行 `bash scripts/start-web.sh --install-web --mock` 做离线演示。 |
 | Web 没有自动弹页 | 服务器没有桌面会话或 opener | 后端仍保持运行；使用脚本打印的 URL，或单独执行 `bash scripts/open-web.sh`。 |
