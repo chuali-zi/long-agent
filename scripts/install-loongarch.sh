@@ -420,6 +420,24 @@ setup_sudoers_and_dirs() {
   run visudo -cf /etc/sudoers.d/kyagent
 }
 
+verify_runtime_prefix_access() {
+  if [[ "$SKIP_SUDOERS" == "1" ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "dry-run: skipping runtime account prefix access check"
+    return 0
+  fi
+
+  local probe="$INSTALL_PREFIX/scripts/start-web.sh"
+  if [[ ! -r "$probe" ]]; then
+    die "install prefix is missing a readable Web launcher: $probe"
+  fi
+  if ! sudo -u "$KYAGENT_USER" test -r "$probe"; then
+    die "runtime account cannot read install prefix: $INSTALL_PREFIX; deploy under /opt/kyagent or make every parent directory searchable and project files readable before starting with sudo -u $KYAGENT_USER"
+  fi
+}
+
 write_shell_assignment() {
   printf '%s=' "$1"
   printf '%q' "$2"
@@ -541,6 +559,7 @@ main() {
   detect_python
   create_venv_and_install
   setup_sudoers_and_dirs
+  verify_runtime_prefix_access
   write_env_file
   run_selfcheck
 

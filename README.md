@@ -7,9 +7,14 @@ kyagent 是面向麒麟高级服务器版与 LoongArch Linux 的安全智能运�
 LoongArch Linux 生产安装：
 
 ```bash
+sudo install -d -m 0755 /opt/kyagent
+sudo rsync -a --delete ./ /opt/kyagent/
+cd /opt/kyagent
 sudo bash scripts/install-loongarch.sh --yes --with-web
-sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env
+sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent/env
 ```
+
+生产模式建议固定部署到 `/opt/kyagent`。不要从 `/home/<user>/...` 这类私有目录里用 `sudo -u kyagent` 启动，否则 `kyagent` 账户可能没有目录穿透或脚本读取权限。
 
 离线演示：
 

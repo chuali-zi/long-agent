@@ -41,6 +41,18 @@ require_kyagent() {
   fi
 }
 
+require_script_readable() {
+  local script_path="$1"
+  local current_user
+  current_user="$(id -un 2>/dev/null || printf unknown)"
+  if [[ ! -r "$script_path" ]]; then
+    printf '[kyagent][ERROR] cannot read delegated script: %s\n' "$script_path" >&2
+    printf '[kyagent][ERROR] current user: %s\n' "$current_user" >&2
+    printf '[kyagent][ERROR] Production installs should run from /opt/kyagent; if the repo is under another user home, copy it there or fix every parent directory execute bit plus file read permissions.\n' >&2
+    exit 1
+  fi
+}
+
 load_runtime_env() {
   local env_file="${KYAGENT_ENV_FILE:-}"
   if [[ -z "$env_file" && -r /etc/kyagent/env ]]; then
@@ -66,9 +78,11 @@ fi
 
 case "$COMMAND" in
   install)
+    require_script_readable "$SCRIPT_DIR/install.sh"
     exec bash "$SCRIPT_DIR/install.sh" "$@"
     ;;
   permissions)
+    require_script_readable "$SCRIPT_DIR/setup-sudoers.sh"
     exec bash "$SCRIPT_DIR/setup-sudoers.sh" "$@"
     ;;
   chat)
@@ -82,12 +96,15 @@ case "$COMMAND" in
     exec "$KYAGENT_BIN" tui "$@"
     ;;
   web)
+    require_script_readable "$SCRIPT_DIR/start-web.sh"
     exec bash "$SCRIPT_DIR/start-web.sh" "$@"
     ;;
   web-backend)
+    require_script_readable "$SCRIPT_DIR/start-web-backend.sh"
     exec bash "$SCRIPT_DIR/start-web-backend.sh" "$@"
     ;;
   web-open)
+    require_script_readable "$SCRIPT_DIR/open-web.sh"
     exec bash "$SCRIPT_DIR/open-web.sh" "$@"
     ;;
   tools)

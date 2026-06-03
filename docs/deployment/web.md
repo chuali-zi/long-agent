@@ -43,15 +43,18 @@ bash scripts/kyagent.sh web-open
 安装阶段显式打开 Web extra：
 
 ```bash
+cd /opt/kyagent
 sudo bash scripts/install-loongarch.sh --yes --with-web
 ```
 
 仅本机访问：
 
 ```bash
-sudo -u kyagent bash scripts/kyagent.sh web \
+sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web \
   --env-file /etc/kyagent/env
 ```
+
+生产模式建议固定部署到 `/opt/kyagent`。不要从 `/home/<user>/...` 这类私有目录里切换到 `kyagent` 账户启动，否则可能没有目录穿透或脚本读取权限。
 
 需要局域网访问时，先在受控的 `/etc/kyagent/env` 中开启非回环监听并配置四类角色 token：
 
@@ -67,7 +70,7 @@ KYAGENT_WEB_ADMIN_TOKEN=<random-admin-token>
 再显式监听所有网卡，并指定浏览器本机打开地址：
 
 ```bash
-sudo -u kyagent bash scripts/kyagent.sh web \
+sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web \
   --env-file /etc/kyagent/env \
   --host 0.0.0.0 \
   --browser-url http://127.0.0.1:8000 \

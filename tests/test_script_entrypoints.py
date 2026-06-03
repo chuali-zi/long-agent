@@ -26,6 +26,15 @@ def test_unified_entrypoint_exposes_abstract_commands() -> None:
     assert "/etc/kyagent/env" in script
 
 
+def test_unified_entrypoint_reports_unreadable_delegated_scripts() -> None:
+    script = ENTRYPOINT.read_text(encoding="utf-8")
+
+    assert "require_script_readable" in script
+    assert "cannot read delegated script" in script
+    assert "/opt/kyagent" in script
+    assert 'require_script_readable "$SCRIPT_DIR/start-web.sh"' in script
+
+
 def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
     readme = read_repo("README.md")
 
@@ -41,6 +50,15 @@ def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
     assert "docs/deployment/permissions.md" in readme
     assert "docs/deployment/web.md" in readme
     assert len(readme.splitlines()) < 180
+
+
+def test_production_web_commands_use_absolute_opt_prefix() -> None:
+    readme = read_repo("README.md")
+    web = read_repo("docs/deployment/web.md")
+
+    assert "sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web" in readme
+    assert "sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web" in web
+    assert "sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env" not in readme
 
 
 def test_detailed_deployment_guides_exist() -> None:

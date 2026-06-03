@@ -77,6 +77,8 @@ def test_loongarch_install_script_exists_and_has_safety_gates() -> None:
         "--yes",
         "--with-web",
         "pip install --no-binary PyYAML,pydantic -r requirements-loongarch.txt",
+        "verify_runtime_prefix_access",
+        "runtime account cannot read install prefix",
     ]
 
     for token in required_tokens:
@@ -235,6 +237,17 @@ def test_root_readme_is_loongarch_first_and_documents_web_layers() -> None:
     assert "bash scripts/start-web-backend.sh" in readme
     assert "bash scripts/open-web.sh" in readme
     assert "## Windows" not in readme
+
+
+def test_loongarch_docs_explain_sudoers_password_failure() -> None:
+    readme = read_repo("README.md")
+    deployment = read_repo("docs/deployment/loongarch.md")
+
+    for doc in (readme, deployment):
+        assert "sudo: a password is required" in doc
+        assert "sudo bash scripts/kyagent.sh permissions" in doc
+        assert "sudo -l -U kyagent" in doc
+        assert "--skip-sudoers" in doc
 
 
 def test_shell_scripts_use_lf_line_endings() -> None:
