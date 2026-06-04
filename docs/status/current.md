@@ -1,52 +1,82 @@
 # 仓库当前状态 - A2 麒麟安全智能运维 Agent
 
-生成时间：2026-06-01 +08:00
+更新时间：2026-06-04 +08:00
 
 ## 当前定位
 
-本仓库对应 A2 赛题“面向麒麟操作系统的安全智能运维 Agent”。正式交付目标是 LoongArch64 Linux + 麒麟高级服务器版 V11；安装器同时保留面向 Old World 环境的保守路径。
+本仓库对应 A2 赛题“面向麒麟操作系统的安全智能运维 Agent”。正式交付目标是 LoongArch64 Linux + 麒麟高级服务器版 V11；默认部署路径是 `/opt/kyagent`，运行账户是 `kyagent`，生产启动配置是 `/etc/kyagent/env`。
 
-## 部署入口
+## 当前文档结构
 
-根 `README.md` 保持高度抽象，只呈现正式入口：
+文档已按读者路径重构：
+
+| 文档 | 职责 |
+| --- | --- |
+| `README.md` | 最短启动入口、场景选择、比赛交付形式 |
+| `docs/deployment/loongarch.md` | LoongArch/Kylin 正式部署、依赖边界、验收 |
+| `docs/deployment/web.md` | Web 控制台、分开启动、局域网认证、审核 API |
+| `docs/deployment/permissions.md` | 文件权限、sudoers 权限、审计目录权限和排障 |
+| `docs/kyagent/README.md` | 赛题贴合、架构、工具、安全、审计、交付说明 |
+| `docs/kyagent/architecture.md` | 模块和数据流细节 |
+| `docs/kyagent/safety-model.md` | 安全模型细节 |
+
+## 推荐部署入口
+
+正式 Web 部署：
 
 ```bash
+sudo install -d -m 0755 /opt/kyagent
+sudo rsync -a --delete ./ /opt/kyagent/
+cd /opt/kyagent
 sudo bash scripts/install-loongarch.sh --yes --with-web
-sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env
+sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent/env
 ```
 
-`web` 会启动 FastAPI 后端、等待健康检查并自动打开浏览器。无桌面环境时，服务继续运行并打印访问 URL。
-
-分开脚本：
+只重写生产配置：
 
 ```bash
-bash scripts/start-web-backend.sh --mock
-bash scripts/open-web.sh --url http://127.0.0.1:8000
+cd /opt/kyagent
+sudo bash scripts/kyagent.sh prod-env
+```
+
+离线演示：
+
+```bash
+bash scripts/kyagent.sh install
+bash scripts/kyagent.sh web --install-web --mock
+```
+
+TUI：
+
+```bash
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tui'
 ```
 
 ## LoongArch 边界
 
-- 安装器只支持 LoongArch Linux；非龙芯 Linux 只允许 `--dry-run --allow-non-loongarch`。
-- 默认依赖路径不安装 `openai`、`anthropic`、`mcp`、`jiter`、`pydantic-core`。
-- `pydantic v1` 使用 `SKIP_CYTHON=1` 和 `--no-binary pydantic` 固定纯 Python 安装。
+- 默认路径零 Rust，使用 `deepseek_httpx`、`pydantic v1`、`httpx`、`prompt_toolkit + rich`。
+- 默认不安装 `openai`、`anthropic`、`mcp`、`jiter`、`pydantic-core`。
 - Web extra 独立放在 `requirements-loongarch-web.txt`，不安装 `uvicorn[standard]`。
-- editable 安装使用 `--no-deps`，避免重新解析未审计依赖。
+- `install-loongarch.sh` 支持 dry-run、离线 wheelhouse、命令库存检查、sudoers/env/selfcheck。
+- `scripts/kyagent.sh prod-env` 可单独重写 `/etc/kyagent/env`，不用重跑完整安装器。
 
-## 最小权限
+## 权限边界
 
-- Web 默认监听 `127.0.0.1`；显式使用 `0.0.0.0` 时必须开启认证并配置四类角色 token，否则启动失败。
-- 默认 sudoers 不允许任意 systemd 服务变更。
-- 业务服务重启或 reload 必须在部署阶段通过 `KYAGENT_SERVICE_ALLOWLIST` 显式列出。
-- `/etc/kyagent/env` 使用 shell 安全转义格式写入，并同步 `KYAGENT_EXECUTOR_ACCOUNT`。
-- 安装器生成 `/etc/kyagent/audit-hmac.key`，审计事件使用哈希链和 HMAC 封印；`kyagent audit verify <trace-id>` 可校验完整性。
-- RCA 通过内置 playbook 和 `submit_rca_report` 逻辑工具落库，只接受当前 trace 已存在的 `PERCEPTION evidence_id`。
+- 文件权限：`kyagent` 必须能读 `/opt/kyagent` 和 `/etc/kyagent/env`。
+- sudoers 权限：`/etc/sudoers.d/kyagent` 只放行少量 root 查询和显式业务服务变更。
+- 审计权限：生产审计写 `/var/lib/kyagent/audit.db` 和 `/var/log/kyagent/audit.jsonl`。
+- 业务服务 restart/reload 必须通过 `KYAGENT_SERVICE_ALLOWLIST` 显式生成固定 sudoers 命令。
 
-## 文档布局
+## 交付建议
 
-| 文档 | 职责 |
-| --- | --- |
-| `README.md` | LoongArch Linux 高层入口 |
-| `docs/deployment/loongarch.md` | 依赖边界、安装器、手工兜底、验收 |
-| `docs/deployment/web.md` | Web 一键启动、分开脚本、局域网风险 |
-| `docs/deployment/permissions.md` | sudoers、服务 allowlist、验证 |
-| `docs/kyagent/README.md` | 完整能力说明 |
+比赛交付不建议做 Windows `.exe`。推荐交付：
+
+```text
+kyagent-release.tar.gz
+源码压缩包
+部署文档
+演示 PPT
+7 分钟以内演示视频
+```
+
+安装包内应包含源码、`scripts/`、`configs/`、requirements、README 和 docs，评委可按 LoongArch 部署文档一键安装。

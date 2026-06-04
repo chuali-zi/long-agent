@@ -11,8 +11,9 @@ usage() {
 Usage: bash scripts/kyagent.sh <command> [options]
 
 Commands:
-  install       Install the development environment.
-  permissions   Create the restricted runtime account and sudoers policy.
+  install       Install the local development environment.
+  permissions   Create the restricted runtime account, sudoers policy, and audit dirs.
+  prod-env      Write the minimal production runtime env file.
   chat          Start the interactive chat shell.
   tui           Start the streaming terminal UI.
   web           Start the Web backend and open the browser UI.
@@ -23,6 +24,7 @@ Commands:
 Common examples:
   bash scripts/kyagent.sh install
   sudo bash scripts/kyagent.sh permissions
+  sudo bash scripts/kyagent.sh prod-env
   bash scripts/kyagent.sh chat
   bash scripts/kyagent.sh tui
   bash scripts/kyagent.sh web --mock
@@ -30,7 +32,11 @@ Common examples:
   bash scripts/kyagent.sh web-open
 
 LoongArch/Kylin deployment:
-  sudo bash scripts/install-loongarch.sh --yes
+  sudo install -d -m 0755 /opt/kyagent
+  sudo rsync -a --delete ./ /opt/kyagent/
+  cd /opt/kyagent
+  sudo bash scripts/install-loongarch.sh --yes --with-web
+  sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent/env
 EOF
 }
 
@@ -84,6 +90,10 @@ case "$COMMAND" in
   permissions)
     require_script_readable "$SCRIPT_DIR/setup-sudoers.sh"
     exec bash "$SCRIPT_DIR/setup-sudoers.sh" "$@"
+    ;;
+  prod-env)
+    require_script_readable "$SCRIPT_DIR/write-prod-env.sh"
+    exec bash "$SCRIPT_DIR/write-prod-env.sh" "$@"
     ;;
   chat)
     require_kyagent

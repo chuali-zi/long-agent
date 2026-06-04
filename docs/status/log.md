@@ -1,5 +1,14 @@
 # 工作日志
 
+## 2026-06-04
+
+- 按用户要求对文档体系做严肃重构，未改核心 Python 执行逻辑，未派出子 agent。
+- 将根 `README.md` 改为场景入口：离线演示、LoongArch 正式部署、TUI/CLI、DeepSeek key、权限快速判断和比赛交付建议分开说明。
+- 重写 `docs/deployment/loongarch.md`、`docs/deployment/web.md`、`docs/deployment/permissions.md`，明确 `/opt/kyagent`、`/etc/kyagent/env`、`sudo -u kyagent`、sudoers 和审计目录分别解决什么问题。
+- 重写 `docs/kyagent/README.md`，改为赛题贴合与系统架构说明，突出 Tool 到 Linux argv、Guardrail、ExecutionProxy、Web/TUI、审计链路和交付形式。
+- 更新 `docs/status/current.md`，同步新的文档布局、部署入口和权限边界。
+- 新增 `scripts/write-prod-env.sh` 和 `scripts/kyagent.sh prod-env`，用于单独重写最低生产启动配置，避免调试 key/env 时反复跑完整安装器。
+
 ## 2026-06-01
 
 - 按 A2 赛题和 LoongArch64 Linux 部署目标完成安全修复：项目密钥文件进入 `.gitignore`，`kyagent.json` 从 Git 跟踪移除，运行时不再从项目 JSON 读取 key。
