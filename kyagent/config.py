@@ -215,6 +215,36 @@ def _apply_project_json_overrides(raw: dict[str, Any], project_root: Path) -> di
     return raw
 
 
+def _is_default_audit_path(value: str | None, default_name: str) -> bool:
+    if value is None:
+        return False
+    return Path(value).as_posix() in {f"var/{default_name}", f"./var/{default_name}"}
+
+
+def _apply_opt_runtime_defaults(cfg: Config) -> None:
+    """Keep production runtime state out of the read-only /opt install tree."""
+    install_prefix = Path(os.environ.get("KYAGENT_INSTALL_PREFIX", "/opt/kyagent"))
+    try:
+        is_install_prefix = (
+            cfg.base_dir.resolve() == install_prefix.expanduser().resolve()
+        )
+    except OSError:
+        is_install_prefix = cfg.base_dir == install_prefix.expanduser()
+    if not is_install_prefix:
+        return
+
+    if (
+        "KYAGENT_AUDIT_DB" not in os.environ
+        and _is_default_audit_path(cfg.audit.database, "audit.db")
+    ):
+        cfg.audit.database = "/var/lib/kyagent/audit.db"
+    if (
+        "KYAGENT_AUDIT_JSONL" not in os.environ
+        and _is_default_audit_path(cfg.audit.jsonl_file, "audit.jsonl")
+    ):
+        cfg.audit.jsonl_file = "/var/log/kyagent/audit.jsonl"
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """加载并展开 YAML 配置，再应用项目根 kyagent.json 的轻量覆盖。"""
     cfg_path = Path(path) if path else find_default_config()
@@ -229,4 +259,5 @@ def load_config(path: str | Path | None = None) -> Config:
     # pydantic v1 API（v2 等价为 model_validate）；锁 v1 是为了在龙芯老世界绕开 pydantic-core Rust 编译
     cfg = Config.parse_obj(raw)
     cfg.base_dir = project_root
+    _apply_opt_runtime_defaults(cfg)
     return cfg

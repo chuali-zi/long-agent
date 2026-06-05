@@ -2,87 +2,128 @@
 
 kyagent 是面向 A2 赛题的安全智能运维 Agent：在 LoongArch Linux + 麒麟高级服务器版 V11 上，通过自然语言调用受控 Tools，完成系统感知、安全校验、最小权限执行和审计追踪。
 
-这份根 README 只回答一个问题：**我现在该怎么跑起来？** 详细原理和排障放在 `docs/` 下。
+这份 README 只回答一个问题：**从 Gitee 拉下代码后，怎样一路启动 Web，并问出 `which process used the most cpu`，让 Agent 返回真实系统结果。** 详细原理和排障见 `docs/`。
 
-## 先选你的场景
+## 一条正式演示链路
 
-| 场景 | 你该看哪里 | 适合谁 |
-| --- | --- | --- |
-| 比赛实机 Web 演示 | 本文“正式演示” | 接 DeepSeek key、给评委演示 |
-| 在 LoongArch/Kylin 正式部署 | [LoongArch 部署](docs/deployment/loongarch.md) | 安装、验收、实机排障 |
-| Web 控制台启动和局域网访问 | [Web 控制台部署](docs/deployment/web.md) | B/S 演示、浏览器审核 |
-| 离线冒烟测试 | 本文“离线冒烟测试” | 本地开发、没 key 时确认页面能开 |
-| 权限、sudoers、`Permission denied` | [最小权限部署](docs/deployment/permissions.md) | 排查工具执行失败 |
-| 项目能力和架构说明 | [完整项目说明](docs/kyagent/README.md) | 写文档、答辩、二次开发 |
-
-## 正式演示
-
-比赛实机演示建议接真实 DeepSeek key。Web 端不是默认离线；只要不传 `--mock`，它会读取 `/etc/kyagent/env` 并使用 `deepseek_httpx`。
+以下命令假设你在 LoongArch/Kylin 目标机上操作，并且要接真实 DeepSeek key。请把 Gitee 地址替换成实际仓库地址。
 
 ```bash
+git clone https://gitee.com/<your-org>/kyagent.git kyagent
+cd kyagent
+
 sudo install -d -m 0755 /opt/kyagent
 sudo rsync -a --delete ./ /opt/kyagent/
 cd /opt/kyagent
 
 sudo bash scripts/install-loongarch.sh --yes --with-web
+```
+
+安装器会创建受限运行用户 `kyagent`、虚拟环境 `/opt/kyagent/.venv`、sudoers 最小权限白名单 `/etc/sudoers.d/kyagent`、审计目录 `/var/lib/kyagent` 和 `/var/log/kyagent`，并写入生产环境文件 `/etc/kyagent/env`。
+
+## 配置 API Key
+
+推荐把 DeepSeek key 放进 root 可读的临时密钥文件，再让脚本写入 `/etc/kyagent/env`：
+
+```bash
+sudo sh -c 'printf "%s\n" "sk-your-deepseek-key" > /root/deepseek.key'
+sudo chmod 600 /root/deepseek.key
 sudo bash scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
+```
+
+也可以手工编辑：
+
+```bash
+sudo editor /etc/kyagent/env
+```
+
+至少确认里面有这些值：
+
+```bash
+KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml
+KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
+KYAGENT_EXECUTOR_ACCOUNT=kyagent
+KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
+KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
+DEEPSEEK_API_KEY=sk-your-deepseek-key
+```
+
+key 只从环境变量读取，不从 YAML 或 `kyagent.json` 读取。
+
+## 激活虚拟环境
+
+需要手工跑 CLI 或排障时，可以激活项目虚拟环境：
+
+```bash
+source /opt/kyagent/.venv/bin/activate
+kyagent tools list
+deactivate
+```
+
+正式以受限用户运行时，一般不用手工 activate，直接加载 `/etc/kyagent/env` 并调用 venv 里的入口：
+
+```bash
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tools list'
+```
+
+## 启动 Web
+
+生产演示不要传 `--mock`。下面这条命令会读取 `/etc/kyagent/env`，使用真实 DeepSeek 后端和受限执行账户：
+
+```bash
 sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent/env
 ```
 
-换 key 或重写生产环境变量时，只重跑：
+默认监听：
 
-```bash
-sudo bash scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
+```text
+http://127.0.0.1:8000
 ```
 
-Web 会自动打开浏览器；没有桌面环境或找不到 opener 时，会继续运行并打印手工访问地址。
+有桌面环境时脚本会自动打开浏览器；没有桌面 opener 时，终端会打印手工访问地址。
 
-## LoongArch Linux 正式部署
+打开页面后，在输入框里问：
 
-正式部署建议固定到 `/opt/kyagent`，不要从 `/home/<user>/...` 私有目录里用 `sudo -u kyagent` 启动。
-
-```bash
-sudo install -d -m 0755 /opt/kyagent
-sudo rsync -a --delete ./ /opt/kyagent/
-cd /opt/kyagent
-
-sudo bash scripts/install-loongarch.sh --yes --with-web
-sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent/env
+```text
+which process used the most cpu
 ```
 
-安装器会完成 LoongArch/Kylin 依赖、`kyagent` 账户、sudoers 白名单、审计目录和 `/etc/kyagent/env`。
+Agent 应该会调用进程相关工具读取当前系统进程信息，并返回 CPU 占用最高的进程名称、PID、CPU 占比等摘要。返回内容取决于机器当时的 `ps/top` 数据，不是固定答案。
 
-安装器 dry-run：`sudo bash scripts/install-loongarch.sh --dry-run --yes`；只重写生产配置：`sudo bash scripts/kyagent.sh prod-env`
+## 快速验收
+
+在 `/opt/kyagent` 下依次检查：
+
+```bash
+sudo visudo -cf /etc/sudoers.d/kyagent
+sudo -l -U kyagent
+sudo -u kyagent test -r /opt/kyagent/scripts/kyagent.sh
+sudo -u kyagent test -w /var/lib/kyagent
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tools list'
+```
+
+也可以先用 CLI 直接问一次：
+
+```bash
+sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent ask "which process used the most cpu"'
+```
 
 ## 离线冒烟测试
 
-不需要 DeepSeek key、不依赖真实 LLM，只适合确认 Web 页面、SSE 和 Agent 链路能启动：
+没有 DeepSeek key 时，只能验证 Web 页面、SSE 和 Agent 链路能启动，不能证明真实问答能力：
 
 ```bash
 bash scripts/kyagent.sh install
 bash scripts/kyagent.sh web --install-web --mock
 ```
 
-Web 依赖已装好时：`bash scripts/kyagent.sh web --mock`
-
-分开启动时使用：
+Web 依赖已装好时：
 
 ```bash
-bash scripts/start-web-backend.sh --mock
-bash scripts/open-web.sh --url http://127.0.0.1:8000
+bash scripts/kyagent.sh web --mock
 ```
 
-正式演示不要传 `--mock`。
-
-## TUI 和 CLI
-
-安装后可以使用 TUI：
-
-```bash
-sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.venv/bin/kyagent tui'
-```
-
-开发态也可以直接：
+开发态常用入口：
 
 ```bash
 bash scripts/kyagent.sh chat
@@ -91,86 +132,39 @@ kyagent tui
 kyagent tools list
 ```
 
-`kyagent tui` 支持 `/tools`、`/audit`、`/reset`、`/exit` 和高风险操作确认。
+## 常见问题
 
-## DeepSeek Key
+### `Permission denied`
 
-真实后端需要 `DEEPSEEK_API_KEY`。key 只从环境变量读取，不从 YAML 或 `kyagent.json` 读取。
-
-开发态：
+正式部署不要从 `/home/<user>/...` 私有目录里用 `sudo -u kyagent` 启动。请复制到 `/opt/kyagent`：
 
 ```bash
-export DEEPSEEK_API_KEY=sk-...
-export KYAGENT_CONFIG=$(pwd)/configs/deepseek.yaml
-kyagent ask "80 端口被谁占了？"
+sudo install -d -m 0755 /opt/kyagent
+sudo rsync -a --delete ./ /opt/kyagent/
+sudo -u kyagent test -r /opt/kyagent/scripts/kyagent.sh
 ```
 
-LoongArch 生产态：
+### `sudo: a password is required`
+
+说明 sudoers 免密白名单没有安装好，或目标命令不在白名单里：
 
 ```bash
-sudo editor /etc/kyagent/env
-```
-
-补入：
-
-```bash
-DEEPSEEK_API_KEY=sk-...
-```
-
-安装器默认写入 `KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml` 和 `KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx`。LoongArch Old World 默认走 `deepseek_httpx`，避免 OpenAI SDK、`jiter`、`pydantic-core` 等 Rust/native 依赖。
-
-## 权限快速判断
-
-如果看到：
-
-```text
-sudo: a password is required
-```
-
-说明 `/etc/sudoers.d/kyagent` 免密白名单没有安装好，或安装时用了 `--skip-sudoers`。先在 `/opt/kyagent` 下验证：
-
-```bash
+cd /opt/kyagent
 sudo bash scripts/kyagent.sh permissions
 sudo visudo -cf /etc/sudoers.d/kyagent
 sudo -l -U kyagent
 ```
 
-如果看到：
+### Web 或 TUI 写审计失败
 
-```text
-Permission denied
+确认 `/etc/kyagent/env` 指向生产审计目录，并且目录归属 `kyagent`：
+
+```bash
+grep KYAGENT_AUDIT /etc/kyagent/env
+sudo -u kyagent test -w /var/lib/kyagent
+sudo -u kyagent test -w /var/log/kyagent
 ```
-
-先判断是不是从私人目录用 `sudo -u kyagent` 启动。正式测试请把项目复制到 `/opt/kyagent`。
-
-更多排障见 [最小权限部署](docs/deployment/permissions.md)。
-
-## 比赛交付建议
-
-赛题要求“软件安装包及部署文档”和“软件源代码文件（压缩包）”。本项目不建议交付 Windows `.exe`，而应交付 LoongArch/Kylin 可部署包：
-
-```text
-kyagent-release.tar.gz
-  kyagent/
-  configs/
-  scripts/
-  requirements-loongarch.txt
-  requirements-loongarch-web.txt
-  pyproject.toml
-  README.md
-  docs/
-```
-
-评委拿到后应能按本文 LoongArch Linux 部署命令安装并启动 Web 控制台。
 
 ## 文档导航
 
-| 文档 | 作用 |
-| --- | --- |
-| [docs/deployment/loongarch.md](docs/deployment/loongarch.md) | LoongArch/Kylin 正式部署、依赖边界、验收命令 |
-| [docs/deployment/web.md](docs/deployment/web.md) | Web 一键启动、分开启动、局域网认证 |
-| [docs/deployment/permissions.md](docs/deployment/permissions.md) | 运行账户、sudoers、审计目录、权限排障 |
-| [docs/kyagent/README.md](docs/kyagent/README.md) | 功能、架构、安全链路和工具说明 |
-| [docs/kyagent/architecture.md](docs/kyagent/architecture.md) | 模块和数据流 |
-| [docs/kyagent/safety-model.md](docs/kyagent/safety-model.md) | 意图过滤、Guardrail、执行沙箱 |
-| [docs/status/current.md](docs/status/current.md) | 当前交付状态 |
+详细部署见 [LoongArch/Kylin 部署](docs/deployment/loongarch.md)、[Web 控制台](docs/deployment/web.md) 和 [最小权限配置](docs/deployment/permissions.md)。项目能力、架构和安全模型见 [完整项目说明](docs/kyagent/README.md)、[架构](docs/kyagent/architecture.md)、[安全模型](docs/kyagent/safety-model.md) 和 [当前状态](docs/status/current.md)。

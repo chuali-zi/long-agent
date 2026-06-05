@@ -100,3 +100,45 @@ def test_default_config_executor_account_can_follow_runtime_env(monkeypatch):
     cfg = load_config(ROOT / "configs" / "default.yaml")
 
     assert cfg.executor.account == "opsagent"
+
+
+def test_opt_install_defaults_audit_paths_to_runtime_dirs(tmp_path, monkeypatch):
+    install_prefix = tmp_path / "opt" / "kyagent"
+    config_dir = install_prefix / "configs"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "deepseek.yaml"
+    config_path.write_text(
+        "audit:\n"
+        "  database: ${KYAGENT_AUDIT_DB:-./var/audit.db}\n"
+        "  jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KYAGENT_INSTALL_PREFIX", str(install_prefix))
+    monkeypatch.delenv("KYAGENT_AUDIT_DB", raising=False)
+    monkeypatch.delenv("KYAGENT_AUDIT_JSONL", raising=False)
+
+    cfg = load_config(config_path)
+
+    assert cfg.audit.database == "/var/lib/kyagent/audit.db"
+    assert cfg.audit.jsonl_file == "/var/log/kyagent/audit.jsonl"
+
+
+def test_opt_install_runtime_env_audit_paths_take_precedence(tmp_path, monkeypatch):
+    install_prefix = tmp_path / "opt" / "kyagent"
+    config_dir = install_prefix / "configs"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "deepseek.yaml"
+    config_path.write_text(
+        "audit:\n"
+        "  database: ${KYAGENT_AUDIT_DB:-./var/audit.db}\n"
+        "  jsonl_file: ${KYAGENT_AUDIT_JSONL:-./var/audit.jsonl}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KYAGENT_INSTALL_PREFIX", str(install_prefix))
+    monkeypatch.setenv("KYAGENT_AUDIT_DB", "/srv/kyagent/audit.db")
+    monkeypatch.setenv("KYAGENT_AUDIT_JSONL", "/srv/kyagent/audit.jsonl")
+
+    cfg = load_config(config_path)
+
+    assert cfg.audit.database == "/srv/kyagent/audit.db"
+    assert cfg.audit.jsonl_file == "/srv/kyagent/audit.jsonl"

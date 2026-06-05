@@ -18,7 +18,7 @@ dependencies = [
     #   和 --no-binary pydantic 固定纯 Python 路径
     # - PyYAML 6.0.1+ → sdist build deps 纯 Python，_yaml C 扩展编译失败时
     #   setup.py 自动回落纯 Python SafeLoader；因此没有必需 C 扩展
-    # - httpx<1 → HttpxBackend 用（纯 Python，零 Rust，DeepSeek/Qwen 走 deepseek_httpx）
+    # - httpx<0.28 → HttpxBackend 用；同时兼容 fastapi<0.100 / starlette 0.27 TestClient
     # 真实 LLM SDK（anthropic / openai）含 jiter(Rust)，统一移到 [optional-dependencies]
     # 防止通用入口（pip install -e .）在 LoongArch 上意外触发 Rust 编译。
     "pydantic>=1.10.13,<2",
@@ -26,7 +26,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "prompt_toolkit>=3.0,<4",
-    "httpx>=0.23.0,<1",
+    "httpx>=0.23.0,<0.28",
 ]
 
 [project.optional-dependencies]

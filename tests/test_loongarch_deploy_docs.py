@@ -139,7 +139,7 @@ def test_loongarch_default_requirements_avoid_sdk_and_rust_extensions() -> None:
 
     assert "pydantic>=1.10.13,<2" in requirements
     assert "PyYAML>=6.0.1,<7" in requirements
-    assert "httpx>=0.23.0,<1" in requirements
+    assert "httpx>=0.23.0,<0.28" in requirements
     assert "prompt_toolkit>=3.0,<4" in requirements
     assert "textual" not in requirements
     assert "tree-sitter" not in requirements
