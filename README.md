@@ -123,6 +123,11 @@ Web 依赖已装好时：
 bash scripts/kyagent.sh web --mock
 ```
 
+```bash
+bash scripts/start-web-backend.sh --mock
+bash scripts/open-web.sh --url http://127.0.0.1:8000
+```
+
 开发态常用入口：
 
 ```bash
@@ -154,6 +159,8 @@ sudo bash scripts/kyagent.sh permissions
 sudo visudo -cf /etc/sudoers.d/kyagent
 sudo -l -U kyagent
 ```
+
+生产安装不要使用 `--skip-sudoers`，除非你明确要手工接管运行账户、sudoers 白名单和审计目录权限。
 
 ### Web 或 TUI 写审计失败
 

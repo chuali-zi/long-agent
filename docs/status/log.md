@@ -1,5 +1,13 @@
 # 工作日志
 
+## 2026-06-05
+
+- 修复 Web 提问时审计库不可写导致 `/api/ask/stream` 请求阶段才 500 的问题：`build_app()` 启动时预检 `AuditStore`，若 `/var/lib/kyagent/audit.db` 或 JSONL 路径不可写，会在服务启动阶段给出 `audit store is not writable` 明确错误，避免页面打开后提问才崩溃。
+- 修复 `scripts/open-web.sh` 健康检查重试时把 `urllib.request.urlopen` 的 transient connection refused traceback 打到终端的问题；探测输出改为静默重试，只保留最终超时或成功打开信息。
+- 测试补充：新增 Web 审计预检回归测试、健康检查 traceback 静默回归测试；bash 集成测试在当前 Windows 无可用 WSL/bash 时按既有模式跳过，真实 Linux/WSL 环境仍会执行。
+- 文档补充：README 增加 `start-web-backend.sh` / `open-web.sh` 分层排障入口，并明确生产安装不要使用 `--skip-sudoers`，除非手工接管运行账户、sudoers 和审计目录。
+- 验证：全量 `pytest -q --basetemp pytest_tmp_run -p no:cacheprovider` 通过，`571 passed, 18 skipped`；本机 mock Web smoke 通过 `/api/health`、`/api/ask` 和 `/api/ask/stream`，`which process used the most cpu` 能返回 trace 和流式 final 事件。当前机器 WSL 未安装发行版，无法执行 README 的 WSL 全流程实测。
+
 ## 2026-06-04
 
 - 按用户要求对文档体系做严肃重构，未改核心 Python 执行逻辑，未派出子 agent。

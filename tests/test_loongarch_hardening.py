@@ -21,7 +21,21 @@ def _bash_path(path: Path) -> str:
     return f"/mnt/{drive}{resolved.as_posix()[2:]}"
 
 
+def require_usable_bash() -> None:
+    result = subprocess.run(
+        ["bash", "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        pytest.skip("bash is not usable in this test environment")
+
+
 def _run_bash(command: str) -> subprocess.CompletedProcess[str]:
+    require_usable_bash()
     return subprocess.run(
         ["bash", "-c", command],
         check=False,
@@ -75,6 +89,7 @@ def test_offline_requires_wheelhouse() -> None:
 
 
 def test_deepseek_key_file_is_loaded_without_trailing_newline(tmp_path: Path) -> None:
+    require_usable_bash()
     key_file = tmp_path / "deepseek.key"
     key_file.write_text("sk-file-secret\n", encoding="utf-8")
     script = tmp_path / "read-key.sh"

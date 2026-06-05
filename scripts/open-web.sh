@@ -69,7 +69,7 @@ for ((i = 0; i < WAIT_SECONDS * 5; i++)); do
     printf '[kyagent-web][ERROR] backend exited before becoming ready\n' >&2
     exit 1
   fi
-  if "$PYTHON" - "$HEALTH_URL" <<'PY'
+  if "$PYTHON" - "$HEALTH_URL" >/dev/null 2>&1 <<'PY'
 import sys
 import urllib.request
 

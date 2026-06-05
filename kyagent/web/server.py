@@ -135,6 +135,23 @@ class _AgentSessionRegistry:
         return Agent.from_config(self._cfg, confirm=auto_deny)
 
 
+def _preflight_audit_store(cfg: Config) -> None:
+    """Fail at startup if the configured audit store cannot be opened."""
+    store = None
+    try:
+        store = build_audit_store(cfg)
+    except Exception as exc:  # noqa: BLE001
+        db_path = cfg.resolve(cfg.audit.database)
+        jsonl_path = cfg.resolve(cfg.audit.jsonl_file) if cfg.audit.jsonl_file else None
+        detail = f"audit store is not writable: {db_path}"
+        if jsonl_path is not None:
+            detail += f" (jsonl: {jsonl_path})"
+        raise RuntimeError(detail) from exc
+    finally:
+        if store is not None:
+            store.close()
+
+
 # ---- app 工厂 -------------------------------------------------------------
 
 
@@ -145,6 +162,7 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
     可显式注入预构建的 Config。
     """
     cfg = cfg or load_config(None)
+    _preflight_audit_store(cfg)
     sessions = _AgentSessionRegistry(
         cfg,
         max_sessions=_env_int("KYAGENT_WEB_MAX_SESSIONS", 128),

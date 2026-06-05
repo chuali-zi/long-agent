@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,6 +19,19 @@ def _bash_path(path: Path) -> str:
 def _write_executable(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
     path.chmod(0o755)
+
+
+def require_usable_bash() -> None:
+    result = subprocess.run(
+        ["bash", "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        pytest.skip("bash is not usable in this test environment")
 
 
 def _fake_runtime(tmp_path: Path, *, with_opener: bool = True) -> dict[str, str]:
@@ -69,7 +84,14 @@ printf '%s\n' "$1" >"$OPENER_URL_FILE"
     return env
 
 
+def test_open_web_suppresses_transient_health_probe_tracebacks() -> None:
+    script = (ROOT / "scripts" / "open-web.sh").read_text(encoding="utf-8")
+
+    assert 'if "$PYTHON" - "$HEALTH_URL" >/dev/null 2>&1 <<\'PY\'' in script
+
+
 def test_one_click_launcher_rejects_non_loopback_without_explicit_authenticated_mode(tmp_path: Path) -> None:
+    require_usable_bash()
     env = _fake_runtime(tmp_path)
 
     result = subprocess.run(
@@ -88,6 +110,7 @@ def test_one_click_launcher_rejects_non_loopback_without_explicit_authenticated_
 
 
 def test_one_click_launcher_starts_authenticated_non_loopback_backend(tmp_path: Path) -> None:
+    require_usable_bash()
     env = _fake_runtime(tmp_path)
     env.update({
         "KYAGENT_WEB_ALLOW_NON_LOOPBACK": "1",
@@ -118,6 +141,7 @@ def test_one_click_launcher_starts_authenticated_non_loopback_backend(tmp_path: 
 
 
 def test_one_click_launcher_keeps_running_when_browser_opener_is_missing(tmp_path: Path) -> None:
+    require_usable_bash()
     env = _fake_runtime(tmp_path, with_opener=False)
 
     result = subprocess.run(
@@ -137,6 +161,7 @@ def test_one_click_launcher_keeps_running_when_browser_opener_is_missing(tmp_pat
 
 
 def test_one_click_launcher_can_skip_browser_open(tmp_path: Path) -> None:
+    require_usable_bash()
     env = _fake_runtime(tmp_path)
 
     result = subprocess.run(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -13,7 +15,21 @@ def _bash_path(path: Path) -> str:
     return f"/mnt/{drive}{resolved.as_posix()[2:]}"
 
 
+def require_usable_bash() -> None:
+    result = subprocess.run(
+        ["bash", "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        pytest.skip("bash is not usable in this test environment")
+
+
 def _run_bash(command: str) -> subprocess.CompletedProcess[str]:
+    require_usable_bash()
     return subprocess.run(
         ["bash", "-c", command],
         check=False,
@@ -36,6 +52,7 @@ def test_non_loongarch_override_requires_dry_run() -> None:
 
 
 def test_shell_assignment_roundtrips_metacharacters_without_execution(tmp_path: Path) -> None:
+    require_usable_bash()
     marker = tmp_path / "must-not-exist"
     value = f"sk-$(touch {marker.as_posix()}) with spaces"
     script = tmp_path / "roundtrip.sh"

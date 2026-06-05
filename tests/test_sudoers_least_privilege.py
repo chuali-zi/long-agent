@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 SUDOERS = Path(__file__).parents[1] / "configs" / "sudoers.kyagent"
 SETUP_SUDOERS = Path(__file__).parents[1] / "scripts" / "setup-sudoers.sh"
@@ -9,6 +11,19 @@ ROOT = Path(__file__).parents[1]
 
 def _sudoers() -> str:
     return SUDOERS.read_text(encoding="utf-8")
+
+
+def require_usable_bash() -> None:
+    result = subprocess.run(
+        ["bash", "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        pytest.skip("bash is not usable in this test environment")
 
 
 def test_non_root_readonly_commands_are_not_granted_via_sudo() -> None:
@@ -95,6 +110,7 @@ def test_setup_rejects_sudo_without_regex_support() -> None:
 
 
 def test_setup_parses_sudo_version_with_c_locale() -> None:
+    require_usable_bash()
     result = subprocess.run(
         ["bash", "tests/fixtures/sudo_version_locale.sh"],
         check=False,
@@ -124,6 +140,7 @@ def test_default_sudoers_does_not_grant_service_mutation() -> None:
 
 
 def test_setup_renders_only_explicit_service_allowlist() -> None:
+    require_usable_bash()
     result = subprocess.run(
         [
             "bash",
@@ -146,6 +163,7 @@ def test_setup_renders_only_explicit_service_allowlist() -> None:
 
 
 def test_setup_rejects_non_service_allowlist_unit() -> None:
+    require_usable_bash()
     result = subprocess.run(
         [
             "bash",

@@ -64,6 +64,19 @@ def test_health(client):
     assert body["status"] == "ok"
 
 
+def test_build_app_preflights_audit_store(monkeypatch, tmp_path):
+    cfg = load_config(None)
+    cfg.audit.database = str(tmp_path / "audit.db")
+
+    def fail_preflight(_cfg):
+        raise OSError("unable to open database file")
+
+    monkeypatch.setattr("kyagent.web.server.build_audit_store", fail_preflight)
+
+    with pytest.raises(RuntimeError, match="audit store is not writable"):
+        build_app(cfg)
+
+
 def test_tools_list_shape(client):
     r = client.get("/api/tools")
     assert r.status_code == 200
