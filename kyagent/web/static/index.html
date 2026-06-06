@@ -155,11 +155,11 @@
      3. 布局
      ===================================================================== */
   main { width: min(1280px, calc(100vw - 32px)); margin: 0 auto; padding: 22px 0 48px; }
-  .shell { display: grid; grid-template-columns: minmax(0,1fr) 360px; gap: 18px; align-items: stretch; min-height: calc(100vh - 132px); }
+  .shell { display: grid; grid-template-columns: minmax(0,1fr) 360px; gap: 18px; align-items: stretch; height: calc(100vh - 132px); min-height: 520px; }
   .shell > div { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
   .chat-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  aside { display: flex; flex-direction: column; }
-  aside .panel { flex: 1; display: flex; flex-direction: column; }
+  aside { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  aside .panel { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 
   .panel {
     background: var(--paper); border: 1px solid var(--line);
@@ -278,7 +278,7 @@
      5. 对话区
      ===================================================================== */
   .chat-log {
-    flex: 1; min-height: 380px; max-height: none; overflow-y: auto;
+    flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
     padding: 8px 6px 8px 2px; display: flex; flex-direction: column; gap: 16px;
     scroll-behavior: smooth;
   }
@@ -387,6 +387,7 @@
      7. 侧栏：审批 / 事件
      ===================================================================== */
   aside .panel { position: relative; }
+  #approvalDock { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 4px; }
   .dock-empty { text-align: center; color: var(--muted); padding: 14px 6px; }
   .dock-empty svg { width: 86px; height: 70px; color: var(--clay); opacity: .82; margin-bottom: 6px; }
   .dock-empty .d { font-size: 12.5px; line-height: 1.5; }
@@ -481,6 +482,9 @@
     .token-field { order: 3; margin-left: 0; max-width: none; flex: 1 1 100%; }
     nav { order: 2; width: 100%; overflow-x: auto; }
     .shell, .status-strip { grid-template-columns: 1fr; }
+    .shell { height: auto; min-height: 0; }
+    .chat-log { min-height: 360px; max-height: 58vh; }
+    #approvalDock { max-height: 44vh; }
     .status-strip { grid-template-columns: 1fr 1fr; }
     .msg.user, .msg.agent { max-width: 100%; }
   }
@@ -784,6 +788,34 @@ function clearChatEmpty() {
   const e = document.getElementById('chatEmpty');
   if (e) e.remove();
 }
+const chatFollow = {enabled: true, programmatic: false, timer: 0};
+function chatNearBottom(log) {
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+}
+function followChatOutput() {
+  const log = document.getElementById('chatLog');
+  if (!chatFollow.enabled) return;
+  requestAnimationFrame(() => {
+    chatFollow.programmatic = true;
+    clearTimeout(chatFollow.timer);
+    log.scrollTo({top: log.scrollHeight, behavior: 'smooth'});
+    chatFollow.timer = setTimeout(() => {
+      if (chatFollow.enabled) {
+        const oldBehavior = log.style.scrollBehavior;
+        log.style.scrollBehavior = 'auto';
+        log.scrollTop = log.scrollHeight;
+        log.style.scrollBehavior = oldBehavior;
+      }
+      chatFollow.programmatic = false;
+    }, 450);
+  });
+}
+const chatLogEl = document.getElementById('chatLog');
+chatLogEl.addEventListener('scroll', () => {
+  if (!chatFollow.programmatic) chatFollow.enabled = chatNearBottom(chatLogEl);
+}, {passive: true});
+chatLogEl.addEventListener('wheel', () => { chatFollow.enabled = false; }, {passive: true});
+chatLogEl.addEventListener('touchmove', () => { chatFollow.enabled = false; }, {passive: true});
 function appendMsg(cls, who, text) {
   clearChatEmpty();
   const log = document.getElementById('chatLog');
@@ -796,7 +828,7 @@ function appendMsg(cls, who, text) {
   div.innerHTML = who ? `<div class="who">${sparkSvg}${esc(who)}</div><div class="body"></div>` : '<div class="body"></div>';
   div.querySelector('.body').textContent = text || '';
   log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+  followChatOutput();
   return div;
 }
 function summarize(value) {
@@ -818,6 +850,7 @@ function handleProgress(p) {
     updateMetrics();
     currentThinking += p.delta || '';
     if (currentThinkingDiv) currentThinkingDiv.querySelector('.body').textContent = currentThinking;
+    followChatOutput();
     setStatus('思考中');
   } else if (p.kind === 'tool_call_start') {
     state.metrics.tools += 1;
@@ -855,6 +888,7 @@ async function sendAsk() {
   setAgentWorking(true);
   document.getElementById('sendBtn').disabled = true;
   document.getElementById('traceView').textContent = '—';
+  chatFollow.enabled = true;
   appendMsg('user', 'operator', text);
   currentThinking = '';
   currentThinkingDiv = appendMsg('thinking', 'thinking_delta', '');
