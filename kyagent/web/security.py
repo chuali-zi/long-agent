@@ -114,6 +114,7 @@ class WebSecurity:
             path == "/api/tools"
             or path == "/api/ask"
             or path == "/api/ask/stream"
+            or path.startswith("/api/choices")
             or path == "/api/safety/check"
             or path.startswith("/api/sessions/")
         )

@@ -47,6 +47,7 @@ def test_health_is_minimal_and_docs_are_disabled(cfg):
 def test_default_local_dev_access_is_limited_to_non_sensitive_api(cfg):
     client = TestClient(build_app(cfg))
     assert client.get("/api/tools").status_code == 200
+    assert client.get("/api/choices").status_code == 200
     assert client.get("/api/audit/traces").status_code == 401
     assert client.get("/api/approvals").status_code == 401
 
