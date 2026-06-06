@@ -30,7 +30,7 @@ def _expand_env(value: Any) -> Any:
 
 class AnthropicConfig(BaseModel):
     model: str = "claude-opus-4-7"
-    max_tokens: int = 4096
+    max_tokens: int = 20480
     api_key_env: str = "ANTHROPIC_API_KEY"
 
 
@@ -43,7 +43,7 @@ class OpenAIConfig(BaseModel):
     LoongArch Old World 推荐 deepseek_httpx / qwen_httpx / openai_httpx 这类纯 httpx 路径。
     """
     model: str = "gpt-4o-mini"
-    max_tokens: int = 4096
+    max_tokens: int = 20480
     temperature: float = 0.2
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
@@ -58,7 +58,7 @@ class DeepSeekConfig(BaseModel):
     Key 获取：https://platform.deepseek.com
     """
     model: str = "deepseek-v4-flash"
-    max_tokens: int = 4096
+    max_tokens: int = 20480
     temperature: float = 0.2
     api_key_env: str = "DEEPSEEK_API_KEY"
     # 留空则使用预设 https://api.deepseek.com；仅在使用第三方反代时填
@@ -74,7 +74,7 @@ class QwenConfig(BaseModel):
     Key 获取：https://bailian.console.aliyun.com （国内）
     """
     model: str = "qwen-plus"
-    max_tokens: int = 4096
+    max_tokens: int = 20480
     temperature: float = 0.2
     api_key_env: str = "DASHSCOPE_API_KEY"
     # 留空则用国内端点；海外用户填 https://dashscope-intl.aliyuncs.com/compatible-mode/v1
@@ -93,7 +93,7 @@ class AgentConfig(BaseModel):
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
     qwen: QwenConfig = Field(default_factory=QwenConfig)
-    max_iterations: int = 8
+    max_iterations: int = 40
 
 
 class ExecutorConfig(BaseModel):

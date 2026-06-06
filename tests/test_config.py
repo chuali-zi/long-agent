@@ -14,6 +14,31 @@ def test_config_default_llm_backend_is_real_httpx_backend():
     assert cfg.agent.llm_backend == "deepseek_httpx"
 
 
+def test_config_default_tool_and_token_budgets_are_expanded():
+    cfg = Config()
+
+    assert cfg.agent.max_iterations == 40
+    assert cfg.agent.anthropic.max_tokens == 20480
+    assert cfg.agent.openai.max_tokens == 20480
+    assert cfg.agent.deepseek.max_tokens == 20480
+    assert cfg.agent.qwen.max_tokens == 20480
+
+
+def test_shipped_backend_configs_use_expanded_budgets():
+    provider_attr_by_config = {
+        "default.yaml": "anthropic",
+        "deepseek.yaml": "deepseek",
+        "openai.yaml": "openai",
+        "qwen.yaml": "qwen",
+    }
+
+    for filename, provider_attr in provider_attr_by_config.items():
+        cfg = load_config(ROOT / "configs" / filename)
+
+        assert cfg.agent.max_iterations == 40
+        assert getattr(cfg.agent, provider_attr).max_tokens == 20480
+
+
 def test_project_root_json_llm_backend_overrides_yaml_default(tmp_path, monkeypatch):
     monkeypatch.delenv("KYAGENT_LLM_BACKEND", raising=False)
     config_dir = tmp_path / "configs"

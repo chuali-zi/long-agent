@@ -10,9 +10,9 @@ agent:
   fallback_to_mock: false
   anthropic:
     model: claude-opus-4-7
-    max_tokens: 4096
+    max_tokens: 20480
     api_key_env: ANTHROPIC_API_KEY
-  max_iterations: 8
+  max_iterations: 40
 
 executor:
   # 受限运行账户。若不存在则降级为当前用户但限制 sudoers 白名单
