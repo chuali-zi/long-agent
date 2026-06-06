@@ -57,7 +57,7 @@ def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
     for command in (
         "bash scripts/kyagent.sh install",
         "sudo bash scripts/kyagent.sh permissions",
-        "sudo bash scripts/kyagent.sh prod-env",
+        "sudo bash /opt/kyagent/scripts/kyagent.sh prod-env",
         "bash scripts/kyagent.sh chat",
         "bash scripts/kyagent.sh tui",
         "bash scripts/kyagent.sh web --mock",
@@ -109,13 +109,24 @@ def test_production_web_commands_use_absolute_opt_prefix() -> None:
     assert "sudo -u kyagent bash scripts/kyagent.sh web --env-file /etc/kyagent/env" not in readme
 
 
+def test_production_key_setup_uses_absolute_opt_entrypoint() -> None:
+    readme = read_repo("README.md")
+    loongarch = read_repo("docs/deployment/loongarch.md")
+    permissions = read_repo("docs/deployment/permissions.md")
+
+    for doc in (readme, loongarch, permissions):
+        assert "sudo bash /opt/kyagent/scripts/kyagent.sh prod-env" in doc
+
+    assert "sudo bash scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key" not in readme
+
+
 def test_detailed_deployment_guides_exist() -> None:
     permissions = read_repo("docs/deployment/permissions.md")
     web = read_repo("docs/deployment/web.md")
 
     for phrase in (
         "sudo bash scripts/kyagent.sh permissions",
-        "sudo bash scripts/kyagent.sh prod-env",
+        "sudo bash /opt/kyagent/scripts/kyagent.sh prod-env",
         "最小权限",
         "/etc/sudoers.d/kyagent",
         "sudo >= 1.9.10",

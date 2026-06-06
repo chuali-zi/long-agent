@@ -1,8 +1,10 @@
 """systemd 服务管理工具。
 
 设计：
-  - svc_status / svc_list / svc_show：只读，risk=low
-  - svc_restart / svc_start / svc_stop / svc_reload：变更类，requires_root=True, risk=high
+  - svc_status / svc_list / svc_is_active / svc_is_enabled / svc_show / svc_cat
+    / svc_failed / svc_timers / boot_analyze / boot_logs：只读，risk=low
+  - svc_restart：变更类，requires_root=True, risk=high
+  - svc_reload：变更类，requires_root=True, risk=medium
   - 任何"mask/disable/enable"操作不直接暴露给 LLM，必须人工介入（防止误关 sshd）
 """
 from __future__ import annotations

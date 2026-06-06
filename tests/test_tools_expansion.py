@@ -648,8 +648,8 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_94_tools(self, registry):
-        assert len(registry.names()) == 94
+    def test_default_registry_has_99_tools(self, registry):
+        assert len(registry.names()) == 99
 
     def test_all_tools_have_description(self, registry):
         bad = [
@@ -707,6 +707,7 @@ class TestRegistry:
             "sec_kysec_status", "sec_sudoers_audit",  # security
             "compl_file_hash", "compl_aide_check",    # compliance
             "la_arch_info", "la_world_check", "la_binary_compat",  # loongarch
+            "log_vacuum", "process_kill", "pkg_install", "pkg_remove", "fs_truncate",  # write ops
         }
         missing = expected - set(registry.names())
         assert not missing, f"missing tools: {missing}"
@@ -805,3 +806,161 @@ class TestP1ParamEffect:
         t = logs_mod.JournalctlTool()
         argv = _argv(t, {})
         assert "-p" not in argv
+
+
+# ---- 12. write operation tools (new: +5) ------------------------------------
+
+from kyagent.mcp.tools import filesystem as filesystem_mod
+
+
+class TestWriteOperationTools:
+    # ---- LogVacuumTool ----
+
+    def test_log_vacuum_argv_max_size(self):
+        t = logs_mod.LogVacuumTool()
+        argv = _argv(t, {"max_size": "500M"})
+        assert argv == ["journalctl", "--vacuum-size=500M"]
+
+    def test_log_vacuum_argv_max_age(self):
+        t = logs_mod.LogVacuumTool()
+        argv = _argv(t, {"max_age": "2weeks"})
+        assert argv == ["journalctl", "--vacuum-time=2weeks"]
+
+    def test_log_vacuum_rejects_no_params(self):
+        t = logs_mod.LogVacuumTool()
+        with pytest.raises(ToolError):
+            t.validate({})
+
+    def test_log_vacuum_rejects_both_params(self):
+        t = logs_mod.LogVacuumTool()
+        with pytest.raises(ToolError):
+            t.validate({"max_size": "500M", "max_age": "2weeks"})
+
+    def test_log_vacuum_rejects_bad_size_pattern(self):
+        t = logs_mod.LogVacuumTool()
+        with pytest.raises(ToolError):
+            t.validate({"max_size": "500MB"})  # not matching ^[0-9]+[KMGT]$
+
+    def test_log_vacuum_read_only_is_false(self):
+        assert logs_mod.LogVacuumTool().read_only is False
+
+    def test_log_vacuum_requires_root(self):
+        assert logs_mod.LogVacuumTool().requires_root is True
+
+    # ---- ProcessKillTool ----
+
+    def test_process_kill_argv_default_signal(self):
+        t = process_mod.ProcessKillTool()
+        argv = _argv(t, {"pid": 1234})
+        assert argv == ["kill", "-TERM", "1234"]
+
+    def test_process_kill_argv_kill_signal(self):
+        t = process_mod.ProcessKillTool()
+        argv = _argv(t, {"pid": 999, "signal": "KILL"})
+        assert argv == ["kill", "-KILL", "999"]
+
+    def test_process_kill_argv_hup_signal(self):
+        t = process_mod.ProcessKillTool()
+        argv = _argv(t, {"pid": 500, "signal": "HUP"})
+        assert argv == ["kill", "-HUP", "500"]
+
+    def test_process_kill_rejects_pid_less_than_2(self):
+        t = process_mod.ProcessKillTool()
+        with pytest.raises(ToolError):
+            t.validate({"pid": 1})
+
+    def test_process_kill_rejects_pid_zero(self):
+        t = process_mod.ProcessKillTool()
+        with pytest.raises(ToolError):
+            t.validate({"pid": 0})
+
+    def test_process_kill_rejects_invalid_signal(self):
+        t = process_mod.ProcessKillTool()
+        with pytest.raises(ToolError):
+            t.validate({"pid": 100, "signal": "SIGKILL"})
+
+    def test_process_kill_read_only_is_false(self):
+        assert process_mod.ProcessKillTool().read_only is False
+
+    def test_process_kill_requires_root(self):
+        assert process_mod.ProcessKillTool().requires_root is True
+
+    # ---- PkgInstallTool ----
+
+    def test_pkg_install_argv(self, rpm_family):
+        t = package_mod.PkgInstallTool()
+        argv = _argv(t, {"name": "htop"})
+        assert argv == ["dnf", "-y", "install", "htop"]
+
+    def test_pkg_install_rejects_illegal_name(self):
+        t = package_mod.PkgInstallTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "htop; rm -rf /"})
+
+    def test_pkg_install_rejects_too_long_name(self):
+        t = package_mod.PkgInstallTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "a" * 101})
+
+    def test_pkg_install_read_only_is_false(self):
+        assert package_mod.PkgInstallTool().read_only is False
+
+    def test_pkg_install_requires_root(self):
+        assert package_mod.PkgInstallTool().requires_root is True
+
+    # ---- PkgRemoveTool ----
+
+    def test_pkg_remove_argv(self, rpm_family):
+        t = package_mod.PkgRemoveTool()
+        argv = _argv(t, {"name": "telnet"})
+        assert argv == ["dnf", "-y", "remove", "telnet"]
+
+    def test_pkg_remove_rejects_illegal_name(self):
+        t = package_mod.PkgRemoveTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "telnet|evil"})
+
+    def test_pkg_remove_rejects_critical_package_names(self):
+        t = package_mod.PkgRemoveTool()
+        for name in ("kernel", "systemd", "glibc", "openssh-server", "sudo"):
+            with pytest.raises(ToolError):
+                t.validate({"name": name})
+
+    def test_pkg_remove_read_only_is_false(self):
+        assert package_mod.PkgRemoveTool().read_only is False
+
+    def test_pkg_remove_requires_root(self):
+        assert package_mod.PkgRemoveTool().requires_root is True
+
+    # ---- FsTruncateTool ----
+
+    def test_fs_truncate_argv(self):
+        t = filesystem_mod.FsTruncateTool()
+        argv = _argv(t, {"path": "/var/log/messages"})
+        assert argv == ["kyagent-log-clean", "/var/log/messages"]
+
+    def test_fs_truncate_argv_tmp(self):
+        t = filesystem_mod.FsTruncateTool()
+        argv = _argv(t, {"path": "/tmp/myapp.log"})
+        assert argv == ["kyagent-log-clean", "/tmp/myapp.log"]
+
+    def test_fs_truncate_rejects_out_of_bounds_path(self):
+        t = filesystem_mod.FsTruncateTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/etc/passwd"})
+
+    def test_fs_truncate_rejects_home_path(self):
+        t = filesystem_mod.FsTruncateTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/home/user/app.log"})
+
+    def test_fs_truncate_rejects_metachar_path(self):
+        t = filesystem_mod.FsTruncateTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/var/log/app;rm"})
+
+    def test_fs_truncate_read_only_is_false(self):
+        assert filesystem_mod.FsTruncateTool().read_only is False
+
+    def test_fs_truncate_requires_root(self):
+        assert filesystem_mod.FsTruncateTool().requires_root is True

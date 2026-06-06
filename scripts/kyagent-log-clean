@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""kyagent-log-clean —— 受 sudoers 授权的最小化日志清空助手。
+
+为什么存在（替代旧方案）：
+    旧方案把裸 ``truncate -s 0 -- <path>`` 连同路径正则
+    ``/var/log/[A-Za-z0-9._/@-]+`` 直接交给 sudoers。该字符类同时含 ``.`` 和
+    ``/``，因此 ``..`` 可匹配，``sudo truncate -s 0 -- /tmp/../../etc/shadow``
+    能以 root 清空任意文件（P1 review）。但"在 sudoers 里直接禁掉 ``..``"既懒惰
+    又不彻底——``truncate`` 跟随符号链接，攻击者在世界可写目录（如 /tmp）放一个
+    指向 /etc/shadow 的软链同样能越界。
+
+本包装器把"是否越界"从正则前缀匹配升级为 OS 层语义校验：允许调用方写 ``..``，
+但按解析后的真实路径判断：
+    1) 先用 realpath 规范化做一次友好预检（解析 ``..`` 与符号链接），
+       明显越界的输入在 open 之前就拒绝；
+    2) 以 ``O_NOFOLLOW`` 打开调用方原始路径——末端组件若是符号链接直接失败，
+       挡住 realpath 预检与 open 之间把目标调包成软链的 TOCTOU；
+    3) 用已打开 fd 的真实路径（/proc/self/fd）做权威越界判定——这一步在
+       inode 已锁定后进行，连中间组件是符号链接的越界也一并封死；
+    4) 必须是普通文件，再 ``ftruncate`` 到 0。
+只做"清空"（保留 inode 与已打开句柄），绝不删除。
+
+注意：第 2 步打开的是调用方**原始**路径（而非 realpath 结果），否则
+O_NOFOLLOW 永远只看到已被解析掉的真实文件、形同虚设。
+"""
+from __future__ import annotations
+
+import os
+import stat
+import sys
+
+# 与 kyagent.mcp.tools.filesystem._TRUNCATE_ALLOWED_PREFIXES 保持一致。
+ALLOWED_ROOTS = ("/var/log", "/var/cache", "/var/tmp", "/tmp")
+
+
+def die(msg: str, code: int = 2) -> None:
+    sys.stderr.write(f"kyagent-log-clean: {msg}\n")
+    raise SystemExit(code)
+
+
+def _within_allowed(path: str) -> bool:
+    # root + os.sep 排除了根目录本身，只接受其严格子路径。
+    return any(path.startswith(root + os.sep) for root in ALLOWED_ROOTS)
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) != 2:
+        die("用法: kyagent-log-clean <绝对路径>")
+    raw = argv[1]
+    if not raw.startswith("/"):
+        die(f"必须是绝对路径: {raw!r}")
+    if "\0" in raw:
+        die("路径含 NUL 字节")
+
+    # 预检：realpath 解析 .. 与符号链接，明显越界的输入在 open 之前友好拒绝。
+    pre = os.path.realpath(raw)
+    if not _within_allowed(pre):
+        die(f"解析后路径越界，仅允许 {', '.join(ALLOWED_ROOTS)} 下: {pre}")
+
+    # 打开调用方**原始**路径并加 O_NOFOLLOW：末端是符号链接（含 TOCTOU 调包）即失败。
+    try:
+        fd = os.open(raw, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        die(f"打开失败（末端是符号链接、目录或不存在）: {exc}")
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            die("目标不是普通文件，拒绝清空")
+        # 权威越界判定：用已锁定 fd 的真实路径，连中间组件符号链接的越界也封死。
+        try:
+            resolved = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            resolved = os.path.realpath(raw)
+        if not _within_allowed(resolved):
+            die(f"打开后真实路径越界，仅允许 {', '.join(ALLOWED_ROOTS)} 下: {resolved}")
+        os.ftruncate(fd, 0)
+    finally:
+        os.close(fd)
+
+    sys.stdout.write(f"truncated: {resolved}\n")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

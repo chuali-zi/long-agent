@@ -108,7 +108,7 @@ key 只从环境变量读取，不从 YAML 或项目文件读取。
 只想重写生产启动配置时，用这个短命令，不用重新安装依赖：
 
 ```bash
-sudo bash scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
+sudo bash /opt/kyagent/scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
 ```
 
 离线演示使用 mock：
@@ -228,7 +228,7 @@ python -m pip install -r requirements-loongarch-web.txt
 python -m pip install --no-deps -e '.[web]'
 
 sudo bash scripts/setup-sudoers.sh
-sudo bash scripts/kyagent.sh prod-env
+sudo bash /opt/kyagent/scripts/kyagent.sh prod-env
 ```
 
 然后用 `sudo -u kyagent` 启动。

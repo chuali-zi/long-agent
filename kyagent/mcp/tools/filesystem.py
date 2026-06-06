@@ -106,8 +106,54 @@ class FindTool(Tool):
         return argv
 
 
+_TRUNCATE_ALLOWED_PREFIXES = (
+    "/var/log/",
+    "/var/cache/",
+    "/var/tmp/",
+    "/tmp/",
+)
+
+
+class FsTruncateTool(Tool):
+    name = "fs_truncate"
+    description = (
+        "将日志/缓存文件就地清空（truncate -s 0，保留 inode 与文件句柄，安全回收空间）。"
+        "仅限 /var/log、/var/cache、/var/tmp、/tmp 下；高风险需确认。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+            "path": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "目标文件绝对路径，仅允许 /var/log、/var/cache、/var/tmp、/tmp 下",
+            }
+        },
+    }
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        p = _safe_path(cleaned["path"])
+        if not any(p.startswith(prefix) for prefix in _TRUNCATE_ALLOWED_PREFIXES):
+            raise ToolError(
+                "fs_truncate 仅允许清空 /var/log、/var/cache、/var/tmp、/tmp 下的文件"
+            )
+        cleaned["path"] = p
+        return cleaned
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        # 不再裸调 truncate；走 sudoers 授权的包装器，由它在 OS 层做
+        # realpath 规范化 + 白名单根目录 + O_NOFOLLOW 校验（防 .. 越界与符号链接）。
+        return ["kyagent-log-clean", args["path"]]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(DfTool())
     registry.register(DuTool())
     registry.register(LsTool())
     registry.register(FindTool())
+    registry.register(FsTruncateTool())

@@ -1,6 +1,6 @@
 """软件包查询工具：麒麟以 dnf/yum 为主，兼容 apt/dpkg/rpm。
 
-注意：本工具只暴露查询接口，安装/卸载属于高风险，单独走 Guardrail confirm。
+注意：安装/卸载属于变更类操作，必须走 Guardrail confirm；关键系统包卸载在工具层直接拒绝。
 """
 from __future__ import annotations
 
@@ -10,6 +10,23 @@ from typing import Any
 from kyagent.mcp.tools.base import Tool, ToolError, ToolRegistry, ToolResult
 from kyagent.mcp.tools.pkg_family import PkgFamily, PkgFamilyMixin
 from kyagent.safety.patterns import RiskLevel
+
+
+_CRITICAL_REMOVE_PACKAGES = {
+    "kernel",
+    "kernel-core",
+    "systemd",
+    "glibc",
+    "openssh-server",
+    "openssh-clients",
+    "sudo",
+    "polkit",
+    "dbus",
+    "network-manager",
+    "NetworkManager",
+    "firewalld",
+    "selinux-policy",
+}
 
 
 def _detect_pm() -> str:
@@ -249,6 +266,61 @@ class PkgHistoryTool(PkgFamilyMixin, Tool):
         return result
 
 
+class PkgInstallTool(Tool):
+    name = "pkg_install"
+    description = "安装软件包（dnf/yum -y install），变更类需确认。"
+    input_schema = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "pattern": r"^[A-Za-z0-9._+-]+$",
+                "maxLength": 100,
+                "description": "软件包名",
+            }
+        },
+    }
+    risk_level = RiskLevel.MEDIUM
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "-y", "install", args["name"]]
+
+
+class PkgRemoveTool(Tool):
+    name = "pkg_remove"
+    description = (
+        "卸载软件包（dnf/yum -y remove），高风险需确认。"
+        "卸载内核/systemd 等关键包会被工具层和安全护栏拦截。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "pattern": r"^[A-Za-z0-9._+-]+$",
+                "maxLength": 100,
+                "description": "软件包名",
+            }
+        },
+    }
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        if cleaned["name"] in _CRITICAL_REMOVE_PACKAGES:
+            raise ToolError(f"禁止卸载关键系统包: {cleaned['name']}")
+        return cleaned
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "-y", "remove", args["name"]]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(PkgInfoTool())
     registry.register(PkgInstalledTool())
@@ -258,3 +330,5 @@ def register(registry: ToolRegistry) -> None:
     registry.register(PkgOwnsFileTool())
     registry.register(PkgRepoListTool())
     registry.register(PkgHistoryTool())
+    registry.register(PkgInstallTool())
+    registry.register(PkgRemoveTool())

@@ -91,13 +91,13 @@ sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.
 
 ```bash
 cd /opt/kyagent
-sudo bash scripts/kyagent.sh prod-env
+sudo bash /opt/kyagent/scripts/kyagent.sh prod-env
 ```
 
 如果 key 放在临时文件里：
 
 ```bash
-sudo bash scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
+sudo bash /opt/kyagent/scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
 ```
 
 这条命令只负责生产启动配置、审计 HMAC key 和审计目录。它不会改 tool 白名单，也不会安装 Python 依赖。
@@ -130,6 +130,110 @@ sudo env KYAGENT_SERVICE_ALLOWLIST=nginx.service,sshd.service \
 ```
 
 脚本只接受普通 service unit，并拒绝核心系统服务、`.target`、`.socket` 和 shell 元字符。生成的 sudoers 是固定命令列表，不是通配所有服务。
+
+## 写操作授权（opt-in）
+
+默认部署只授予只读查询权限，不包含任何写操作。如果运维场景确实需要日志清理、包管理或进程终止能力，必须在重跑 `setup-sudoers.sh` 时**显式设置对应环境变量**，实现"最小权限、显式授权"的安全设计。
+
+### 日志清理（KYAGENT_ENABLE_LOG_CLEAN=1）
+
+```bash
+sudo env KYAGENT_ENABLE_LOG_CLEAN=1 bash scripts/kyagent.sh permissions
+```
+
+放行命令范围：
+
+- `journalctl --vacuum-size=<数字>[KMGT]`
+- `journalctl --vacuum-time=<数字>(s|min|h|days|weeks|months|years)`
+- `kyagent-log-clean <绝对路径>`（清空 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp` 下的普通文件）
+
+文件清空不再把裸 `truncate -s 0` 连同路径正则交给 sudoers——旧字符类
+`/var/log/[A-Za-z0-9._/@-]+` 同时含 `.` 和 `/`，`..` 可匹配，配合 `truncate`
+跟随符号链接可越界写任意文件（P1）。现改由 sudoers 只授权
+`/usr/local/bin/kyagent-log-clean`（开关打开时随脚本以 root:root 0755 安装）+ 单个
+绝对路径参数；该包装器在 OS 层做语义校验，而非"懒惰地禁掉 `..`"：
+
+1. realpath 预检，明显越界的输入在打开前拒绝；
+2. 以 `O_NOFOLLOW` 打开调用方原始路径，末端符号链接（含 TOCTOU 调包）即失败；
+3. 用已打开 fd 的真实路径（`/proc/self/fd`）做权威越界判定，连中间组件是
+   符号链接的越界也封死；
+4. 必须是普通文件，再 `ftruncate` 到 0（只清空、不删除）。
+
+sudoers 的参数正则 `^/[A-Za-z0-9._/@-]+$` 仅作粗粒度闸门（绝对路径、安全字符集、
+无空白与 shell 元字符），**刻意允许 `..` 语法**，越界与否一律由包装器按解析后的真实
+路径判定。工具层 `fs_truncate` 仍做 `posixpath.normpath` 归一化作为纵深防御。
+
+### 包管理（KYAGENT_ENABLE_PKG_MGMT=1）
+
+```bash
+sudo env KYAGENT_ENABLE_PKG_MGMT=1 bash scripts/kyagent.sh permissions
+```
+
+放行命令范围：
+
+- `dnf -y install <包名>`
+- `yum -y install <包名>`
+
+包名仅允许 `[A-Za-z0-9._+-]+`，禁止空格、管道、引号等元字符，防止参数注入。
+
+卸载软件包不使用通配授权；如确需卸载，必须额外配置固定 allowlist：
+
+```bash
+sudo env KYAGENT_PKG_REMOVE_ALLOWLIST=telnet,ftp \
+  bash scripts/kyagent.sh permissions
+```
+
+脚本会把每个包渲染成固定 sudoers 命令，例如 `dnf -y remove telnet`，并拒绝把 `kernel`、`systemd`、`glibc`、`openssh-server`、`sudo` 等关键系统包加入卸载 allowlist。
+
+### 进程终止（KYAGENT_ENABLE_PROC_KILL=1）
+
+```bash
+sudo env KYAGENT_ENABLE_PROC_KILL=1 bash scripts/kyagent.sh permissions
+```
+
+放行命令范围：
+
+- `kill -(TERM|KILL|HUP|INT) <PID>`
+
+信号仅限 TERM/KILL/HUP/INT，PID 仅允许 `>=2` 的纯数字，禁止 `0`、`1`、负数（进程组 kill）和 shell 展开。
+
+### 同时开启多个
+
+```bash
+sudo env KYAGENT_ENABLE_LOG_CLEAN=1 KYAGENT_ENABLE_PKG_MGMT=1 \
+  bash scripts/kyagent.sh permissions
+```
+
+未设置或设为非 `1` 的开关对应的 Cmnd_Alias 不会写入 sudoers，**默认部署不受影响**。
+
+## 一键生产预设（permissions-prod）
+
+手工拼装上面这些环境变量容易出错。`scripts/setup-sudoers-prod.sh`（入口 `kyagent.sh permissions-prod`）是 `setup-sudoers.sh` 的薄封装，把"真实工程上最常见的一组写操作"一次性配好：
+
+```bash
+cd /opt/kyagent
+sudo bash scripts/kyagent.sh permissions-prod          # 打印授权摘要，交互确认后写入
+sudo bash scripts/kyagent.sh permissions-prod --yes    # 跳过确认，非交互一键写入
+```
+
+它在默认只读基线之上，额外默认开启（全部是固定命令 + 锚定参数正则，不是通配放行）：
+
+- **日志清理**（`KYAGENT_ENABLE_LOG_CLEAN=1`）：`journalctl --vacuum-size/--vacuum-time`、`kyagent-log-clean <绝对路径>`（OS 层 realpath+O_NOFOLLOW 校验，限 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp`，防 `..` 越界与符号链接）
+- **包管理**（`KYAGENT_ENABLE_PKG_MGMT=1`）：`dnf/yum -y install <pkg>`；卸载仅在设置 `KYAGENT_PKG_REMOVE_ALLOWLIST` 时按固定包名授权
+- **进程终止**（`KYAGENT_ENABLE_PROC_KILL=1`）：`kill -(TERM|KILL|HUP|INT) <pid>=2+`
+- **重启常见服务**（`KYAGENT_SERVICE_ALLOWLIST` 默认值）：`systemctl restart/reload` 对 nginx、httpd、sshd、firewalld、chronyd、crond、rsyslog、mariadb、mysqld、postgresql、redis、docker、php-fpm（仅 restart/reload，不含 stop/disable/mask）
+
+危险动作仍被层层拦截：删 `kernel/systemd/glibc/openssh-server` 等关键包、清空 `/etc`、`kill pid<2` 会在工具层 + 安全护栏被拒；最终 sudoers 还要过 `visudo` 校验、失败自动回滚。生产预设默认不授权通配卸载包。
+
+按需裁剪——任意开关设为 `0` 关闭，`KYAGENT_SERVICE_ALLOWLIST` 覆盖服务清单：
+
+```bash
+sudo env KYAGENT_ENABLE_PROC_KILL=0 \
+         KYAGENT_SERVICE_ALLOWLIST=nginx.service,sshd.service \
+  bash scripts/kyagent.sh permissions-prod --yes
+```
+
+脚本会先打印将要授权的完整范围；非交互环境（无 tty）必须显式加 `--yes`，否则拒绝执行，避免无人值守时误授权。
 
 ## 自定义运行账户
 

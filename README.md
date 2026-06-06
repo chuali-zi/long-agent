@@ -21,6 +21,8 @@ sudo bash scripts/install-loongarch.sh --yes --with-web
 
 安装器会创建受限运行用户 `kyagent`、虚拟环境 `/opt/kyagent/.venv`、sudoers 最小权限白名单 `/etc/sudoers.d/kyagent`、审计目录 `/var/lib/kyagent` 和 `/var/log/kyagent`，并写入生产环境文件 `/etc/kyagent/env`。
 
+默认 sudoers 只放行只读查询。需要"清理日志、装包、显式白名单卸包、终止进程、重启常见服务"等写能力时，用一键生产预设 `sudo bash scripts/kyagent.sh permissions-prod --yes` 一次配好（危险动作仍被层层拦截）；授权范围与裁剪见 [最小权限配置](docs/deployment/permissions.md)。
+
 ## 配置 API Key
 
 推荐把 DeepSeek key 放进 root 可读的临时密钥文件，再让脚本写入 `/etc/kyagent/env`：
@@ -28,7 +30,7 @@ sudo bash scripts/install-loongarch.sh --yes --with-web
 ```bash
 sudo sh -c 'printf "%s\n" "sk-your-deepseek-key" > /root/deepseek.key'
 sudo chmod 600 /root/deepseek.key
-sudo bash scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
+sudo bash /opt/kyagent/scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
 ```
 
 也可以手工编辑：

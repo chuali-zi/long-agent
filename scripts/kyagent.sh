@@ -13,6 +13,8 @@ Usage: bash scripts/kyagent.sh <command> [options]
 Commands:
   install       Install the local development environment.
   permissions   Create the restricted runtime account, sudoers policy, and audit dirs.
+  permissions-prod  Same as permissions, but pre-enables a production-realistic
+                    write-operation allowlist (log clean, pkg mgmt, proc kill, common services).
   prod-env      Write the minimal production runtime env file.
   chat          Start the interactive chat shell.
   tui           Start the streaming terminal UI.
@@ -24,6 +26,7 @@ Commands:
 Common examples:
   bash scripts/kyagent.sh install
   sudo bash scripts/kyagent.sh permissions
+  sudo bash scripts/kyagent.sh permissions-prod --yes
   sudo bash scripts/kyagent.sh prod-env
   bash scripts/kyagent.sh chat
   bash scripts/kyagent.sh tui
@@ -90,6 +93,11 @@ case "$COMMAND" in
   permissions)
     require_script_readable "$SCRIPT_DIR/setup-sudoers.sh"
     exec bash "$SCRIPT_DIR/setup-sudoers.sh" "$@"
+    ;;
+  permissions-prod)
+    require_script_readable "$SCRIPT_DIR/setup-sudoers-prod.sh"
+    require_script_readable "$SCRIPT_DIR/setup-sudoers.sh"
+    exec bash "$SCRIPT_DIR/setup-sudoers-prod.sh" "$@"
     ;;
   prod-env)
     require_script_readable "$SCRIPT_DIR/write-prod-env.sh"

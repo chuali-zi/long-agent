@@ -209,6 +209,38 @@ class TopCpuSnapshotTool(Tool):
         return out
 
 
+class ProcessKillTool(Tool):
+    name = "process_kill"
+    description = (
+        "向指定进程发送终止信号（kill -TERM/-KILL/-HUP/-INT <pid>）。"
+        "高风险，需确认；禁止 pid<2（保护 init/内核）。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["pid"],
+        "properties": {
+            "pid": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "目标进程 PID（≥2，禁止 kill init/内核线程）",
+            },
+            "signal": {
+                "type": "string",
+                "enum": ["TERM", "KILL", "HUP", "INT"],
+                "description": "信号名称，默认 TERM",
+            },
+        },
+    }
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        pid = args["pid"]
+        signal = args.get("signal", "TERM")
+        return ["kill", f"-{signal}", str(pid)]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(PsListTool())
     registry.register(LsofPortTool())
@@ -218,3 +250,4 @@ def register(registry: ToolRegistry) -> None:
     registry.register(ProcessFdCountTool())
     registry.register(ProcessResourceTool())
     registry.register(TopCpuSnapshotTool())
+    registry.register(ProcessKillTool())

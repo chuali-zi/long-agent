@@ -275,8 +275,8 @@ rules:
   # ---- 包管理：移除关键包 ---------------------------------------------
   - id: pkg-remove-critical
     risk: critical
-    description: 卸载内核 / sshd / systemd / glibc 等关键包
-    pattern: '\b(dnf|yum|rpm|apt|apt-get)\b\s+(remove|erase|purge|-e)\b[^|;]*\b(kernel|kernel-core|systemd|glibc|openssh-server|openssh-clients|sudo|polkit|dbus|network-manager|NetworkManager|firewalld|selinux-policy)\b'
+    description: 卸载内核 / sshd / systemd / glibc 等关键包（容忍 -y/-q 等夹在子命令前的 flag）
+    pattern: '\b(dnf|yum|rpm|apt|apt-get)\b[^|;]*?(\bremove\b|\berase\b|\bpurge\b|\s-e\b)[^|;]*\b(kernel|kernel-core|systemd|glibc|openssh-server|openssh-clients|sudo|polkit|dbus|network-manager|NetworkManager|firewalld|selinux-policy)\b'
 
   # ---- 关键 sink：无论何种 binary，写入这些路径都至少 critical ------
   # 这是一条"目标地板"规则：覆盖任何未列出的等价改写姿势（cat > / python -c 直写等）

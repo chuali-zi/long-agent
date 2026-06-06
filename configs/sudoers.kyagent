@@ -11,6 +11,9 @@
 #   2) 固定参数命令逐条列出，不使用跨空白匹配的 glob
 #   3) 动态参数命令使用 sudo >= 1.9.10 的锚定参数正则，限制为单个安全参数
 #   4) 不允许 sh / bash / python / perl / awk / sed / find -exec 等"shell-equivalent"
+#   5) 涉及文件路径的销毁性命令不在 sudoers 做路径前缀匹配（正则字符类含 . 和 /
+#      时 .. 可越界，且无法防符号链接）；改授权 OS 层包装器（如
+#      /usr/local/bin/kyagent-log-clean），由其 realpath + O_NOFOLLOW + /proc 校验
 #
 # 用户 kyagent 必须存在。建议：
 #   sudo useradd -r -s /usr/sbin/nologin kyagent

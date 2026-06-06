@@ -8,6 +8,8 @@ USER_NAME=${KYAGENT_USER:-kyagent}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUDOERS_SRC="$SCRIPT_DIR/../configs/sudoers.kyagent"
 SUDOERS_DST="/etc/sudoers.d/kyagent"
+LOG_CLEAN_WRAPPER_SRC="$SCRIPT_DIR/kyagent-log-clean"
+LOG_CLEAN_WRAPPER_DST="/usr/local/bin/kyagent-log-clean"
 BACKUP=""
 TMP_SUDOERS=""
 
@@ -64,6 +66,90 @@ render_service_allowlist() {
   printf '\n%s  ALL=(root)  NOPASSWD: KY_SVC_MUTATE\n' "$user_name"
 }
 
+render_log_clean() {
+  local user_name="$1"
+  [[ "${KYAGENT_ENABLE_LOG_CLEAN:-}" != "1" ]] && return 0
+  printf '\n# Explicit log-clean mutations generated when KYAGENT_ENABLE_LOG_CLEAN=1.\n'
+  printf '# truncate 不再裸授权 + 路径正则：旧字符类同时含 . 和 /，.. 可越界，\n'
+  printf '# 且 truncate 跟随符号链接。改由 /usr/local/bin/kyagent-log-clean 在 OS 层\n'
+  printf '# 做 realpath 规范化 + 白名单根目录校验 + O_NOFOLLOW，sudoers 只放行包装器\n'
+  printf '# 与单个绝对路径参数（允许 .. 语法，由包装器按解析后语义判定越界）。\n'
+  printf 'Cmnd_Alias KY_LOG_CLEAN = \\\n'
+  printf '    /usr/bin/journalctl ^--vacuum-size=[0-9]+[KMGT]$, \\\n'
+  printf '    /usr/bin/journalctl ^--vacuum-time=[0-9]+(s|min|h|days|weeks|months|years)$, \\\n'
+  printf '    /usr/local/bin/kyagent-log-clean ^/[A-Za-z0-9._/@-]+$\n'
+  printf '%s  ALL=(root)  NOPASSWD: KY_LOG_CLEAN\n' "$user_name"
+}
+
+render_pkg_mgmt() {
+  local user_name="$1"
+  [[ "${KYAGENT_ENABLE_PKG_MGMT:-}" != "1" ]] && return 0
+  printf '\n# Explicit package-management mutations generated when KYAGENT_ENABLE_PKG_MGMT=1.\n'
+  printf 'Cmnd_Alias KY_PKG_MUTATE = \\\n'
+  printf '    /usr/bin/dnf ^-y install [A-Za-z0-9._+-]+$, \\\n'
+  printf '    /usr/bin/yum ^-y install [A-Za-z0-9._+-]+$\n'
+  printf '%s  ALL=(root)  NOPASSWD: KY_PKG_MUTATE\n' "$user_name"
+}
+
+is_critical_package() {
+  case "$1" in
+    kernel|kernel-core|systemd|glibc|openssh-server|openssh-clients|sudo|polkit|dbus|network-manager|NetworkManager|firewalld|selinux-policy)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+render_pkg_remove_allowlist() {
+  local user_name="$1"
+  local allowlist="${KYAGENT_PKG_REMOVE_ALLOWLIST:-}"
+  local -a packages commands
+  local pkg separator
+
+  [[ -z "$allowlist" ]] && return 0
+  IFS=',' read -r -a packages <<<"$allowlist"
+  for pkg in "${packages[@]}"; do
+    pkg="${pkg#"${pkg%%[![:space:]]*}"}"
+    pkg="${pkg%"${pkg##*[![:space:]]}"}"
+    if [[ ! "$pkg" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+      die "非法包卸载 allowlist 包名：$pkg"
+    fi
+    if is_critical_package "$pkg"; then
+      die "禁止把关键包加入卸载 allowlist：$pkg"
+    fi
+    commands+=("/usr/bin/dnf -y remove $pkg")
+    commands+=("/usr/bin/yum -y remove $pkg")
+  done
+
+  printf '\n# Explicit package-remove mutations generated from KYAGENT_PKG_REMOVE_ALLOWLIST.\n'
+  printf 'Cmnd_Alias KY_PKG_REMOVE = '
+  separator=""
+  for command in "${commands[@]}"; do
+    printf '%s%s' "$separator" "$command"
+    separator=", "
+  done
+  printf '\n%s  ALL=(root)  NOPASSWD: KY_PKG_REMOVE\n' "$user_name"
+}
+
+install_log_clean_wrapper() {
+  # 仅在日志清理开关打开时安装受 sudoers 授权的包装器。
+  [[ "${KYAGENT_ENABLE_LOG_CLEAN:-}" != "1" ]] && return 0
+  [[ -f "$LOG_CLEAN_WRAPPER_SRC" ]] || die "找不到 log-clean 包装器源：$LOG_CLEAN_WRAPPER_SRC"
+  command -v python3 >/dev/null 2>&1 || die "log-clean 包装器需要 python3，请先安装"
+  # root:root 拥有、0755：agent 账户不可改写包装器本身。
+  install -m 0755 -o root -g root "$LOG_CLEAN_WRAPPER_SRC" "$LOG_CLEAN_WRAPPER_DST"
+  echo "[+] 已安装 log-clean 包装器：$LOG_CLEAN_WRAPPER_DST"
+}
+
+render_proc_kill() {
+  local user_name="$1"
+  [[ "${KYAGENT_ENABLE_PROC_KILL:-}" != "1" ]] && return 0
+  printf '\n# Explicit process-kill mutations generated when KYAGENT_ENABLE_PROC_KILL=1.\n'
+  printf 'Cmnd_Alias KY_PROC_KILL = \\\n'
+  printf '    /usr/bin/kill ^-(TERM|KILL|HUP|INT) [2-9][0-9]*$\n'
+  printf '%s  ALL=(root)  NOPASSWD: KY_PROC_KILL\n' "$user_name"
+}
+
 main() {
   if [[ $EUID -ne 0 ]]; then
     die "此脚本需要 root；请执行 sudo bash scripts/kyagent.sh permissions"
@@ -115,6 +201,10 @@ main() {
       "$SUDOERS_SRC" >"$TMP_SUDOERS"
   fi
   render_service_allowlist "$USER_NAME" "${KYAGENT_SERVICE_ALLOWLIST:-}" >>"$TMP_SUDOERS"
+  render_log_clean "$USER_NAME" >>"$TMP_SUDOERS"
+  render_pkg_mgmt "$USER_NAME" >>"$TMP_SUDOERS"
+  render_pkg_remove_allowlist "$USER_NAME" >>"$TMP_SUDOERS"
+  render_proc_kill "$USER_NAME" >>"$TMP_SUDOERS"
   chmod 0440 "$TMP_SUDOERS"
 
   if ! visudo -cf "$TMP_SUDOERS"; then
@@ -138,6 +228,8 @@ main() {
     exit 2
   fi
   [[ -n "$BACKUP" ]] && rm -f "$BACKUP"
+
+  install_log_clean_wrapper
 
   mkdir -p /var/log/sudo-io
   chmod 0700 /var/log/sudo-io

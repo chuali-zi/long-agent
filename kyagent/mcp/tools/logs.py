@@ -324,6 +324,48 @@ class LogRotatedCountTool(Tool):
         return res
 
 
+class LogVacuumTool(Tool):
+    name = "log_vacuum"
+    description = (
+        "回收 systemd journal 磁盘占用（journalctl --vacuum-size / --vacuum-time）。"
+        "变更类操作，需安全护栏确认。"
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "max_size": {
+                "type": "string",
+                "pattern": r"^[0-9]+[KMGT]$",
+                "description": "保留大小上限，如 '500M'",
+            },
+            "max_age": {
+                "type": "string",
+                "pattern": r"^[0-9]+(s|min|h|days|weeks|months|years)$",
+                "description": "保留时长上限，如 '2weeks'",
+            },
+        },
+    }
+    risk_level = RiskLevel.MEDIUM
+    requires_root = True
+    read_only = False
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        from kyagent.mcp.tools.base import ToolError
+        cleaned = super().validate(args)
+        has_size = "max_size" in cleaned
+        has_age = "max_age" in cleaned
+        if not has_size and not has_age:
+            raise ToolError("log_vacuum 需指定 max_size 或 max_age 之一")
+        if has_size and has_age:
+            raise ToolError("log_vacuum 需指定 max_size 或 max_age 之一")
+        return cleaned
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        if "max_size" in args:
+            return ["journalctl", f"--vacuum-size={args['max_size']}"]
+        return ["journalctl", f"--vacuum-time={args['max_age']}"]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(JournalctlTool())
     registry.register(DmesgTool())
@@ -334,3 +376,4 @@ def register(registry: ToolRegistry) -> None:
     registry.register(LogAuthFailedTool())
     registry.register(LogAuditSummaryTool())
     registry.register(LogRotatedCountTool())
+    registry.register(LogVacuumTool())

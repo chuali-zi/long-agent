@@ -470,9 +470,7 @@ Cmnd_Alias KY_SVC_QUERY = \
 
 Cmnd_Alias KY_SVC_MUTATE = \
     /usr/bin/systemctl restart *, \
-    /usr/bin/systemctl reload *, \
-    /usr/bin/systemctl start *, \
-    /usr/bin/systemctl stop *
+    /usr/bin/systemctl reload *
 
 kyagent  ALL=(root)  NOPASSWD: KY_READONLY, KY_SVC_QUERY, KY_PKG_QUERY, KY_FILE_META
 kyagent  ALL=(root)  NOPASSWD: KY_SVC_MUTATE

@@ -88,3 +88,18 @@
 - 2026-05-30 工具集大扩展 +73 → 92 个工具。新增 TrendTool / PkgFamilyMixin 基础设施。覆盖赛题 4 大场景：僵尸进程 / 磁盘 I/O / 配置漂移 / 大日志。KySec 工具命中麒麟加分项。LoongArch 专属域 3 工具。`tests/test_tools_expansion.py` 123 用例静态校验 build_argv + schema 拒绝路径，全量测试 394 passed / 2 skipped。
 - FastAPI Web 控制台补齐 TUI 同级动态展示：用户消息、浅色 thinking 增量、红色工具调用、加粗 final、状态栏和人工审核卡片；新增 `ApprovalBroker`、approve/reject API 与 `approval_required / approval_resolved` SSE。
 - 新增 `scripts/start-web.sh` 一键启动浏览器控制台；LoongArch 安装器增加可选 `--with-web`，默认最小依赖路径不变。README、完整项目说明、LoongArch 部署审查和状态文档同步更新。
+
+## 2026-06-05
+
+- 侦察确认工具集缺口：原 ~94 工具中除 svc_restart/svc_reload 外全部 read_only，且这两个写工具的 sudoers 条目从未授权——实测「清理日志/装包/杀进程」全做不到，安全护栏（safety-rules 里 rm/kill/pkg-remove 等危险规则）一直空转无对象。属赛题「执行管理任务」硬缺口，非补 sudoers 即可。
+- 按「默认只读、写操作显式 opt-in」哲学新增 5 个写工具（94→99）：log_vacuum(MEDIUM)、process_kill(HIGH,pid≥2)、pkg_install(MEDIUM)、pkg_remove(HIGH)、fs_truncate(HIGH,限 /var/log|/var/cache|/var/tmp|/tmp)，全部 requires_root + read_only=False。
+- 派 2 个并行子agent（sonnet）按同一份「argv↔sudoers 锚定正则」契约表分别实现工具+测试 与 setup-sudoers.sh 的 opt-in 渲染（KYAGENT_ENABLE_LOG_CLEAN/PKG_MGMT/PROC_KILL），默认 configs/sudoers.kyagent 仍只读不变量守住。
+- 集成校验（主agent）：① 8 条 argv 与渲染出的 sudoers 正则逐字节 fullmatch 全过；② 修复 pkg-remove-critical 正则——原要求 dnf 后紧跟 remove，被 `dnf -y remove kernel` 的 -y 绕过，导致删内核仅 confirm；改为容忍夹在中间的 flag 后，删 kernel/systemd/glibc/openssh-server 均 deny；③ 更新系统提示词 prompt.py 第3条，加入「先感知后变更」+清理垃圾示例。
+- 验证：全量 `python -m pytest -q` = 626 passed, 3 skipped（均 Windows POSIX 专属 skip）。
+
+## 2026-06-06
+
+- 应用户需求（LoongArch 虚拟机难用、手搓 sudoers 不现实）新增一键「生产预设」脚本 scripts/setup-sudoers-prod.sh：薄封装 setup-sudoers.sh，默认开启日志清理/包管理/进程终止三类写操作 + 13 个常见可重启服务白名单（nginx/httpd/sshd/firewalld/chronyd/crond/rsyslog/mariadb/mysqld/postgresql/redis/docker/php-fpm），任意开关/服务清单可用环境变量覆盖。
+- 写操作均为固定命令 + 锚定参数正则（非通配）；先打印授权摘要再交互确认（--yes 跳过，非交互无 --yes 退 1），最终仍走核心脚本 visudo 校验 + 失败回滚。默认只读基线与既有不变量不受影响。
+- kyagent.sh 新增 permissions-prod 子命令与 usage；README 新增「写操作授权（一键生产预设）」一节；tests/test_sudoers_least_privilege.py +5 用例（默认开关/常见服务/非交互守卫/覆盖生效/子命令存在）。
+- 验证：bash -n 两脚本通过；渲染模拟产出合法完整 sudoers；tests/test_sudoers_least_privilege.py 26 passed；全量回归见下方命令。
