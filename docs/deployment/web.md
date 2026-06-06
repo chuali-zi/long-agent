@@ -1,6 +1,6 @@
 # Web 控制台部署
 
-Web 控制台是本项目的 B/S 演示入口。前端由 FastAPI 后端同源托管，不需要额外 Node.js 进程。Web 复用 CLI/TUI 的 Agent、Guardrail、ExecutionProxy 和 Audit 链路，不绕过安全层。
+Web 控制台是本项目的 B/S 演示入口。前端由 FastAPI 后端同源托管，是零外部依赖的单文件静态页面，不需要额外 Node.js 进程。Web 复用 CLI/TUI 的 Agent、Guardrail、ExecutionProxy 和 Audit 链路，不绕过安全层。
 
 ## 离线演示
 

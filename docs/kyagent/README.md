@@ -141,6 +141,7 @@ DEEPSEEK_API_KEY=sk-...
 - tool call start/end
 - 高风险 approval_required 审核卡片
 - approval_resolved 结果
+- 工具、安全检查、审计 trace 和会话状态遥测
 - 最终回复
 
 Web 默认监听 `127.0.0.1`。如果要监听 `0.0.0.0`，必须开启认证并配置 operator/reviewer/auditor/admin 四类 token，否则 fail closed。

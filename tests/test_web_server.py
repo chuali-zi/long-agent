@@ -252,6 +252,15 @@ def test_static_index_exposes_live_shell_review_ui():
     html = (Path(__file__).parent.parent / "kyagent" / "web" / "static" / "index.html").read_text(
         encoding="utf-8"
     )
+    assert "单文件前端（drop-in 替换 kyagent/web/static/index.html）" in html
+    assert "telemetry-orb" in html
+    assert "Anthropic / Claude 美学" in html
+    assert "POST /api/ask/stream" in html
+    assert "POST /api/sessions/{id}/reset" in html
+    assert "POST /api/approvals/{id}/approve|reject" in html
+    assert "POST /api/choices/{id}/select" in html
+    assert "POST /api/safety/check" in html
+    assert "GET  /api/audit/traces[/{id}]" in html
     assert "approval_required" in html
     assert "approval_resolved" in html
     assert "choice_required" in html
@@ -260,5 +269,5 @@ def test_static_index_exposes_live_shell_review_ui():
     assert "apiHeaders" in html
     assert "approveApproval" in html
     assert "rejectApproval" in html
-    assert ".msg.tool" in html and "var(--red)" in html
-    assert ".msg.thinking" in html and "var(--think)" in html
+    assert ".msg.tool" in html and "var(--clay)" in html
+    assert ".msg.thinking" in html and "spark-inline" in html

@@ -1,0 +1,225 @@
+"""Browser-level smoke tests for the static Web console.
+
+These tests intentionally exercise the shipped ``index.html`` in a real browser
+without starting a backend process. API calls are intercepted in Playwright so
+the test stays deterministic and does not depend on LLM credentials.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("playwright.sync_api")
+from playwright.sync_api import Error as PlaywrightError  # noqa: E402
+from playwright.sync_api import Route, sync_playwright  # noqa: E402
+
+
+ROOT = Path(__file__).parent.parent
+INDEX_HTML = ROOT / "kyagent" / "web" / "static" / "index.html"
+APP_URL = "http://kyagent.test/"
+
+
+def _json_response(route: Route, payload: object) -> None:
+    route.fulfill(
+        status=200,
+        headers={
+            "access-control-allow-origin": "*",
+            "content-type": "application/json; charset=utf-8",
+        },
+        body=json.dumps(payload, ensure_ascii=False),
+    )
+
+
+@pytest.fixture()
+def chromium_page():
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except PlaywrightError as exc:
+            pytest.skip(f"Playwright Chromium is not installed: {exc}")
+        page = browser.new_page(viewport={"width": 1366, "height": 900})
+        try:
+            yield page
+        finally:
+            browser.close()
+
+
+def test_static_frontend_renders_and_calls_registered_apis(chromium_page):
+    page = chromium_page
+    calls: list[tuple[str, str, str | None]] = []
+
+    def handle_request(route: Route) -> None:
+        request = route.request
+        if request.url == APP_URL:
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=INDEX_HTML.read_text(encoding="utf-8"),
+            )
+            return
+        calls.append((request.method, request.url, request.post_data))
+        url = request.url
+        if url.endswith("/api/health"):
+            _json_response(route, {"status": "ok", "version": "0.1.0-test"})
+        elif url.endswith("/api/tools"):
+            _json_response(
+                route,
+                {
+                    "count": 1,
+                    "tools": [
+                        {
+                            "name": "disk_usage",
+                            "description": "show disk usage",
+                            "risk": "low",
+                            "requires_root": False,
+                            "read_only": True,
+                            "input_schema": {},
+                        }
+                    ],
+                },
+            )
+        elif "/api/safety/check" in url:
+            _json_response(
+                route,
+                {
+                    "intent": None,
+                    "argv": {
+                        "layer": "argv",
+                        "risk": "critical",
+                        "decision": "deny",
+                        "hits": [
+                            {"rule_id": "danger-rm-root", "risk": "critical", "matched": "rm -rf /"}
+                        ],
+                        "rationale": ["dangerous recursive delete"],
+                    },
+                    "final_risk": None,
+                    "final_decision": None,
+                },
+            )
+        elif "/api/audit/traces?limit=20" in url:
+            _json_response(
+                route,
+                {
+                    "count": 1,
+                    "traces": [
+                        {
+                            "trace_id": "trace-browser",
+                            "user": "web",
+                            "started_at": 1,
+                            "channel": "mock",
+                        }
+                    ],
+                },
+            )
+        elif "/api/audit/traces/trace-browser" in url:
+            _json_response(
+                route,
+                {
+                    "trace_id": "trace-browser",
+                    "events": [{"seq": 1, "kind": "final", "payload": {"ok": True}}],
+                },
+            )
+        elif "/api/sessions/" in url and url.endswith("/reset"):
+            _json_response(route, {"reset": True})
+        else:
+            route.fulfill(status=404, body="unexpected api route")
+
+    page.route("**/*", handle_request)
+    page.goto(APP_URL)
+
+    page.locator("#askInput").wait_for(state="visible", timeout=5000)
+    assert page.locator(".telemetry-orb").is_visible()
+    assert page.locator("#bannerText").inner_text(timeout=5000) == "v0.1.0-test"
+
+    page.get_by_role("button", name="工具").click()
+    page.locator("#toolTable").get_by_text("disk_usage").wait_for(timeout=5000)
+
+    page.get_by_role("button", name="安全").click()
+    page.locator("#safetyInput").fill("rm -rf /")
+    page.get_by_role("button", name="校验").click()
+    page.locator("#safetyResult").get_by_text("danger-rm-root").wait_for(timeout=5000)
+
+    page.get_by_role("button", name="审计").click()
+    page.locator("#traceTable").get_by_text("trace-browser").wait_for(timeout=5000)
+    page.locator("#traceTable a[data-id='trace-browser']").click()
+    page.locator("#traceDetail").get_by_text("trace trace-browser").wait_for(timeout=5000)
+
+    page.get_by_role("button", name="控制台").click()
+    page.get_by_role("button", name="清空会话").click()
+    page.locator("#chatEmpty").wait_for(timeout=5000)
+
+    observed = {(method, url.split("/api/", 1)[-1].split("?", 1)[0]) for method, url, _ in calls}
+    assert ("GET", "health") in observed
+    assert ("GET", "tools") in observed
+    assert ("POST", "safety/check") in observed
+    assert ("GET", "audit/traces") in observed
+    assert ("GET", "audit/traces/trace-browser") in observed
+    assert any(
+        method == "POST" and url_part.startswith("sessions/") and url_part.endswith("/reset")
+        for method, url_part in observed
+    )
+
+
+def test_static_frontend_handles_sse_approval_choice_and_final(chromium_page):
+    page = chromium_page
+    calls: list[tuple[str, str, str | None]] = []
+
+    def handle_request(route: Route) -> None:
+        request = route.request
+        if request.url == APP_URL:
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=INDEX_HTML.read_text(encoding="utf-8"),
+            )
+            return
+        calls.append((request.method, request.url, request.post_data))
+        url = request.url
+        if url.endswith("/api/health"):
+            _json_response(route, {"status": "ok", "version": "0.1.0-test"})
+        elif url.endswith("/api/ask/stream"):
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/event-stream; charset=utf-8"},
+                body=(
+                    'event: progress\ndata: {"kind":"thinking_delta","delta":"检查中"}\n\n'
+                    'event: progress\n'
+                    'data: {"kind":"tool_call_start","tool":"disk_usage","argv":{"path":"/var/log"}}\n\n'
+                    'event: approval_required\n'
+                    'data: {"approval_id":"apr-browser","title":"删除日志","risk":"high","body":"rm file"}\n\n'
+                    'event: choice_required\n'
+                    'data: {"choice_id":"choice-browser","question":"继续吗",'
+                    '"options":[{"value":"yes","label":"继续"}]}\n\n'
+                    'event: final\ndata: {"trace_id":"trace-final","text":"完成","denied":false}\n\n'
+                ),
+            )
+        elif url.endswith("/api/approvals/apr-browser/approve"):
+            _json_response(route, {"approval_id": "apr-browser", "status": "approved"})
+        elif url.endswith("/api/choices/choice-browser/select"):
+            _json_response(route, {"choice_id": "choice-browser", "status": "selected", "value": "yes"})
+        else:
+            route.fulfill(status=404, body="unexpected api route")
+
+    page.route("**/*", handle_request)
+    page.goto(APP_URL)
+
+    page.locator("#askInput").fill("检查日志")
+    page.locator("#sendBtn").click()
+    page.locator("#approval-apr-browser").wait_for(timeout=5000)
+    page.locator("#choice-choice-browser").wait_for(timeout=5000)
+    page.locator(".msg.agent").get_by_text("完成").wait_for(timeout=5000)
+
+    page.locator("#approval-apr-browser button[data-decision='approve']").click()
+    page.locator("#approval-apr-browser").get_by_text("approved").wait_for(timeout=5000)
+    page.locator("#choice-choice-browser button[data-value='yes']").click()
+    page.locator("#choice-choice-browser").get_by_text("yes").wait_for(timeout=5000)
+
+    ask_payload = next(
+        post_data for method, url, post_data in calls if method == "POST" and url.endswith("/api/ask/stream")
+    )
+    assert ask_payload is not None
+    assert json.loads(ask_payload)["text"] == "检查日志"
+    assert any(method == "POST" and url.endswith("/api/approvals/apr-browser/approve") for method, url, _ in calls)
+    assert any(method == "POST" and url.endswith("/api/choices/choice-browser/select") for method, url, _ in calls)
