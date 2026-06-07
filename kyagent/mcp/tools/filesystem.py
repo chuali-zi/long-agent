@@ -106,7 +106,7 @@ class FindTool(Tool):
         return argv
 
 
-_TRUNCATE_ALLOWED_PREFIXES = (
+_MUTATION_ALLOWED_PREFIXES = (
     "/var/log/",
     "/var/cache/",
     "/var/tmp/",
@@ -138,7 +138,7 @@ class FsTruncateTool(Tool):
     def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
         cleaned = super().validate(args)
         p = _safe_path(cleaned["path"])
-        if not any(p.startswith(prefix) for prefix in _TRUNCATE_ALLOWED_PREFIXES):
+        if not any(p.startswith(prefix) for prefix in _MUTATION_ALLOWED_PREFIXES):
             raise ToolError(
                 "fs_truncate 仅允许清空 /var/log、/var/cache、/var/tmp、/tmp 下的文件"
             )
@@ -151,9 +151,45 @@ class FsTruncateTool(Tool):
         return ["kyagent-log-clean", args["path"]]
 
 
+class FsDeleteFileTool(Tool):
+    name = "fs_delete_file"
+    description = (
+        "删除单个日志/缓存/临时普通文件（安全 unlink 包装器）。"
+        "仅限 /var/log、/var/cache、/var/tmp、/tmp 下；不递归、不跟随符号链接；高风险需确认。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+            "path": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "目标文件绝对路径，仅允许 /var/log、/var/cache、/var/tmp、/tmp 下",
+            }
+        },
+    }
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        p = _safe_path(cleaned["path"])
+        if not any(p.startswith(prefix) for prefix in _MUTATION_ALLOWED_PREFIXES):
+            raise ToolError(
+                "fs_delete_file 仅允许删除 /var/log、/var/cache、/var/tmp、/tmp 下的单个文件"
+            )
+        cleaned["path"] = p
+        return cleaned
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["kyagent-file-delete", args["path"]]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(DfTool())
     registry.register(DuTool())
     registry.register(LsTool())
     registry.register(FindTool())
     registry.register(FsTruncateTool())
+    registry.register(FsDeleteFileTool())

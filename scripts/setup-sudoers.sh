@@ -10,6 +10,8 @@ SUDOERS_SRC="$SCRIPT_DIR/../configs/sudoers.kyagent"
 SUDOERS_DST="/etc/sudoers.d/kyagent"
 LOG_CLEAN_WRAPPER_SRC="$SCRIPT_DIR/kyagent-log-clean"
 LOG_CLEAN_WRAPPER_DST="/usr/local/bin/kyagent-log-clean"
+FILE_DELETE_WRAPPER_SRC="$SCRIPT_DIR/kyagent-file-delete"
+FILE_DELETE_WRAPPER_DST="/usr/local/bin/kyagent-file-delete"
 BACKUP=""
 TMP_SUDOERS=""
 
@@ -77,7 +79,8 @@ render_log_clean() {
   printf 'Cmnd_Alias KY_LOG_CLEAN = \\\n'
   printf '    /usr/bin/journalctl ^--vacuum-size=[0-9]+[KMGT]$, \\\n'
   printf '    /usr/bin/journalctl ^--vacuum-time=[0-9]+(s|min|h|days|weeks|months|years)$, \\\n'
-  printf '    /usr/local/bin/kyagent-log-clean ^/[A-Za-z0-9._/@-]+$\n'
+  printf '    /usr/local/bin/kyagent-log-clean ^/[A-Za-z0-9._/@-]+$, \\\n'
+  printf '    /usr/local/bin/kyagent-file-delete ^/[A-Za-z0-9._/@-]+$\n'
   printf '%s  ALL=(root)  NOPASSWD: KY_LOG_CLEAN\n' "$user_name"
 }
 
@@ -87,7 +90,15 @@ render_pkg_mgmt() {
   printf '\n# Explicit package-management mutations generated when KYAGENT_ENABLE_PKG_MGMT=1.\n'
   printf 'Cmnd_Alias KY_PKG_MUTATE = \\\n'
   printf '    /usr/bin/dnf ^-y install [A-Za-z0-9._+-]+$, \\\n'
-  printf '    /usr/bin/yum ^-y install [A-Za-z0-9._+-]+$\n'
+  printf '    /usr/bin/yum ^-y install [A-Za-z0-9._+-]+$, \\\n'
+  printf '    /usr/bin/dnf ^-y update [A-Za-z0-9._+-]+$, \\\n'
+  printf '    /usr/bin/yum ^-y update [A-Za-z0-9._+-]+$, \\\n'
+  printf '    /usr/bin/dnf -y update, \\\n'
+  printf '    /usr/bin/yum -y update, \\\n'
+  printf '    /usr/bin/dnf -y update --security, \\\n'
+  printf '    /usr/bin/yum -y update --security, \\\n'
+  printf '    /usr/bin/dnf clean all, \\\n'
+  printf '    /usr/bin/yum clean all\n'
   printf '%s  ALL=(root)  NOPASSWD: KY_PKG_MUTATE\n' "$user_name"
 }
 
@@ -135,10 +146,13 @@ install_log_clean_wrapper() {
   # 仅在日志清理开关打开时安装受 sudoers 授权的包装器。
   [[ "${KYAGENT_ENABLE_LOG_CLEAN:-}" != "1" ]] && return 0
   [[ -f "$LOG_CLEAN_WRAPPER_SRC" ]] || die "找不到 log-clean 包装器源：$LOG_CLEAN_WRAPPER_SRC"
+  [[ -f "$FILE_DELETE_WRAPPER_SRC" ]] || die "找不到 file-delete 包装器源：$FILE_DELETE_WRAPPER_SRC"
   command -v python3 >/dev/null 2>&1 || die "log-clean 包装器需要 python3，请先安装"
   # root:root 拥有、0755：agent 账户不可改写包装器本身。
   install -m 0755 -o root -g root "$LOG_CLEAN_WRAPPER_SRC" "$LOG_CLEAN_WRAPPER_DST"
+  install -m 0755 -o root -g root "$FILE_DELETE_WRAPPER_SRC" "$FILE_DELETE_WRAPPER_DST"
   echo "[+] 已安装 log-clean 包装器：$LOG_CLEAN_WRAPPER_DST"
+  echo "[+] 已安装 file-delete 包装器：$FILE_DELETE_WRAPPER_DST"
 }
 
 render_proc_kill() {

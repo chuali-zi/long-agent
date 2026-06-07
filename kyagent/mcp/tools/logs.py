@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from kyagent.mcp.tools.base import Tool, ToolRegistry
+from kyagent.mcp.tools.filesystem import _safe_path
 from kyagent.safety.patterns import RiskLevel
 
 
@@ -366,6 +367,63 @@ class LogVacuumTool(Tool):
         return ["journalctl", f"--vacuum-time={args['max_age']}"]
 
 
+_LOG_DELETE_SUFFIXES = (
+    ".log",
+    ".old",
+    ".gz",
+    ".xz",
+    ".zst",
+    ".1",
+    ".2",
+    ".3",
+    ".4",
+    ".5",
+    ".6",
+    ".7",
+    ".8",
+    ".9",
+)
+
+
+class LogDeleteFileTool(Tool):
+    name = "log_delete_file"
+    description = (
+        "删除 /var/log 下单个普通日志文件或轮转日志文件。"
+        "不递归、不接受 glob、不跟随符号链接；高风险需确认。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+            "path": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "目标日志文件绝对路径，限定 /var/log 下",
+            }
+        },
+    }
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        from kyagent.mcp.tools.base import ToolError
+        cleaned = super().validate(args)
+        p = _safe_path(cleaned["path"])
+        if not p.startswith("/var/log/"):
+            raise ToolError("log_delete_file 仅允许删除 /var/log 下的单个日志文件")
+        if not p.endswith(_LOG_DELETE_SUFFIXES):
+            raise ToolError(
+                "log_delete_file 仅允许删除常见日志/轮转日志后缀: "
+                + ", ".join(_LOG_DELETE_SUFFIXES)
+            )
+        cleaned["path"] = p
+        return cleaned
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return ["kyagent-file-delete", args["path"]]
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(JournalctlTool())
     registry.register(DmesgTool())
@@ -377,3 +435,4 @@ def register(registry: ToolRegistry) -> None:
     registry.register(LogAuditSummaryTool())
     registry.register(LogRotatedCountTool())
     registry.register(LogVacuumTool())
+    registry.register(LogDeleteFileTool())

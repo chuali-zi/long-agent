@@ -106,6 +106,9 @@ def test_critical_denied(guardrail: Guardrail, cmd: str):
     "find /var/log -maxdepth 3 -name '*.log' -type f",
     "dnf list installed",
     "dnf info openssh-server",
+    "dnf -y update openssl",
+    "dnf -y update --security",
+    "dnf clean all",
 ])
 def test_benign_allowed(guardrail: Guardrail, cmd: str):
     v = guardrail.check_cmdline(cmd)

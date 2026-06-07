@@ -289,6 +289,65 @@ class PkgInstallTool(Tool):
         return [_detect_rpm_frontend(), "-y", "install", args["name"]]
 
 
+class PkgUpdateTool(Tool):
+    name = "pkg_update"
+    description = "更新单个软件包（dnf/yum -y update <pkg>），变更类需确认。"
+    input_schema = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "pattern": r"^[A-Za-z0-9._+-]+$",
+                "maxLength": 100,
+                "description": "软件包名",
+            }
+        },
+    }
+    risk_level = RiskLevel.MEDIUM
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "-y", "update", args["name"]]
+
+
+class PkgUpdateAllTool(Tool):
+    name = "pkg_update_all"
+    description = "更新所有可升级软件包（dnf/yum -y update），高风险需确认。"
+    input_schema = {"type": "object", "properties": {}}
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "-y", "update"]
+
+
+class PkgSecurityUpgradeTool(Tool):
+    name = "pkg_security_upgrade"
+    description = "安装安全相关更新（dnf/yum -y update --security），高风险需确认。"
+    input_schema = {"type": "object", "properties": {}}
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "-y", "update", "--security"]
+
+
+class PkgCleanCacheTool(Tool):
+    name = "pkg_clean_cache"
+    description = "清理包管理器缓存（dnf/yum clean all），变更类需确认。"
+    input_schema = {"type": "object", "properties": {}}
+    risk_level = RiskLevel.MEDIUM
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "clean", "all"]
+
+
 class PkgRemoveTool(Tool):
     name = "pkg_remove"
     description = (
@@ -331,4 +390,8 @@ def register(registry: ToolRegistry) -> None:
     registry.register(PkgRepoListTool())
     registry.register(PkgHistoryTool())
     registry.register(PkgInstallTool())
+    registry.register(PkgUpdateTool())
+    registry.register(PkgUpdateAllTool())
+    registry.register(PkgSecurityUpgradeTool())
+    registry.register(PkgCleanCacheTool())
     registry.register(PkgRemoveTool())

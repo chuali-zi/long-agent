@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""kyagent-file-delete -- sudoers-authorized safe file deletion helper.
+
+This helper intentionally deletes only a single regular file under a narrow set
+of operational scratch/log/cache roots. It never accepts shell globs, never
+recurses, and never follows a terminal symlink.
+"""
+from __future__ import annotations
+
+import os
+import stat
+import sys
+
+ALLOWED_ROOTS = ("/var/log", "/var/cache", "/var/tmp", "/tmp")
+
+
+def die(msg: str, code: int = 2) -> None:
+    sys.stderr.write(f"kyagent-file-delete: {msg}\n")
+    raise SystemExit(code)
+
+
+def _within_allowed(path: str) -> bool:
+    return any(path.startswith(root + os.sep) for root in ALLOWED_ROOTS)
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) != 2:
+        die("用法: kyagent-file-delete <绝对路径>")
+    raw = argv[1]
+    if not raw.startswith("/"):
+        die(f"必须是绝对路径: {raw!r}")
+    if "\0" in raw:
+        die("路径含 NUL 字节")
+
+    pre = os.path.realpath(raw)
+    if not _within_allowed(pre):
+        die(f"解析后路径越界，仅允许 {', '.join(ALLOWED_ROOTS)} 下: {pre}")
+
+    try:
+        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        die(f"打开失败（末端是符号链接、目录或不存在）: {exc}")
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            die("目标不是普通文件，拒绝删除")
+        try:
+            resolved = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            resolved = os.path.realpath(raw)
+        if not _within_allowed(resolved):
+            die(f"打开后真实路径越界，仅允许 {', '.join(ALLOWED_ROOTS)} 下: {resolved}")
+        try:
+            current = os.lstat(raw)
+        except OSError as exc:
+            die(f"删除前复检失败: {exc}")
+        if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+            die("删除前目标 inode 已变化，拒绝删除")
+        os.unlink(raw)
+    finally:
+        os.close(fd)
+    sys.stdout.write(f"deleted: {resolved}\n")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

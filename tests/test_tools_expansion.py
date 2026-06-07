@@ -648,8 +648,8 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_99_tools(self, registry):
-        assert len(registry.names()) == 99
+    def test_default_registry_has_105_tools(self, registry):
+        assert len(registry.names()) == 105
 
     def test_all_tools_have_description(self, registry):
         bad = [
@@ -707,7 +707,9 @@ class TestRegistry:
             "sec_kysec_status", "sec_sudoers_audit",  # security
             "compl_file_hash", "compl_aide_check",    # compliance
             "la_arch_info", "la_world_check", "la_binary_compat",  # loongarch
-            "log_vacuum", "process_kill", "pkg_install", "pkg_remove", "fs_truncate",  # write ops
+            "log_vacuum", "log_delete_file", "process_kill",
+            "pkg_install", "pkg_update", "pkg_update_all", "pkg_security_upgrade",
+            "pkg_clean_cache", "pkg_remove", "fs_truncate", "fs_delete_file",  # write ops
         }
         missing = expected - set(registry.names())
         assert not missing, f"missing tools: {missing}"
@@ -908,6 +910,80 @@ class TestWriteOperationTools:
     def test_pkg_install_requires_root(self):
         assert package_mod.PkgInstallTool().requires_root is True
 
+    # ---- PkgUpdateTool ----
+
+    def test_pkg_update_argv(self, rpm_family):
+        t = package_mod.PkgUpdateTool()
+        argv = _argv(t, {"name": "openssl"})
+        assert argv == ["dnf", "-y", "update", "openssl"]
+
+    def test_pkg_update_rejects_illegal_name(self):
+        t = package_mod.PkgUpdateTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "openssl; rm -rf /"})
+
+    def test_pkg_update_rejects_space(self):
+        t = package_mod.PkgUpdateTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "open ssl"})
+
+    def test_pkg_update_read_only_is_false(self):
+        assert package_mod.PkgUpdateTool().read_only is False
+
+    def test_pkg_update_requires_root(self):
+        assert package_mod.PkgUpdateTool().requires_root is True
+
+    # ---- PkgUpdateAllTool ----
+
+    def test_pkg_update_all_argv(self, rpm_family):
+        t = package_mod.PkgUpdateAllTool()
+        assert _argv(t, {}) == ["dnf", "-y", "update"]
+
+    def test_pkg_update_all_rejects_extra_args(self):
+        t = package_mod.PkgUpdateAllTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "openssl"})
+
+    def test_pkg_update_all_read_only_is_false(self):
+        assert package_mod.PkgUpdateAllTool().read_only is False
+
+    def test_pkg_update_all_requires_root(self):
+        assert package_mod.PkgUpdateAllTool().requires_root is True
+
+    # ---- PkgSecurityUpgradeTool ----
+
+    def test_pkg_security_upgrade_argv(self, rpm_family):
+        t = package_mod.PkgSecurityUpgradeTool()
+        assert _argv(t, {}) == ["dnf", "-y", "update", "--security"]
+
+    def test_pkg_security_upgrade_rejects_extra_args(self):
+        t = package_mod.PkgSecurityUpgradeTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "openssl"})
+
+    def test_pkg_security_upgrade_read_only_is_false(self):
+        assert package_mod.PkgSecurityUpgradeTool().read_only is False
+
+    def test_pkg_security_upgrade_requires_root(self):
+        assert package_mod.PkgSecurityUpgradeTool().requires_root is True
+
+    # ---- PkgCleanCacheTool ----
+
+    def test_pkg_clean_cache_argv(self, rpm_family):
+        t = package_mod.PkgCleanCacheTool()
+        assert _argv(t, {}) == ["dnf", "clean", "all"]
+
+    def test_pkg_clean_cache_rejects_extra_args(self):
+        t = package_mod.PkgCleanCacheTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "openssl"})
+
+    def test_pkg_clean_cache_read_only_is_false(self):
+        assert package_mod.PkgCleanCacheTool().read_only is False
+
+    def test_pkg_clean_cache_requires_root(self):
+        assert package_mod.PkgCleanCacheTool().requires_root is True
+
     # ---- PkgRemoveTool ----
 
     def test_pkg_remove_argv(self, rpm_family):
@@ -964,3 +1040,64 @@ class TestWriteOperationTools:
 
     def test_fs_truncate_requires_root(self):
         assert filesystem_mod.FsTruncateTool().requires_root is True
+
+    # ---- FsDeleteFileTool ----
+
+    def test_fs_delete_file_argv(self):
+        t = filesystem_mod.FsDeleteFileTool()
+        argv = _argv(t, {"path": "/var/cache/app.tmp"})
+        assert argv == ["kyagent-file-delete", "/var/cache/app.tmp"]
+
+    def test_fs_delete_file_argv_tmp(self):
+        t = filesystem_mod.FsDeleteFileTool()
+        argv = _argv(t, {"path": "/tmp/kyagent-old.log"})
+        assert argv == ["kyagent-file-delete", "/tmp/kyagent-old.log"]
+
+    def test_fs_delete_file_rejects_out_of_bounds_path(self):
+        t = filesystem_mod.FsDeleteFileTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/etc/passwd"})
+
+    def test_fs_delete_file_rejects_metachar_path(self):
+        t = filesystem_mod.FsDeleteFileTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/var/log/app;rm"})
+
+    def test_fs_delete_file_read_only_is_false(self):
+        assert filesystem_mod.FsDeleteFileTool().read_only is False
+
+    def test_fs_delete_file_requires_root(self):
+        assert filesystem_mod.FsDeleteFileTool().requires_root is True
+
+    # ---- LogDeleteFileTool ----
+
+    def test_log_delete_file_argv(self):
+        t = logs_mod.LogDeleteFileTool()
+        argv = _argv(t, {"path": "/var/log/messages.1"})
+        assert argv == ["kyagent-file-delete", "/var/log/messages.1"]
+
+    def test_log_delete_file_allows_plain_log(self):
+        t = logs_mod.LogDeleteFileTool()
+        argv = _argv(t, {"path": "/var/log/myapp.log"})
+        assert argv == ["kyagent-file-delete", "/var/log/myapp.log"]
+
+    def test_log_delete_file_rejects_non_log_suffix(self):
+        t = logs_mod.LogDeleteFileTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/var/log/messages"})
+
+    def test_log_delete_file_rejects_tmp_path(self):
+        t = logs_mod.LogDeleteFileTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/tmp/myapp.log"})
+
+    def test_log_delete_file_rejects_metachar_path(self):
+        t = logs_mod.LogDeleteFileTool()
+        with pytest.raises(ToolError):
+            t.validate({"path": "/var/log/app.log;rm"})
+
+    def test_log_delete_file_read_only_is_false(self):
+        assert logs_mod.LogDeleteFileTool().read_only is False
+
+    def test_log_delete_file_requires_root(self):
+        assert logs_mod.LogDeleteFileTool().requires_root is True

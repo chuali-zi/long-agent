@@ -228,6 +228,7 @@ def test_render_log_clean_enabled_outputs_correct_rules() -> None:
     assert "/usr/bin/journalctl ^--vacuum-time=[0-9]+(s|min|h|days|weeks|months|years)$" in out
     # truncate 不再裸授权：改授权 OS 层包装器 + 单个绝对路径参数。
     assert "/usr/local/bin/kyagent-log-clean ^/[A-Za-z0-9._/@-]+$" in out
+    assert "/usr/local/bin/kyagent-file-delete ^/[A-Za-z0-9._/@-]+$" in out
     # 旧的、允许 .. 越界的裸 truncate 正则必须已彻底消失。
     assert "/usr/bin/truncate" not in out
     assert "Cmnd_Alias KY_LOG_CLEAN" in out
@@ -298,7 +299,16 @@ def test_render_pkg_mgmt_enabled_outputs_correct_rules() -> None:
     out = result.stdout
     assert "/usr/bin/dnf ^-y install [A-Za-z0-9._+-]+$" in out
     assert "/usr/bin/yum ^-y install [A-Za-z0-9._+-]+$" in out
+    assert "/usr/bin/dnf ^-y update [A-Za-z0-9._+-]+$" in out
+    assert "/usr/bin/yum ^-y update [A-Za-z0-9._+-]+$" in out
+    assert "/usr/bin/dnf -y update" in out
+    assert "/usr/bin/yum -y update" in out
+    assert "/usr/bin/dnf -y update --security" in out
+    assert "/usr/bin/yum -y update --security" in out
+    assert "/usr/bin/dnf clean all" in out
+    assert "/usr/bin/yum clean all" in out
     assert "^-y remove [A-Za-z0-9._+-]+$" not in out
+    assert "^-y update .*$" not in out
     assert "Cmnd_Alias KY_PKG_MUTATE" in out
     assert "kyagent  ALL=(root)  NOPASSWD: KY_PKG_MUTATE" in out
 
@@ -439,6 +449,9 @@ def test_default_sudoers_does_not_grant_write_operations() -> None:
         "KY_PROC_KILL",
         "journalctl --vacuum",
         "dnf -y install",
+        "dnf -y update",
+        "yum -y update",
+        "kyagent-file-delete",
         "/usr/bin/kill",
     ]
     for s in forbidden_strings:
@@ -467,7 +480,7 @@ def test_prod_wrapper_defaults_enable_all_write_switches() -> None:
 def test_prod_wrapper_does_not_enable_wildcard_package_remove_by_default() -> None:
     text = PROD_WRAPPER.read_text(encoding="utf-8")
     assert "install|remove <pkg>" not in text
-    assert "dnf/yum -y install <pkg>" in text
+    assert "dnf/yum install/update/security/clean-cache" in text
     assert "KYAGENT_PKG_REMOVE_ALLOWLIST" in text
 
 
@@ -549,9 +562,81 @@ def test_setup_installs_log_clean_wrapper_root_owned() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
     # 包装器以 root:root 0755 安装到 PATH 白名单内的 /usr/local/bin。
     assert 'install -m 0755 -o root -g root "$LOG_CLEAN_WRAPPER_SRC" "$LOG_CLEAN_WRAPPER_DST"' in script
+    assert 'install -m 0755 -o root -g root "$FILE_DELETE_WRAPPER_SRC" "$FILE_DELETE_WRAPPER_DST"' in script
     assert 'LOG_CLEAN_WRAPPER_DST="/usr/local/bin/kyagent-log-clean"' in script
+    assert 'FILE_DELETE_WRAPPER_DST="/usr/local/bin/kyagent-file-delete"' in script
     # 仅在日志清理开关打开时安装。
     assert '[[ "${KYAGENT_ENABLE_LOG_CLEAN:-}" != "1" ]] && return 0' in script
+
+
+FILE_DELETE_WRAPPER = Path(__file__).parents[1] / "scripts" / "kyagent-file-delete"
+
+
+def _run_delete_wrapper(path: str):
+    return subprocess.run(
+        [sys.executable, str(FILE_DELETE_WRAPPER), path],
+        check=False, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+
+
+def test_delete_wrapper_rejects_traversal_out_of_allowed_roots() -> None:
+    if sys.platform == "win32":
+        pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
+    result = _run_delete_wrapper("/tmp/../../etc/shadow")
+    assert result.returncode != 0
+    assert "越界" in result.stderr
+
+
+def test_delete_wrapper_deletes_regular_file_in_allowed_root() -> None:
+    if sys.platform == "win32":
+        pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
+    import tempfile
+
+    fd, name = tempfile.mkstemp(prefix="kyagent_delete_", suffix=".log", dir="/tmp")
+    try:
+        with open(fd, "w") as fh:
+            fh.write("noise")
+        result = _run_delete_wrapper(name)
+        assert result.returncode == 0, result.stderr
+        assert not Path(name).exists()
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def test_delete_wrapper_rejects_symlink_escaping_allowed_root() -> None:
+    if sys.platform == "win32":
+        pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
+    import os
+    import tempfile
+
+    link = tempfile.mktemp(prefix="kyagent_delete_link_", dir="/tmp")
+    os.symlink("/etc/passwd", link)
+    try:
+        result = _run_delete_wrapper(link)
+        assert result.returncode != 0
+        assert "越界" in result.stderr
+    finally:
+        Path(link).unlink(missing_ok=True)
+
+
+def test_delete_wrapper_rejects_symlink_even_within_allowed_root() -> None:
+    if sys.platform == "win32":
+        pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
+    import os
+    import tempfile
+
+    fd, target = tempfile.mkstemp(prefix="kyagent_delete_tgt_", dir="/tmp")
+    os.close(fd)
+    link = tempfile.mktemp(prefix="kyagent_delete_lnk_", dir="/tmp")
+    os.symlink(target, link)
+    try:
+        result = _run_delete_wrapper(link)
+        assert result.returncode != 0
+        assert "打开失败" in result.stderr
+    finally:
+        Path(link).unlink(missing_ok=True)
+        Path(target).unlink(missing_ok=True)
 
 
 def test_wrapper_rejects_traversal_out_of_allowed_roots() -> None:
@@ -579,7 +664,7 @@ def test_wrapper_rejects_relative_path() -> None:
     assert "绝对路径" in result.stderr
 
 
-def test_wrapper_truncates_regular_file_in_allowed_root(tmp_path) -> None:
+def test_wrapper_truncates_regular_file_in_allowed_root() -> None:
     if sys.platform == "win32":
         pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
     import tempfile
@@ -596,7 +681,7 @@ def test_wrapper_truncates_regular_file_in_allowed_root(tmp_path) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def test_wrapper_rejects_symlink_escaping_allowed_root(tmp_path) -> None:
+def test_wrapper_rejects_symlink_escaping_allowed_root() -> None:
     if sys.platform == "win32":
         pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
     import os
@@ -612,7 +697,7 @@ def test_wrapper_rejects_symlink_escaping_allowed_root(tmp_path) -> None:
         Path(link).unlink(missing_ok=True)
 
 
-def test_wrapper_rejects_symlink_even_within_allowed_root(tmp_path) -> None:
+def test_wrapper_rejects_symlink_even_within_allowed_root() -> None:
     if sys.platform == "win32":
         pytest.skip("wrapper enforces POSIX realpath/O_NOFOLLOW semantics")
     import os

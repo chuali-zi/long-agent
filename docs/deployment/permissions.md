@@ -146,6 +146,7 @@ sudo env KYAGENT_ENABLE_LOG_CLEAN=1 bash scripts/kyagent.sh permissions
 - `journalctl --vacuum-size=<数字>[KMGT]`
 - `journalctl --vacuum-time=<数字>(s|min|h|days|weeks|months|years)`
 - `kyagent-log-clean <绝对路径>`（清空 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp` 下的普通文件）
+- `kyagent-file-delete <绝对路径>`（删除 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp` 下的单个普通文件）
 
 文件清空不再把裸 `truncate -s 0` 连同路径正则交给 sudoers——旧字符类
 `/var/log/[A-Za-z0-9._/@-]+` 同时含 `.` 和 `/`，`..` 可匹配，配合 `truncate`
@@ -163,6 +164,12 @@ sudoers 的参数正则 `^/[A-Za-z0-9._/@-]+$` 仅作粗粒度闸门（绝对路
 无空白与 shell 元字符），**刻意允许 `..` 语法**，越界与否一律由包装器按解析后的真实
 路径判定。工具层 `fs_truncate` 仍做 `posixpath.normpath` 归一化作为纵深防御。
 
+文件删除同样不授权 `rm`、`find -delete` 或通配删除。`fs_delete_file` / `log_delete_file`
+只会调用 `/usr/local/bin/kyagent-file-delete`，包装器用 realpath、`O_NOFOLLOW`、fd
+真实路径和删除前 inode 复检确认目标仍是允许根目录下的同一个普通文件，然后才 `unlink`。
+它不递归、不接受 glob、不删除目录；`log_delete_file` 还会在工具层额外限制 `/var/log`
+和常见日志后缀。
+
 ### 包管理（KYAGENT_ENABLE_PKG_MGMT=1）
 
 ```bash
@@ -173,8 +180,17 @@ sudo env KYAGENT_ENABLE_PKG_MGMT=1 bash scripts/kyagent.sh permissions
 
 - `dnf -y install <包名>`
 - `yum -y install <包名>`
+- `dnf -y update <包名>`
+- `yum -y update <包名>`
+- `dnf -y update`
+- `yum -y update`
+- `dnf -y update --security`
+- `yum -y update --security`
+- `dnf clean all`
+- `yum clean all`
 
 包名仅允许 `[A-Za-z0-9._+-]+`，禁止空格、管道、引号等元字符，防止参数注入。
+单包安装/更新用锚定参数正则；全量更新、安全更新和清理缓存是固定命令，不接受额外参数。
 
 卸载软件包不使用通配授权；如确需卸载，必须额外配置固定 allowlist：
 
@@ -218,8 +234,8 @@ sudo bash scripts/kyagent.sh permissions-prod --yes    # 跳过确认，非交�
 
 它在默认只读基线之上，额外默认开启（全部是固定命令 + 锚定参数正则，不是通配放行）：
 
-- **日志清理**（`KYAGENT_ENABLE_LOG_CLEAN=1`）：`journalctl --vacuum-size/--vacuum-time`、`kyagent-log-clean <绝对路径>`（OS 层 realpath+O_NOFOLLOW 校验，限 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp`，防 `..` 越界与符号链接）
-- **包管理**（`KYAGENT_ENABLE_PKG_MGMT=1`）：`dnf/yum -y install <pkg>`；卸载仅在设置 `KYAGENT_PKG_REMOVE_ALLOWLIST` 时按固定包名授权
+- **日志清理**（`KYAGENT_ENABLE_LOG_CLEAN=1`）：`journalctl --vacuum-size/--vacuum-time`、`kyagent-log-clean <绝对路径>`、`kyagent-file-delete <绝对路径>`（OS 层 realpath+O_NOFOLLOW 校验，限 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp`，防 `..` 越界与符号链接）
+- **包管理**（`KYAGENT_ENABLE_PKG_MGMT=1`）：`dnf/yum -y install <pkg>`、`dnf/yum -y update <pkg>`、`dnf/yum -y update`、`dnf/yum -y update --security`、`dnf/yum clean all`；卸载仅在设置 `KYAGENT_PKG_REMOVE_ALLOWLIST` 时按固定包名授权
 - **进程终止**（`KYAGENT_ENABLE_PROC_KILL=1`）：`kill -(TERM|KILL|HUP|INT) <pid>=2+`
 - **重启常见服务**（`KYAGENT_SERVICE_ALLOWLIST` 默认值）：`systemctl restart/reload` 对 nginx、httpd、sshd、firewalld、chronyd、crond、rsyslog、mariadb、mysqld、postgresql、redis、docker、php-fpm（仅 restart/reload，不含 stop/disable/mask）
 
