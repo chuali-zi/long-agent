@@ -116,7 +116,17 @@ def test_loongarch_web_requirements_are_separate_and_sdk_free() -> None:
 
     assert "fastapi>=0.95,<0.100" in requirements
     assert "uvicorn>=0.23,<0.30" in requirements
-    for token in ("openai", "anthropic", "mcp", "jiter", "pydantic-core", "uvicorn[standard]"):
+    for token in (
+        "openai",
+        "anthropic",
+        "mcp",
+        "jiter",
+        "pydantic-core",
+        "uvicorn[standard]",
+        "markdown",
+        "mistune",
+        "markdown-it",
+    ):
         assert token not in requirements
 
 

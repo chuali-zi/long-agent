@@ -269,5 +269,7 @@ def test_static_index_exposes_live_shell_review_ui():
     assert "apiHeaders" in html
     assert "approveApproval" in html
     assert "rejectApproval" in html
-    assert ".msg.tool" in html and "var(--clay)" in html
-    assert ".msg.thinking" in html and "spark-inline" in html
+    assert "agentStatusDetail" in html
+    assert "setActivity" in html
+    assert "renderMarkdownInto" in html
+    assert ".md-doc" in html

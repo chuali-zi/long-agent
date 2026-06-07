@@ -230,6 +230,17 @@
   .stat-cell .label { color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; }
   .stat-cell .value { margin-top: 3px; font-weight: 700; font-size: 14px; color: var(--ink); word-break: break-word; }
   .stat-cell .value.mono { font-family: var(--mono); font-size: 12px; }
+  .run-detail {
+    margin-top: 6px; color: var(--ink-soft); font: 12.5px/1.55 var(--sans);
+    max-height: 190px; overflow: auto; scrollbar-gutter: stable;
+  }
+  .run-detail .activity-title { color: var(--ink); font-weight: 800; margin-bottom: 5px; }
+  .run-detail pre {
+    margin: 0; padding: 9px 10px; border-radius: 8px; background: var(--paper-3);
+    border: 1px solid var(--line-soft); color: var(--ink-soft);
+    white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 var(--mono);
+  }
+  .run-detail .muted-line { color: var(--muted); }
   .pop-token {
     margin-top: 11px; display: flex; align-items: center; gap: 8px;
     background: var(--paper-2); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px 6px 11px;
@@ -316,6 +327,33 @@
   }
   .msg.agent .who { color: var(--clay-deep); }
   .msg.agent .body { color: #4a2417; font-size: 15.5px; line-height: 1.62; }
+  .msg.agent .body.md-doc { white-space: normal; }
+  .md-doc > *:first-child { margin-top: 0; }
+  .md-doc > *:last-child { margin-bottom: 0; }
+  .md-doc h1, .md-doc h2, .md-doc h3, .md-doc h4, .md-doc h5, .md-doc h6 {
+    margin: 1em 0 .45em; color: #3f1e12; line-height: 1.25; font-family: var(--serif);
+  }
+  .md-doc h1 { font-size: 1.48em; padding-bottom: .28em; border-bottom: 1px solid rgba(164,72,42,.24); }
+  .md-doc h2 { font-size: 1.3em; padding-bottom: .2em; border-bottom: 1px solid rgba(164,72,42,.18); }
+  .md-doc h3 { font-size: 1.12em; }
+  .md-doc p { margin: .55em 0; }
+  .md-doc ul, .md-doc ol { margin: .55em 0 .7em; padding-left: 1.35em; }
+  .md-doc li { margin: .22em 0; }
+  .md-doc blockquote {
+    margin: .7em 0; padding: .15em 0 .15em 1em; color: var(--ink-soft);
+    border-left: 3px solid rgba(164,72,42,.35);
+  }
+  .md-doc pre {
+    margin: .75em 0; padding: 11px 12px; border-radius: 8px;
+    background: rgba(255,255,255,.58); border: 1px solid rgba(164,72,42,.22);
+    overflow: auto; white-space: pre; font: 12.5px/1.5 var(--mono);
+  }
+  .md-doc code {
+    padding: .08em .32em; border-radius: 5px; background: rgba(255,255,255,.62);
+    border: 1px solid rgba(164,72,42,.16); font-family: var(--mono); font-size: .92em;
+  }
+  .md-doc pre code { padding: 0; border: 0; background: transparent; font-size: inherit; }
+  .md-doc a { color: var(--clay-deep); text-decoration-thickness: 1px; text-underline-offset: 2px; }
 
   /* thinking —— 浅笔记体 */
   .msg.thinking {
@@ -688,6 +726,12 @@
       <div class="stat-cell"><div class="label">Trace</div><div class="value mono" id="traceView">—</div></div>
       <div class="stat-cell"><div class="label">审核</div><div class="value" id="approvalView">无待处理</div></div>
       <div class="stat-cell"><div class="label">事件流</div><div class="value" id="eventMetrics" style="font-weight:400">等待事件</div></div>
+      <div class="stat-cell full">
+        <div class="label">Agent 状态</div>
+        <div class="run-detail" id="agentStatusDetail">
+          <div class="muted-line">等待任务</div>
+        </div>
+      </div>
     </div>
     <!-- Bearer token（审批 / 审计鉴权）—— id=apiToken, onchange=saveToken 不可改 -->
     <label class="pop-token" title="审批 / 审计接口的 Bearer token">
@@ -710,6 +754,7 @@ const SESSION_ID = (() => {
 })();
 document.getElementById('apiToken').value = localStorage.getItem('ky_token') || '';
 const state = { busy: false, pendingApprovals: new Map(), metrics: {thinking: 0, tools: 0, approvals: 0} };
+const activityState = {title: '空闲', detail: '等待任务', thinking: ''};
 document.getElementById('sessionView').textContent = SESSION_ID;
 
 /* ---- Tab 切换（保留原 data-tab 协议） ---- */
@@ -780,6 +825,150 @@ function updateMetrics() {
 function esc(s) {
   return (s ?? '').toString().replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 }
+function setActivity(title, detail) {
+  activityState.title = title || '运行中';
+  activityState.detail = detail || '';
+  renderActivity();
+}
+function resetActivity() {
+  activityState.title = '调度中';
+  activityState.detail = '等待后端事件...';
+  activityState.thinking = '';
+  renderActivity();
+}
+function renderActivity() {
+  const box = document.getElementById('agentStatusDetail');
+  if (!box) return;
+  box.replaceChildren();
+  const title = document.createElement('div');
+  title.className = 'activity-title';
+  title.textContent = activityState.title || '运行中';
+  box.appendChild(title);
+  const lines = [];
+  if (activityState.thinking) lines.push('思考：\n' + activityState.thinking);
+  if (activityState.detail) lines.push(activityState.detail);
+  if (!lines.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted-line';
+    empty.textContent = '等待任务';
+    box.appendChild(empty);
+    return;
+  }
+  const pre = document.createElement('pre');
+  pre.textContent = lines.join('\n\n');
+  box.appendChild(pre);
+}
+function appendInlineMarkdown(parent, text) {
+  const src = String(text ?? '');
+  const re = /(`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+)\))/g;
+  let last = 0;
+  for (const m of src.matchAll(re)) {
+    if (m.index > last) parent.appendChild(document.createTextNode(src.slice(last, m.index)));
+    if (m[2]) {
+      const code = document.createElement('code');
+      code.textContent = m[2];
+      parent.appendChild(code);
+    } else if (m[3]) {
+      const strong = document.createElement('strong');
+      strong.textContent = m[3];
+      parent.appendChild(strong);
+    } else if (m[4]) {
+      const em = document.createElement('em');
+      em.textContent = m[4];
+      parent.appendChild(em);
+    } else if (m[5] && m[6]) {
+      const a = document.createElement('a');
+      a.textContent = m[5];
+      a.href = m[6];
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      parent.appendChild(a);
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) parent.appendChild(document.createTextNode(src.slice(last)));
+}
+function markdownLooksRenderable(text) {
+  return /(^|\n)(#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s+|```)|(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/)/.test(text || '');
+}
+function renderMarkdownInto(el, text) {
+  try {
+    const source = String(text ?? '');
+    if (!markdownLooksRenderable(source)) {
+      el.textContent = source;
+      return;
+    }
+    el.classList.add('md-doc');
+    el.replaceChildren();
+    const lines = source.replace(/\r\n?/g, '\n').split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i += 1; continue; }
+      const fence = line.match(/^```(.*)$/);
+      if (fence) {
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        const buf = [];
+        i += 1;
+        while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i += 1; }
+        if (i < lines.length) i += 1;
+        code.textContent = buf.join('\n');
+        pre.appendChild(code);
+        el.appendChild(pre);
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        const h = document.createElement('h' + heading[1].length);
+        appendInlineMarkdown(h, heading[2]);
+        el.appendChild(h);
+        i += 1;
+        continue;
+      }
+      const quote = line.match(/^>\s?(.*)$/);
+      if (quote) {
+        const block = document.createElement('blockquote');
+        const parts = [];
+        while (i < lines.length) {
+          const q = lines[i].match(/^>\s?(.*)$/);
+          if (!q) break;
+          parts.push(q[1]);
+          i += 1;
+        }
+        appendInlineMarkdown(block, parts.join('\n'));
+        el.appendChild(block);
+        continue;
+      }
+      const list = line.match(/^(\s*)([-*]|\d+\.)\s+(.+)$/);
+      if (list) {
+        const ordered = /\d+\./.test(list[2]);
+        const ul = document.createElement(ordered ? 'ol' : 'ul');
+        while (i < lines.length) {
+          const item = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.+)$/);
+          if (!item || (/\d+\./.test(item[2]) !== ordered)) break;
+          const li = document.createElement('li');
+          appendInlineMarkdown(li, item[3]);
+          ul.appendChild(li);
+          i += 1;
+        }
+        el.appendChild(ul);
+        continue;
+      }
+      const paragraph = [];
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s+|```|>\s?|[-*]\s+|\d+\.\s+)/.test(lines[i])) {
+        paragraph.push(lines[i]);
+        i += 1;
+      }
+      const p = document.createElement('p');
+      appendInlineMarkdown(p, paragraph.join(' '));
+      el.appendChild(p);
+    }
+  } catch {
+    el.classList.remove('md-doc');
+    el.textContent = text || '';
+  }
+}
 function approvalDomId(id) {
   return 'approval-' + encodeURIComponent(id).replace(/%/g, '_');
 }
@@ -816,7 +1005,7 @@ chatLogEl.addEventListener('scroll', () => {
 }, {passive: true});
 chatLogEl.addEventListener('wheel', () => { chatFollow.enabled = false; }, {passive: true});
 chatLogEl.addEventListener('touchmove', () => { chatFollow.enabled = false; }, {passive: true});
-function appendMsg(cls, who, text) {
+function appendMsg(cls, who, text, opts = {}) {
   clearChatEmpty();
   const log = document.getElementById('chatLog');
   const div = document.createElement('div');
@@ -826,7 +1015,9 @@ function appendMsg(cls, who, text) {
     ? '<svg class="spark-inline" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 0c1 7.2 4.8 11 12 12-7.2 1-11 4.8-12 12-1-7.2-4.8-11-12-12 7.2-1 11-4.8 12-12z"/></svg>'
     : '';
   div.innerHTML = who ? `<div class="who">${sparkSvg}${esc(who)}</div><div class="body"></div>` : '<div class="body"></div>';
-  div.querySelector('.body').textContent = text || '';
+  const body = div.querySelector('.body');
+  if (opts.markdown) renderMarkdownInto(body, text || '');
+  else body.textContent = text || '';
   log.appendChild(div);
   followChatOutput();
   return div;
@@ -849,28 +1040,32 @@ function handleProgress(p) {
     state.metrics.thinking += 1;
     updateMetrics();
     currentThinking += p.delta || '';
-    if (currentThinkingDiv) currentThinkingDiv.querySelector('.body').textContent = currentThinking;
-    followChatOutput();
+    activityState.thinking = currentThinking;
+    setActivity('思考中', activityState.detail);
     setStatus('思考中');
   } else if (p.kind === 'tool_call_start') {
     state.metrics.tools += 1;
     updateMetrics();
-    setStatus(`调用工具：${toolName(p)}`);
-    appendMsg('tool', 'tool_call_start', `${toolName(p)}\nargv: ${summarize(toolArgv(p))}`);
+    const name = toolName(p);
+    setStatus(`调用工具：${name}`);
+    setActivity(`调用工具：${name}`, `argv: ${summarize(toolArgv(p))}`);
   } else if (p.kind === 'tool_call_end') {
     const ok = p.meta?.ok ?? p.ok;
-    setStatus(`工具结束：${toolName(p)}`);
-    appendMsg('tool', 'tool_call_end', `${ok === false ? 'FAILED' : 'OK'} ${toolName(p)}\nresult: ${summarize(p.text ?? p.result ?? p.output ?? p.meta)}`);
+    const name = toolName(p);
+    setStatus(`工具结束：${name}`);
+    setActivity(`工具结束：${name}`, `${ok === false ? 'FAILED' : 'OK'} ${name}\nresult: ${summarize(p.text ?? p.result ?? p.output ?? p.meta)}`);
   } else if (p.kind === 'approval_required') {
     renderApproval(p);
   } else if (p.kind === 'approval_resolved') {
     resolveApproval(p);
   } else if (p.kind === 'error') {
     setStatus('错误');
+    setActivity('错误', p.text || p.message || '未知错误');
     appendMsg('error', 'error', p.text || p.message || '未知错误');
   } else {
-    setStatus(p.kind || '运行中');
-    appendMsg('event', '', `${p.kind || 'progress'}`);
+    const label = p.kind || '运行中';
+    setStatus(label);
+    setActivity(label, p.text || summarize(p.meta || ''));
   }
 }
 
@@ -891,8 +1086,8 @@ async function sendAsk() {
   chatFollow.enabled = true;
   appendMsg('user', 'operator', text);
   currentThinking = '';
-  currentThinkingDiv = appendMsg('thinking', 'thinking_delta', '');
-  const statusDiv = appendMsg('event', '', '调度中...');
+  currentThinkingDiv = null;
+  resetActivity();
   setStatus('调度中');
 
   try {
@@ -902,7 +1097,7 @@ async function sendAsk() {
       body: JSON.stringify({text, user: 'web', session_id: SESSION_ID}),
     });
     if (!resp.ok) {
-      statusDiv.textContent = `HTTP ${resp.status}`;
+      setActivity('请求失败', `HTTP ${resp.status}`);
       setStatus('请求失败');
       return;
     }
@@ -952,7 +1147,8 @@ function handleSseFrame(frame) {
     const trace = p.trace_id ? String(p.trace_id) : '-';
     document.getElementById('traceView').textContent = trace === '-' ? '—' : trace.slice(0, 12);
     setStatus(p.denied ? '已被护栏拦截' : '完成');
-    appendMsg('agent', 'agent · final', p.text || '(空)');
+    setActivity(p.denied ? '已被护栏拦截' : '完成', p.text ? '最终答复已输出到会话。' : '无最终文本。');
+    appendMsg('agent', 'agent · final', p.text || '(空)', {markdown: true});
     if (p.denied) appendMsg('error', 'safety', '被安全护栏拦截');
   } else {
     handleProgress({kind: event, ...p});
@@ -968,6 +1164,7 @@ function renderApproval(p) {
   updateMetrics();
   updateApprovalStatus();
   setStatus('等待人工审核');
+  setActivity('等待人工审核', p.title || '需要人工审核');
   appendMsg('error', 'approval_required', p.title || '需要人工审核');
 
   const dock = document.getElementById('approvalDock');
@@ -1075,8 +1272,8 @@ function resolveApproval(p) {
     card.classList.add('resolved');
     card.querySelector('.approval-actions').innerHTML = `<span class="pill">${esc(p.decision || p.status || 'resolved')}</span>`;
   }
-  appendMsg('event', '', `approval_resolved ${id}: ${p.decision || p.status || 'resolved'}`);
   setStatus(state.pendingApprovals.size ? '等待人工审核' : '运行中');
+  setActivity(state.pendingApprovals.size ? '等待人工审核' : '运行中', `approval_resolved ${id}: ${p.decision || p.status || 'resolved'}`);
 }
 
 /* ---- POST /api/sessions/{id}/reset ---- */
@@ -1101,6 +1298,10 @@ async function resetSession() {
      </div>`;
   state.pendingApprovals.clear();
   state.metrics = {thinking: 0, tools: 0, approvals: 0};
+  activityState.title = '空闲';
+  activityState.detail = '等待任务';
+  activityState.thinking = '';
+  renderActivity();
   updateApprovalStatus();
   updateMetrics();
   setStatus('空闲');
@@ -1190,11 +1391,8 @@ if (location.search.includes('demo')) {
   document.getElementById('traceView').textContent = 'a3f9c1b7e204';
   clearChatEmpty();
   appendMsg('user', 'operator', '检查 nginx 服务状态，并清理 /var/log 下 30 天前的归档日志。');
-  const th = appendMsg('thinking', 'thinking', '先用只读工具确认 nginx 在跑、磁盘水位，再列出待清理文件清单，最后才执行删除——删除属高风险，需人工确认。');
-  appendMsg('tool', 'tool_call_start', 'service_status\nargv: {"name":"nginx"}');
-  appendMsg('tool', 'tool_call_end', 'OK service_status\nresult: active (running) since Mon 2026-06-01; 5 days ago · workers=4');
-  appendMsg('tool', 'tool_call_start', 'disk_usage\nargv: {"path":"/var/log"}');
-  appendMsg('tool', 'tool_call_end', 'OK disk_usage\nresult: /var/log 4.7G / 20G (24%) · archives older-than-30d: 38 files, 1.2G');
+  activityState.thinking = '先用只读工具确认 nginx 在跑、磁盘水位，再列出待清理文件清单，最后才执行删除——删除属高风险，需人工确认。';
+  setActivity('工具结束：disk_usage', 'OK disk_usage\nresult: /var/log 4.7G / 20G (24%) · archives older-than-30d: 38 files, 1.2G');
   state.metrics = {thinking: 6, tools: 2, approvals: 1}; updateMetrics();
   renderApproval({
     id: 'apr_7c12',
@@ -1203,7 +1401,7 @@ if (location.search.includes('demo')) {
     body: 'find /var/log -name "*.gz" -mtime +30 -delete   # 38 files · ~1.2G',
     summary_lines: ['影响范围：/var/log/*.gz（38 个文件，约 1.2G）', '不可逆：文件将被永久删除', '建议：先确认无审计留存需求'],
   });
-  appendMsg('agent', 'agent · final', '已确认 nginx 正常运行（active, 4 worker），/var/log 使用率 24%。检出 38 个 30 天前归档共约 1.2G，删除操作为高风险，已提交右侧审批卡片，请人工确认后执行。');
+  appendMsg('agent', 'agent · final', '已确认 nginx 正常运行（active, 4 worker），/var/log 使用率 24%。检出 38 个 30 天前归档共约 1.2G，删除操作为高风险，已提交右侧审批卡片，请人工确认后执行。', {markdown: true});
   /* ?demo=working —— 定格在「agent 行动中」状态，预览星芒脉冲动画 */
   if (location.search.includes('working')) {
     setStatus('思考中');

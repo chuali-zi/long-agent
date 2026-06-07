@@ -223,3 +223,85 @@ def test_static_frontend_handles_sse_approval_choice_and_final(chromium_page):
     assert json.loads(ask_payload)["text"] == "检查日志"
     assert any(method == "POST" and url.endswith("/api/approvals/apr-browser/approve") for method, url, _ in calls)
     assert any(method == "POST" and url.endswith("/api/choices/choice-browser/select") for method, url, _ in calls)
+
+
+def test_progress_updates_single_status_column_without_tool_log_rows(chromium_page):
+    page = chromium_page
+
+    def handle_request(route: Route) -> None:
+        request = route.request
+        if request.url == APP_URL:
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=INDEX_HTML.read_text(encoding="utf-8"),
+            )
+            return
+        if request.url.endswith("/api/health"):
+            _json_response(route, {"status": "ok", "version": "0.1.0-test"})
+            return
+        route.fulfill(status=404, body="unexpected api route")
+
+    page.route("**/*", handle_request)
+    page.goto(APP_URL)
+    page.locator("#askInput").wait_for(state="visible", timeout=5000)
+
+    page.evaluate(
+        """() => {
+          clearChatEmpty();
+          handleProgress({kind: 'thinking_delta', delta: '先确认服务和磁盘水位'});
+          handleProgress({kind: 'tool_call_start', tool: 'disk_usage', argv: {path: '/var/log'}});
+          handleProgress({kind: 'tool_call_end', tool: 'disk_usage', meta: {ok: true}, text: '24%'});
+          handleProgress({kind: 'tool_call_start', tool: 'service_status', argv: {name: 'nginx'}});
+        }"""
+    )
+
+    detail = page.locator("#agentStatusDetail")
+    detail.get_by_text("service_status").wait_for(timeout=5000)
+    assert "先确认服务和磁盘水位" in detail.inner_text()
+    assert "tools 2" in page.locator("#eventMetrics").inner_text()
+    assert page.locator(".msg.tool").count() == 0
+    assert page.locator(".msg.event").count() == 0
+
+
+def test_agent_final_markdown_renders_safely_without_new_runtime(chromium_page):
+    page = chromium_page
+
+    def handle_request(route: Route) -> None:
+        request = route.request
+        if request.url == APP_URL:
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=INDEX_HTML.read_text(encoding="utf-8"),
+            )
+            return
+        url = request.url
+        if url.endswith("/api/health"):
+            _json_response(route, {"status": "ok", "version": "0.1.0-test"})
+        elif url.endswith("/api/ask/stream"):
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/event-stream; charset=utf-8"},
+                body=(
+                    "event: final\n"
+                    "data: {\"trace_id\":\"trace-md\",\"denied\":false,"
+                    "\"text\":\"# 巡检结论\\n\\n- **nginx**: 正常\\n- `disk_usage`: 24%\\n\\n"
+                    "<script>window.__kyagent_xss = true</script>\"}\n\n"
+                ),
+            )
+        else:
+            route.fulfill(status=404, body="unexpected api route")
+
+    page.route("**/*", handle_request)
+    page.goto(APP_URL)
+    page.locator("#askInput").fill("输出 markdown")
+    page.locator("#sendBtn").click()
+
+    body = page.locator(".msg.agent .body")
+    body.locator("h1").get_by_text("巡检结论").wait_for(timeout=5000)
+    assert body.locator("li").count() == 2
+    assert body.locator("strong").get_by_text("nginx").is_visible()
+    assert body.locator("code").get_by_text("disk_usage").is_visible()
+    assert page.locator(".msg.agent script").count() == 0
+    assert page.evaluate("window.__kyagent_xss") is None
