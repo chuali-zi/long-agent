@@ -1,0 +1,1 @@
+2026-06-08: 更新 index.html 到 ref_v2 风格：右侧拆分人工审核与 Plan，审批/选择改为浮动弹层，遥测舱支持拖拽记忆位置，Markdown 增强 GFM 表格。未引入 ref_v2 mock fetch，保持真实 /api 接口。Plan 接入现有后端 plan_start/plan_snapshot/plan_step_* SSE，并用 final.plan_id 拉取 /api/plans/{id} 兜底。

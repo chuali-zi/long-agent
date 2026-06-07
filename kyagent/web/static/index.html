@@ -176,10 +176,10 @@
      4. 遥测舱 —— 固定左下角的「抽象星座」（Anthropic 风，收纳全部状态）
         收起：手绘星座节点 + 当前状态；展开：health/session/trace/审核/事件/token
      ===================================================================== */
-  .telemetry { position: fixed; right: 22px; bottom: 22px; z-index: 45; font-family: var(--sans); }
+  .telemetry { position: fixed; left: 22px; bottom: 22px; z-index: 45; font-family: var(--sans); }
 
   .telemetry-orb {
-    display: flex; align-items: center; gap: 11px; cursor: pointer;
+    display: flex; align-items: center; gap: 11px; cursor: grab; touch-action: none;
     background: rgba(250,246,236,.92); border: 1px solid var(--line);
     border-radius: 99px; padding: 8px 16px 8px 9px; color: var(--ink);
     box-shadow: var(--shadow); backdrop-filter: blur(12px) saturate(1.1);
@@ -213,13 +213,20 @@
 
   /* 展开详情 */
   .telemetry-pop {
-    position: absolute; right: 0; bottom: calc(100% + 12px); width: 318px;
+    position: absolute; left: 0; right: auto; bottom: calc(100% + 12px); width: 318px;
     background: var(--paper); border: 1px solid var(--line); border-radius: 16px;
     padding: 16px; box-shadow: var(--shadow-lg);
-    opacity: 0; transform: translateY(8px) scale(.98); transform-origin: bottom right;
+    opacity: 0; transform: translateY(8px) scale(.98); transform-origin: bottom left;
     pointer-events: none; transition: opacity .18s, transform .18s;
   }
   .telemetry.open .telemetry-pop { opacity: 1; transform: none; pointer-events: auto; }
+  .telemetry.dragging .telemetry-orb { cursor: grabbing; }
+  .telemetry.dragging .telemetry-orb:hover { transform: none; }
+  .telemetry.dragging .telemetry-pop { display: none; }
+  .telemetry.flip-left .telemetry-pop { left: auto; right: 0; transform-origin: bottom right; }
+  .telemetry.flip-down .telemetry-pop { bottom: auto; top: calc(100% + 12px); }
+  .telemetry.flip-down:not(.flip-left) .telemetry-pop { transform-origin: top left; }
+  .telemetry.flip-down.flip-left .telemetry-pop { transform-origin: top right; }
   .telemetry-pop .pop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
   .telemetry-pop .pop-head .eyebrow { font-size: 10px; }
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
@@ -354,6 +361,26 @@
   }
   .md-doc pre code { padding: 0; border: 0; background: transparent; font-size: inherit; }
   .md-doc a { color: var(--clay-deep); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  .md-doc .md-table-wrap {
+    margin: .8em 0; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    border: 1px solid rgba(164,72,42,.24); border-radius: 9px; background: rgba(255,255,255,.34);
+  }
+  .md-doc table { width: 100%; border-collapse: collapse; font-size: .95em; margin: 0; }
+  .md-doc thead th {
+    position: static; text-transform: none; letter-spacing: 0;
+    font-size: .96em; font-weight: 700; color: #3f1e12; white-space: nowrap;
+    background: rgba(255,255,255,.55); padding: 8px 12px;
+    border-bottom: 1px solid rgba(164,72,42,.3);
+  }
+  .md-doc tbody td {
+    padding: 7px 12px; color: #4a2417; vertical-align: top;
+    border-top: 1px solid rgba(164,72,42,.14);
+  }
+  .md-doc tbody tr:hover { background: rgba(255,255,255,.34); }
+  .md-doc th + th, .md-doc td + td { border-left: 1px solid rgba(164,72,42,.12); }
+  .md-doc td code, .md-doc th code {
+    background: rgba(255,255,255,.62); color: var(--clay-ink); border-color: rgba(164,72,42,.2);
+  }
 
   /* thinking —— 浅笔记体 */
   .msg.thinking {
@@ -425,10 +452,69 @@
      7. 侧栏：审批 / 事件
      ===================================================================== */
   aside .panel { position: relative; }
-  #approvalDock { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 4px; }
+  aside .approval-card { flex: 1; }
+  aside .plan-card { flex: 2; }
+  #approvalDock { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; }
+  #approvalDock .dock-empty { padding: 6px 6px; }
+  #approvalDock .dock-empty svg { width: 46px; height: 38px; margin-bottom: 4px; }
+  #approvalDock .dock-empty .d { font-size: 12px; }
   .dock-empty { text-align: center; color: var(--muted); padding: 14px 6px; }
   .dock-empty svg { width: 86px; height: 70px; color: var(--clay); opacity: .82; margin-bottom: 6px; }
   .dock-empty .d { font-size: 12.5px; line-height: 1.5; }
+
+  .approval-layer {
+    position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 12px;
+    pointer-events: none;
+  }
+  .approval-layer:empty { display: none; }
+  .approval-layer > * { pointer-events: auto; }
+  @keyframes cardPopIn {
+    0%   { opacity: 0; transform: translateY(-14px) scale(.92); }
+    62%  { opacity: 1; transform: translateY(3px) scale(1.015); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes cardPopOut {
+    0%   { opacity: 1; transform: none; }
+    100% { opacity: 0; transform: translateY(-8px) scale(.96); }
+  }
+  .approval-layer .pop-in { animation: cardPopIn .42s cubic-bezier(.34,1.56,.64,1); }
+  .approval-layer .approval-panel.pop-out,
+  .approval-layer .choice-panel.pop-out { animation: cardPopOut .26s ease forwards !important; }
+
+  #planDock { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 4px; }
+  .plan-list { display: flex; flex-direction: column; }
+  .plan-step {
+    display: flex; align-items: flex-start; gap: 11px;
+    padding: 9px 9px; border-radius: 9px; transition: background .15s;
+  }
+  .plan-step + .plan-step { border-top: 1px solid var(--line-soft); }
+  .plan-step:hover { background: var(--paper-3); }
+  .plan-check {
+    flex: none; width: 18px; height: 18px; margin-top: 1px; position: relative;
+    border: 1.7px solid var(--line); border-radius: 5px; background: var(--paper-2);
+    transition: border-color .18s, background .18s;
+  }
+  .plan-num { flex: none; width: 18px; text-align: right; color: var(--muted); font: 700 11px var(--mono); margin-top: 2px; }
+  .plan-text { font-size: 13.5px; line-height: 1.5; color: var(--ink-soft); overflow-wrap: anywhere; }
+  .plan-step[data-status="running"] .plan-check { border-color: var(--clay); }
+  .plan-step[data-status="running"] .plan-check::after {
+    content: ""; position: absolute; inset: 3px; border-radius: 2px;
+    background: var(--clay); animation: planPulse 1s ease-in-out infinite;
+  }
+  .plan-step[data-status="running"] .plan-text { color: var(--ink); font-weight: 600; }
+  .plan-step[data-status="running"] .plan-num { color: var(--clay); }
+  @keyframes planPulse { 0%,100%{ opacity:.3; transform:scale(.6);} 50%{ opacity:1; transform:scale(1);} }
+  .plan-step[data-status="done"] .plan-check { border-color: var(--sage); background: var(--sage); }
+  .plan-step[data-status="done"] .plan-check::after {
+    content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 9px;
+    border: solid #f7faf4; border-width: 0 2px 2px 0; transform: rotate(42deg);
+  }
+  .plan-step[data-status="done"] .plan-text { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+  .plan-step[data-status="failed"] .plan-check { border-color: var(--danger); background: var(--danger-soft); }
+  .plan-step[data-status="failed"] .plan-check::after {
+    content: "x"; position: absolute; inset: 0; display: grid; place-items: center;
+    color: var(--danger); font: 800 14px/1 var(--sans);
+  }
 
   /* 审批卡片 —— 红黏土告警纸，温和脉冲 */
   .approval-panel {
@@ -605,9 +691,9 @@
       </div>
 
       <aside>
-        <div class="panel">
-          <div class="panel-head"><span class="eyebrow">人工审核</span></div>
-          <!-- id=approvalDock：审批 / 选择卡片注入处 -->
+        <div class="panel approval-card">
+          <div class="panel-head"><span class="eyebrow">人工审核</span><h3 style="margin-left:-2px">待审批 <span class="count" id="approvalPanelCount"></span></h3></div>
+          <!-- id=approvalDock：待命占位；审批 / 选择卡片改由 #approvalLayer 浮动弹出 -->
           <div id="approvalDock">
             <div class="dock-empty">
               <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -615,6 +701,26 @@
                 <path d="M48 52l9 9 18-19"/>
               </svg>
               <div class="d">高风险操作会在这里<br>弹出审批卡片。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel plan-card">
+          <div class="panel-head">
+            <span class="eyebrow">执行计划</span>
+            <h3 style="margin-left:-2px">Plan <span class="count" id="planCount"></span></h3>
+          </div>
+          <div id="planDock">
+            <div class="dock-empty">
+              <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="30" y="16" width="60" height="74" rx="8"/>
+                <path d="M48 12h24v10H48z"/>
+                <path d="M42 40h12" opacity=".5"/><path d="M62 40h16"/>
+                <path d="M42 56h12" opacity=".5"/><path d="M62 56h16"/>
+                <path d="M42 72h12" opacity=".5"/><path d="M62 72h16"/>
+                <path d="M44 39l3 3 5-6" opacity=".9"/>
+              </svg>
+              <div class="d">Agent 接到任务后，<br>执行计划会逐步显示在这里。</div>
             </div>
           </div>
         </div>
@@ -677,6 +783,8 @@
     <div class="panel" id="traceDetail"><span class="help">点击上方任意 trace_id 查看推理链。</span></div>
   </section>
 </main>
+
+<div class="approval-layer" id="approvalLayer"></div>
 
 <!-- ============================================================================
      遥测舱 · 抽象星座（固定左下角）—— 收纳原顶部全部状态
@@ -788,6 +896,68 @@ document.addEventListener('click', e => {
   if (_tele.classList.contains('open') && !_tele.contains(e.target)) _tele.classList.remove('open');
 });
 
+(function makeOrbDraggable() {
+  const orb = document.getElementById('telemetryOrb');
+  let start = null, moved = false;
+  function clampApply(left, top) {
+    const w = _tele.offsetWidth, h = _tele.offsetHeight, m = 8;
+    left = Math.max(m, Math.min(left, window.innerWidth - w - m));
+    top = Math.max(m, Math.min(top, window.innerHeight - h - m));
+    _tele.style.left = left + 'px';
+    _tele.style.top = top + 'px';
+    _tele.style.right = 'auto';
+    _tele.style.bottom = 'auto';
+    _tele.classList.toggle('flip-down', top < window.innerHeight / 2);
+    _tele.classList.toggle('flip-left', left > window.innerWidth / 2);
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem('ky_orb_pos') || 'null');
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+      requestAnimationFrame(() => clampApply(saved.left, saved.top));
+    }
+  } catch (_) {}
+  orb.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const r = _tele.getBoundingClientRect();
+    start = { x: e.clientX, y: e.clientY, ox: r.left, oy: r.top };
+    moved = false;
+    try { orb.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  orb.addEventListener('pointermove', e => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (!moved && Math.hypot(dx, dy) < 4) return;
+    moved = true;
+    _tele.classList.add('dragging');
+    _tele.classList.remove('open');
+    clampApply(start.ox + dx, start.oy + dy);
+  });
+  function endDrag(e) {
+    if (!start) return;
+    try { orb.releasePointerCapture(e.pointerId); } catch (_) {}
+    _tele.classList.remove('dragging');
+    if (moved) {
+      const r = _tele.getBoundingClientRect();
+      localStorage.setItem('ky_orb_pos', JSON.stringify({ left: r.left, top: r.top }));
+      orb.addEventListener('click', swallowClick, true);
+    }
+    start = null;
+  }
+  function swallowClick(ev) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    orb.removeEventListener('click', swallowClick, true);
+  }
+  orb.addEventListener('pointerup', endDrag);
+  orb.addEventListener('pointercancel', endDrag);
+  window.addEventListener('resize', () => {
+    if (_tele.style.left) {
+      const r = _tele.getBoundingClientRect();
+      clampApply(r.left, r.top);
+    }
+  });
+})();
+
 /* ---- GET /api/health ---- */
 function setBanner(cls, text) {
   const b = document.getElementById('banner');
@@ -813,9 +983,40 @@ function setAgentWorking(on) {
 function updateApprovalStatus() {
   const n = state.pendingApprovals.size;
   document.getElementById('approvalView').textContent = n ? `${n} 个待审核` : '无待处理';
+  const pc = document.getElementById('approvalPanelCount');
+  if (pc) pc.textContent = n ? String(n) : '';
+  const dock = document.getElementById('approvalDock');
+  if (dock && !n) {
+    dock.innerHTML =
+      `<div class="dock-empty">
+        <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/><path d="M48 52l9 9 18-19"/>
+        </svg>
+        <div class="d">高风险操作会在这里<br>弹出审批卡片。</div>
+      </div>`;
+  } else if (dock && n) {
+    dock.innerHTML =
+      `<div class="dock-empty" style="color:var(--clay-deep)">
+        <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/><path d="M48 52l9 9 18-19"/>
+        </svg>
+        <div class="d"><b>${n}</b> 张审批卡片已弹出，<br>请在上方处理。</div>
+      </div>`;
+  }
   /* 同步星座「审核」节点：有待审则点亮脉动 */
   _tele.classList.toggle('pend', n > 0);
 }
+function positionApprovalLayer() {
+  const panel = document.querySelector('.approval-card');
+  const layer = document.getElementById('approvalLayer');
+  if (!panel || !layer) return;
+  const r = panel.getBoundingClientRect();
+  layer.style.top = r.top + 'px';
+  layer.style.left = r.left + 'px';
+  layer.style.width = r.width + 'px';
+}
+window.addEventListener('resize', positionApprovalLayer);
+window.addEventListener('scroll', positionApprovalLayer, true);
 function updateMetrics() {
   document.getElementById('eventMetrics').innerHTML =
     `<span class="pill">thinking ${state.metrics.thinking}</span> ` +
@@ -889,7 +1090,27 @@ function appendInlineMarkdown(parent, text) {
   if (last < src.length) parent.appendChild(document.createTextNode(src.slice(last)));
 }
 function markdownLooksRenderable(text) {
-  return /(^|\n)(#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s+|```)|(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/)/.test(text || '');
+  return /(^|\n)(#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s+|```)|(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/)/.test(text || '')
+    || hasMarkdownTable(text);
+}
+function isTableSeparator(line) {
+  if (line == null) return false;
+  const s = line.trim();
+  if (!s.includes('-') || /[^\s|:-]/.test(s)) return false;
+  const cells = s.replace(/^\|/, '').replace(/\|$/, '').split('|');
+  if (!cells.length) return false;
+  return cells.every(c => /^\s*:?-{2,}:?\s*$/.test(c));
+}
+function splitTableRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+}
+function hasMarkdownTable(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i - 1].includes('|') && isTableSeparator(lines[i])
+        && splitTableRow(lines[i - 1]).length === splitTableRow(lines[i]).length) return true;
+  }
+  return false;
 }
 function renderMarkdownInto(el, text) {
   try {
@@ -955,6 +1176,51 @@ function renderMarkdownInto(el, text) {
         el.appendChild(ul);
         continue;
       }
+      if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        const header = splitTableRow(line);
+        const sep = splitTableRow(lines[i + 1]);
+        if (header.length >= 1 && sep.length === header.length) {
+          const aligns = sep.map(c => {
+            const l = c.trim().startsWith(':'), r = c.trim().endsWith(':');
+            return l && r ? 'center' : r ? 'right' : l ? 'left' : '';
+          });
+          const rows = [];
+          let j = i + 2;
+          while (j < lines.length && lines[j].trim() && lines[j].includes('|')) {
+            rows.push(splitTableRow(lines[j]));
+            j += 1;
+          }
+          const table = document.createElement('table');
+          const thead = document.createElement('thead');
+          const htr = document.createElement('tr');
+          header.forEach((h, idx) => {
+            const th = document.createElement('th');
+            if (aligns[idx]) th.style.textAlign = aligns[idx];
+            appendInlineMarkdown(th, h);
+            htr.appendChild(th);
+          });
+          thead.appendChild(htr);
+          table.appendChild(thead);
+          const tbody = document.createElement('tbody');
+          rows.forEach(r => {
+            const tr = document.createElement('tr');
+            for (let idx = 0; idx < header.length; idx += 1) {
+              const td = document.createElement('td');
+              if (aligns[idx]) td.style.textAlign = aligns[idx];
+              appendInlineMarkdown(td, r[idx] ?? '');
+              tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+          });
+          table.appendChild(tbody);
+          const wrap = document.createElement('div');
+          wrap.className = 'md-table-wrap';
+          wrap.appendChild(table);
+          el.appendChild(wrap);
+          i = j;
+          continue;
+        }
+      }
       const paragraph = [];
       while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s+|```|>\s?|[-*]\s+|\d+\.\s+)/.test(lines[i])) {
         paragraph.push(lines[i]);
@@ -971,6 +1237,104 @@ function renderMarkdownInto(el, text) {
 }
 function approvalDomId(id) {
   return 'approval-' + encodeURIComponent(id).replace(/%/g, '_');
+}
+const planState = { steps: [], planId: '' };
+function planEmptyHtml() {
+  return `<div class="dock-empty">
+      <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="30" y="16" width="60" height="74" rx="8"/><path d="M48 12h24v10H48z"/>
+        <path d="M42 40h12" opacity=".5"/><path d="M62 40h16"/>
+        <path d="M42 56h12" opacity=".5"/><path d="M62 56h16"/>
+        <path d="M42 72h12" opacity=".5"/><path d="M62 72h16"/>
+        <path d="M44 39l3 3 5-6" opacity=".9"/>
+      </svg>
+      <div class="d">Agent 接到任务后，<br>执行计划会逐步显示在这里。</div>
+    </div>`;
+}
+function normalizePlanStatus(status) {
+  if (status === 'complete' || status === 'done' || status === 'skipped') return 'done';
+  if (status === 'failed') return 'failed';
+  if (status === 'running') return 'running';
+  return 'pending';
+}
+function normalizePlanSteps(steps) {
+  return (steps || []).map((s, i) => {
+    if (typeof s === 'string') return { id: 'step-' + i, text: s, status: 'pending' };
+    const id = s.id ?? s.step_id ?? ('step-' + i);
+    const detail = s.detail ? ` - ${s.detail}` : '';
+    const text = s.text ?? s.title ?? String(s);
+    return { id, text: text + detail, status: normalizePlanStatus(s.status) };
+  });
+}
+function updatePlanCount() {
+  const el = document.getElementById('planCount');
+  if (!el) return;
+  const total = planState.steps.length;
+  const done = planState.steps.filter(s => s.status === 'done').length;
+  el.textContent = total ? `${done}/${total}` : '';
+}
+function drawPlan() {
+  const dock = document.getElementById('planDock');
+  if (!dock) return;
+  if (!planState.steps.length) { dock.innerHTML = planEmptyHtml(); updatePlanCount(); return; }
+  const list = document.createElement('div');
+  list.className = 'plan-list';
+  planState.steps.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'plan-step';
+    row.dataset.status = s.status || 'pending';
+    const num = document.createElement('span');
+    num.className = 'plan-num';
+    num.textContent = (i + 1);
+    const chk = document.createElement('span');
+    chk.className = 'plan-check';
+    const txt = document.createElement('span');
+    txt.className = 'plan-text';
+    txt.textContent = s.text;
+    row.append(num, chk, txt);
+    list.appendChild(row);
+  });
+  dock.replaceChildren(list);
+  updatePlanCount();
+}
+function renderPlan(steps, planId = '') {
+  planState.steps = normalizePlanSteps(steps);
+  if (planId) planState.planId = planId;
+  drawPlan();
+}
+function setPlanStep(id, status) {
+  const stepId = id ?? '';
+  const s = planState.steps.find(x => x.id === stepId);
+  if (s) { s.status = normalizePlanStatus(status); drawPlan(); }
+}
+function renderBackendPlan(plan) {
+  if (!plan) return;
+  renderPlan(plan.steps || [], plan.plan_id || planState.planId);
+}
+function handlePlanProgress(p) {
+  if (p.steps) renderPlan(p.steps, p.plan_id || p.id || '');
+  const plan = p.meta?.plan || p.plan;
+  if (plan) renderBackendPlan(plan);
+  const planId = p.meta?.plan_id || p.plan_id || plan?.plan_id;
+  if (planId) planState.planId = planId;
+  const stepId = p.meta?.step_id || p.step_id || p.id;
+  if (!plan && stepId && p.status) setPlanStep(stepId, p.status);
+}
+async function loadPlan(planId) {
+  if (!planId) return;
+  try {
+    const r = await fetch(`/api/plans/${encodeURIComponent(planId)}`, {headers: apiHeaders()});
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.plan) renderBackendPlan(j.plan);
+  } catch (_) {}
+}
+function resetPlan() {
+  planState.steps = [];
+  planState.planId = '';
+  const dock = document.getElementById('planDock');
+  if (dock) dock.innerHTML = planEmptyHtml();
+  updatePlanCount();
 }
 /* 首条真实消息进来时，移除空状态占位 */
 function clearChatEmpty() {
@@ -1056,6 +1420,8 @@ function handleProgress(p) {
     setActivity(`工具结束：${name}`, `${ok === false ? 'FAILED' : 'OK'} ${name}\nresult: ${summarize(p.text ?? p.result ?? p.output ?? p.meta)}`);
   } else if (p.kind === 'approval_required') {
     renderApproval(p);
+  } else if (p.kind === 'plan' || p.kind === 'plan_step' || p.kind === 'plan_start' || p.kind === 'plan_snapshot' || p.kind === 'plan_step_start' || p.kind === 'plan_step_update' || p.kind === 'plan_step_end') {
+    handlePlanProgress(p);
   } else if (p.kind === 'approval_resolved') {
     resolveApproval(p);
   } else if (p.kind === 'error') {
@@ -1088,6 +1454,7 @@ async function sendAsk() {
   currentThinking = '';
   currentThinkingDiv = null;
   resetActivity();
+  resetPlan();
   setStatus('调度中');
 
   try {
@@ -1150,6 +1517,7 @@ function handleSseFrame(frame) {
     setActivity(p.denied ? '已被护栏拦截' : '完成', p.text ? '最终答复已输出到会话。' : '无最终文本。');
     appendMsg('agent', 'agent · final', p.text || '(空)', {markdown: true});
     if (p.denied) appendMsg('error', 'safety', '被安全护栏拦截');
+    if (p.plan_id) loadPlan(p.plan_id);
   } else {
     handleProgress({kind: event, ...p});
   }
@@ -1167,14 +1535,15 @@ function renderApproval(p) {
   setActivity('等待人工审核', p.title || '需要人工审核');
   appendMsg('error', 'approval_required', p.title || '需要人工审核');
 
-  const dock = document.getElementById('approvalDock');
-  const empty = dock.querySelector('.dock-empty');
-  if (empty) empty.remove();
+  const layer = document.getElementById('approvalLayer');
   const old = document.getElementById(approvalDomId(id));
   if (old) old.remove();
   const div = document.createElement('div');
-  div.className = 'approval-panel';
+  div.className = 'approval-panel pop-in';
   div.id = approvalDomId(id);
+  div.addEventListener('animationend', function onPop(e) {
+    if (e.animationName === 'cardPopIn') { div.classList.remove('pop-in'); div.removeEventListener('animationend', onPop); }
+  });
   const risk = p.risk || 'unknown';
   const body = p.body || p.cmd || p.command || p.text || '';
   const summary = Array.isArray(p.summary_lines) ? p.summary_lines : [];
@@ -1196,7 +1565,9 @@ function renderApproval(p) {
   div.querySelectorAll('button[data-decision]').forEach(btn => {
     btn.onclick = () => decideApproval(id, btn.dataset.decision);
   });
-  dock.prepend(div);
+  positionApprovalLayer();
+  layer.prepend(div);
+  updateApprovalStatus();
 }
 
 /* ---- 选择卡片渲染（POST /api/choices/{id}/select） ---- */
@@ -1207,18 +1578,20 @@ function renderChoice(p) {
   const id = p.choice_id;
   if (!id) return;
   setStatus('等待选择');
-  const dock = document.getElementById('approvalDock');
-  const empty = dock.querySelector('.dock-empty');
-  if (empty) empty.remove();
+  const layer = document.getElementById('approvalLayer');
   const div = document.createElement('div');
-  div.className = 'choice-panel';
+  div.className = 'choice-panel pop-in';
   div.id = choiceDomId(id);
+  div.addEventListener('animationend', function onPop(e) {
+    if (e.animationName === 'cardPopIn') { div.classList.remove('pop-in'); div.removeEventListener('animationend', onPop); }
+  });
   div.innerHTML = `<div class="label">choice_required</div><div class="approval-title">${esc(p.question)}</div>
     <div class="choice-actions">${(p.options || []).map(o => `<button class="ghost" type="button" data-value="${esc(o.value)}">${esc(o.label)}${o.description ? ` — ${esc(o.description)}` : ''}</button>`).join('')}</div>`;
   div.querySelectorAll('button').forEach(button => {
     button.onclick = () => selectChoice(id, button.dataset.value);
   });
-  dock.prepend(div);
+  positionApprovalLayer();
+  layer.prepend(div);
 }
 async function selectChoice(id, value) {
   const resp = await fetch(`/api/choices/${encodeURIComponent(id)}/select`, {
@@ -1234,7 +1607,16 @@ async function selectChoice(id, value) {
 }
 function resolveChoice(p) {
   const card = document.getElementById(choiceDomId(p.choice_id));
-  if (card) card.innerHTML = `<div class="label">choice_resolved</div><div class="approval-title">${esc(p.value || p.status)}</div>`;
+  if (card) {
+    card.innerHTML = `<div class="label">choice_resolved</div><div class="approval-title">${esc(p.value || p.status)}</div>`;
+    setTimeout(() => {
+      card.classList.add('pop-out');
+      let done = false;
+      const finish = () => { if (done) return; done = true; card.remove(); };
+      card.addEventListener('animationend', finish, {once: true});
+      setTimeout(finish, 360);
+    }, 900);
+  }
   setStatus('运行中');
 }
 
@@ -1270,7 +1652,15 @@ function resolveApproval(p) {
   updateApprovalStatus();
   if (card) {
     card.classList.add('resolved');
-    card.querySelector('.approval-actions').innerHTML = `<span class="pill">${esc(p.decision || p.status || 'resolved')}</span>`;
+    const act = card.querySelector('.approval-actions');
+    if (act) act.innerHTML = `<span class="pill">${esc(p.decision || p.status || 'resolved')}</span>`;
+    setTimeout(() => {
+      card.classList.add('pop-out');
+      let done = false;
+      const finish = () => { if (done) return; done = true; card.remove(); updateApprovalStatus(); };
+      card.addEventListener('animationend', finish, {once: true});
+      setTimeout(finish, 360);
+    }, 900);
   }
   setStatus(state.pendingApprovals.size ? '等待人工审核' : '运行中');
   setActivity(state.pendingApprovals.size ? '等待人工审核' : '运行中', `approval_resolved ${id}: ${p.decision || p.status || 'resolved'}`);
@@ -1295,13 +1685,15 @@ async function resetSession() {
          <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/><path d="M48 52l9 9 18-19"/>
        </svg>
        <div class="d">高风险操作会在这里<br>弹出审批卡片。</div>
-     </div>`;
+      </div>`;
+  document.getElementById('approvalLayer').replaceChildren();
   state.pendingApprovals.clear();
   state.metrics = {thinking: 0, tools: 0, approvals: 0};
   activityState.title = '空闲';
   activityState.detail = '等待任务';
   activityState.thinking = '';
   renderActivity();
+  resetPlan();
   updateApprovalStatus();
   updateMetrics();
   setStatus('空闲');
