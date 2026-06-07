@@ -648,8 +648,8 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_105_tools(self, registry):
-        assert len(registry.names()) == 105
+    def test_default_registry_has_124_tools(self, registry):
+        assert len(registry.names()) == 124
 
     def test_all_tools_have_description(self, registry):
         bad = [
@@ -708,8 +708,14 @@ class TestRegistry:
             "compl_file_hash", "compl_aide_check",    # compliance
             "la_arch_info", "la_world_check", "la_binary_compat",  # loongarch
             "log_vacuum", "log_delete_file", "process_kill",
-            "pkg_install", "pkg_update", "pkg_update_all", "pkg_security_upgrade",
-            "pkg_clean_cache", "pkg_remove", "fs_truncate", "fs_delete_file",  # write ops
+            "pkg_install", "pkg_update", "pkg_reinstall", "pkg_update_all",
+            "pkg_security_upgrade", "pkg_clean_cache", "pkg_rebuild_db",
+            "pkg_remove", "fs_truncate", "fs_delete_file",  # write ops
+            "git_status", "git_diff", "git_show",
+            "web_fetch_url", "osv_query_package", "github_issue_search",
+            "verify_pytest", "verify_ruff", "verify_script_syntax",
+            "docx_extract_text", "xlsx_list_sheets", "pdf_extract_text", "ocr_image_text",
+            "plan_list", "plan_get",
         }
         missing = expected - set(registry.names())
         assert not missing, f"missing tools: {missing}"
@@ -933,6 +939,29 @@ class TestWriteOperationTools:
     def test_pkg_update_requires_root(self):
         assert package_mod.PkgUpdateTool().requires_root is True
 
+    # ---- PkgReinstallTool ----
+
+    def test_pkg_reinstall_argv(self, rpm_family):
+        t = package_mod.PkgReinstallTool()
+        argv = _argv(t, {"name": "openssl"})
+        assert argv == ["dnf", "-y", "reinstall", "openssl"]
+
+    def test_pkg_reinstall_rejects_illegal_name(self):
+        t = package_mod.PkgReinstallTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "openssl; rm -rf /"})
+
+    def test_pkg_reinstall_rejects_space(self):
+        t = package_mod.PkgReinstallTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "open ssl"})
+
+    def test_pkg_reinstall_read_only_is_false(self):
+        assert package_mod.PkgReinstallTool().read_only is False
+
+    def test_pkg_reinstall_requires_root(self):
+        assert package_mod.PkgReinstallTool().requires_root is True
+
     # ---- PkgUpdateAllTool ----
 
     def test_pkg_update_all_argv(self, rpm_family):
@@ -983,6 +1012,28 @@ class TestWriteOperationTools:
 
     def test_pkg_clean_cache_requires_root(self):
         assert package_mod.PkgCleanCacheTool().requires_root is True
+
+    # ---- PkgRebuildDbTool ----
+
+    def test_pkg_rebuild_db_argv(self, rpm_family):
+        t = package_mod.PkgRebuildDbTool()
+        assert _argv(t, {}) == ["rpm", "--rebuilddb"]
+
+    def test_pkg_rebuild_db_rejects_extra_args(self, rpm_family):
+        t = package_mod.PkgRebuildDbTool()
+        with pytest.raises(ToolError):
+            t.validate({"name": "rpm"})
+
+    def test_pkg_rebuild_db_dpkg_raises(self, dpkg_family):
+        t = package_mod.PkgRebuildDbTool()
+        with pytest.raises(ToolError):
+            _argv(t, {})
+
+    def test_pkg_rebuild_db_read_only_is_false(self):
+        assert package_mod.PkgRebuildDbTool().read_only is False
+
+    def test_pkg_rebuild_db_requires_root(self):
+        assert package_mod.PkgRebuildDbTool().requires_root is True
 
     # ---- PkgRemoveTool ----
 

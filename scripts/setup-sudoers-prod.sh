@@ -70,7 +70,7 @@ bullet() { printf '    - %s\n' "$1"; }
 echo "[kyagent] 生产预设 sudoers —— 将为账户 '${USER_NAME}' 授权以下写操作："
 echo "  运行账户:        ${USER_NAME}"
 echo "  日志清理:        $([[ "$KYAGENT_ENABLE_LOG_CLEAN" == 1 ]] && echo '开 (journalctl --vacuum / truncate/delete /var/log,/var/cache,/var/tmp,/tmp)' || echo '关')"
-echo "  包管理:          $([[ "$KYAGENT_ENABLE_PKG_MGMT" == 1 ]] && echo '开 (dnf/yum install/update/security/clean-cache)' || echo '关')"
+echo "  包管理:          $([[ "$KYAGENT_ENABLE_PKG_MGMT" == 1 ]] && echo '开 (dnf/yum install/update/reinstall/security/clean-cache + rpm rebuilddb)' || echo '关')"
 echo "  包卸载 allowlist: ${KYAGENT_PKG_REMOVE_ALLOWLIST:-<empty>}"
 echo "  进程终止:        $([[ "$KYAGENT_ENABLE_PROC_KILL" == 1 ]] && echo '开 (kill -TERM|KILL|HUP|INT <pid>)' || echo '关')"
 echo "  可重启服务白名单:"

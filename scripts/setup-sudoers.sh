@@ -93,12 +93,15 @@ render_pkg_mgmt() {
   printf '    /usr/bin/yum ^-y install [A-Za-z0-9._+-]+$, \\\n'
   printf '    /usr/bin/dnf ^-y update [A-Za-z0-9._+-]+$, \\\n'
   printf '    /usr/bin/yum ^-y update [A-Za-z0-9._+-]+$, \\\n'
+  printf '    /usr/bin/dnf ^-y reinstall [A-Za-z0-9._+-]+$, \\\n'
+  printf '    /usr/bin/yum ^-y reinstall [A-Za-z0-9._+-]+$, \\\n'
   printf '    /usr/bin/dnf -y update, \\\n'
   printf '    /usr/bin/yum -y update, \\\n'
   printf '    /usr/bin/dnf -y update --security, \\\n'
   printf '    /usr/bin/yum -y update --security, \\\n'
   printf '    /usr/bin/dnf clean all, \\\n'
-  printf '    /usr/bin/yum clean all\n'
+  printf '    /usr/bin/yum clean all, \\\n'
+  printf '    /usr/bin/rpm --rebuilddb\n'
   printf '%s  ALL=(root)  NOPASSWD: KY_PKG_MUTATE\n' "$user_name"
 }
 

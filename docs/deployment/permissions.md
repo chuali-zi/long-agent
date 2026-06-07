@@ -182,15 +182,18 @@ sudo env KYAGENT_ENABLE_PKG_MGMT=1 bash scripts/kyagent.sh permissions
 - `yum -y install <包名>`
 - `dnf -y update <包名>`
 - `yum -y update <包名>`
+- `dnf -y reinstall <包名>`
+- `yum -y reinstall <包名>`
 - `dnf -y update`
 - `yum -y update`
 - `dnf -y update --security`
 - `yum -y update --security`
 - `dnf clean all`
 - `yum clean all`
+- `rpm --rebuilddb`
 
 包名仅允许 `[A-Za-z0-9._+-]+`，禁止空格、管道、引号等元字符，防止参数注入。
-单包安装/更新用锚定参数正则；全量更新、安全更新和清理缓存是固定命令，不接受额外参数。
+单包安装/更新/重装用锚定参数正则；全量更新、安全更新、清理缓存和 RPM 数据库重建是固定命令，不接受额外参数。
 
 卸载软件包不使用通配授权；如确需卸载，必须额外配置固定 allowlist：
 
@@ -235,7 +238,7 @@ sudo bash scripts/kyagent.sh permissions-prod --yes    # 跳过确认，非交�
 它在默认只读基线之上，额外默认开启（全部是固定命令 + 锚定参数正则，不是通配放行）：
 
 - **日志清理**（`KYAGENT_ENABLE_LOG_CLEAN=1`）：`journalctl --vacuum-size/--vacuum-time`、`kyagent-log-clean <绝对路径>`、`kyagent-file-delete <绝对路径>`（OS 层 realpath+O_NOFOLLOW 校验，限 `/var/log`、`/var/cache`、`/var/tmp`、`/tmp`，防 `..` 越界与符号链接）
-- **包管理**（`KYAGENT_ENABLE_PKG_MGMT=1`）：`dnf/yum -y install <pkg>`、`dnf/yum -y update <pkg>`、`dnf/yum -y update`、`dnf/yum -y update --security`、`dnf/yum clean all`；卸载仅在设置 `KYAGENT_PKG_REMOVE_ALLOWLIST` 时按固定包名授权
+- **包管理**（`KYAGENT_ENABLE_PKG_MGMT=1`）：`dnf/yum -y install <pkg>`、`dnf/yum -y update <pkg>`、`dnf/yum -y reinstall <pkg>`、`dnf/yum -y update`、`dnf/yum -y update --security`、`dnf/yum clean all`、`rpm --rebuilddb`；卸载仅在设置 `KYAGENT_PKG_REMOVE_ALLOWLIST` 时按固定包名授权
 - **进程终止**（`KYAGENT_ENABLE_PROC_KILL=1`）：`kill -(TERM|KILL|HUP|INT) <pid>=2+`
 - **重启常见服务**（`KYAGENT_SERVICE_ALLOWLIST` 默认值）：`systemctl restart/reload` 对 nginx、httpd、sshd、firewalld、chronyd、crond、rsyslog、mariadb、mysqld、postgresql、redis、docker、php-fpm（仅 restart/reload，不含 stop/disable/mask）
 

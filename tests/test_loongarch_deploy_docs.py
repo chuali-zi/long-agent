@@ -90,7 +90,7 @@ def test_loongarch_installer_uses_linux_only_audited_dependency_path() -> None:
 
     for token in (
         "uname -s",
-        "--allow-non-loongarch requires --dry-run",
+        "non-LoongArch Linux; continuing for compatibility/testing",
         "SKIP_CYTHON=1",
         "--no-binary PyYAML,pydantic",
         "requirements-loongarch-web.txt",

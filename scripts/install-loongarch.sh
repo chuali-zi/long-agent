@@ -55,7 +55,7 @@ Usage: bash scripts/install-loongarch.sh [options]
 Options:
   --yes                         Run non-interactively.
   --dry-run                     Print commands without changing the system.
-  --allow-non-loongarch         Allow running checks on non-loongarch64 hosts.
+  --allow-non-loongarch         Deprecated compatibility flag; non-loongarch Linux now continues.
   --prefix PATH                 Project directory. Defaults to current repo root.
   --user USER                   Runtime account. Defaults to kyagent.
   --python PATH                 Python 3.10-3.13 interpreter to use.
@@ -238,15 +238,7 @@ detect_arch() {
   log "glibc:        ${glibc_line:-unknown}"
 
   if [[ "$os" != "Linux" ]]; then
-    die "this installer supports LoongArch Linux only"
-  fi
-
-  if [[ "$ALLOW_NON_LOONGARCH" == "1" && "$DRY_RUN" != "1" ]]; then
-    die "--allow-non-loongarch requires --dry-run"
-  fi
-
-  if [[ "$arch" != "loongarch64" && "$ALLOW_NON_LOONGARCH" != "1" ]]; then
-    die "this installer targets loongarch64; pass --allow-non-loongarch only for dry-run/testing"
+    die "this installer supports Linux only"
   fi
 
   if [[ "$arch" == "loongarch64" ]]; then
@@ -257,6 +249,8 @@ detect_arch() {
     else
       log "world:        unknown; continuing with conservative Old World dependency path"
     fi
+  else
+    log "world:        non-LoongArch Linux; continuing for compatibility/testing"
   fi
 }
 

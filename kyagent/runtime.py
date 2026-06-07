@@ -72,6 +72,9 @@ def build_runtime(cfg: Config) -> Runtime:
         ),
         forbid_root=cfg.executor.forbid_root,
         forbid_root_strict=cfg.executor.forbid_root_strict,
+        allow_parallel_read_only_tools=getattr(
+            cfg.executor, "allow_parallel_read_only_tools", True
+        ),
     )
     executor = ExecutionProxy(sandbox)
     guardrail = Guardrail.from_config(cfg)

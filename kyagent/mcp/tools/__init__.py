@@ -13,6 +13,11 @@ from kyagent.mcp.tools import (
     compliance,
     loongarch,
     interactive,
+    gitinspect,
+    validation,
+    webfacts,
+    docintake,
+    planstate,
 )
 
 
@@ -32,6 +37,11 @@ def register_builtin(registry: ToolRegistry) -> ToolRegistry:
     security.register(registry)
     compliance.register(registry)
     loongarch.register(registry)
+    gitinspect.register(registry)
+    validation.register(registry)
+    webfacts.register(registry)
+    docintake.register(registry)
+    planstate.register(registry)
     # ask_user_choice 是纯逻辑工具（不走 ExecutionProxy），默认就注册——
     # LLM 不会主动叫，没用到时零成本。
     interactive.register(registry)

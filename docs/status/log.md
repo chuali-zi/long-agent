@@ -1,5 +1,15 @@
 # 工作日志
 
+## 2026-06-07
+
+- 开出实验分支 `experimental/p0-agent-runtime`，保留 main 上既有未提交改动不回退，进入激进 P0 runtime 更新。
+- 新增 durable plan/state 后端：`kyagent/planner.py` + `kyagent/plan_cli.py`，每次 Agent turn 自动创建 `plan-*`，写入 `var/plans.db`，审计新增 `plan_update` / `budget` 事件，SSE progress 新增 `plan_start`、`plan_step_*`、`plan_snapshot`、`budget_update`，Web 同步/流式响应返回 `plan_id`，并新增只读 `/api/plans`、`/api/plans/{plan_id}`。
+- 解决 Linux 生产路径并行只读工具不可用问题：`ExecutionProxy` 允许已预检 LOW/read-only 工具在 worker 线程并行执行，并行路径跳过 POSIX `preexec_fn`、使用 `start_new_session=True`，避免 preexec_fn + 多线程 fork 风险；串行路径保留原 rlimit 行为，强 sandbox/cgroup/seccomp 后置。
+- P0 工具扩展：新增 `git_status/git_diff/git_log/git_show/git_blame` 只读 Git inspect；新增 `verify_pytest/verify_ruff/verify_script_syntax` 固定验证命令白名单；新增 `web_fetch_url/osv_query_package/github_issue_search` 受控外部事实知识检索，默认仅允许官方文档、GitHub、PyPI、OSV、CVE/NVD 等域名。
+- 补齐复杂输入和浏览器验证后端钩子：新增 `docx_extract_text/xlsx_list_sheets/pdf_extract_text/ocr_image_text`，docx/xlsx 默认走标准库本地解析，PDF/OCR 走 optional backend 并在缺依赖时明确报错；`verify_pytest suite=frontend` 固定触发 Playwright 前端 DOM/E2E 测试。
+- 新增只读 plan MCP 工具 `plan_list/plan_get`，便于 LLM/MCP client 查看 durable task 状态，但不允许工具直接提权或修改计划。
+- 验证：`python -m compileall -q kyagent` 通过；全量 `python -m pytest -q --basetemp pytest_tmp_full_experimental4 -p no:cacheprovider` 通过，结果 `676 passed, 40 skipped`。
+
 ## 2026-06-05
 
 - 修复 Web 提问时审计库不可写导致 `/api/ask/stream` 请求阶段才 500 的问题：`build_app()` 启动时预检 `AuditStore`，若 `/var/lib/kyagent/audit.db` 或 JSONL 路径不可写，会在服务启动阶段给出 `audit store is not writable` 明确错误，避免页面打开后提问才崩溃。

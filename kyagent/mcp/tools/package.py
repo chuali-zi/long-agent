@@ -312,6 +312,29 @@ class PkgUpdateTool(Tool):
         return [_detect_rpm_frontend(), "-y", "update", args["name"]]
 
 
+class PkgReinstallTool(Tool):
+    name = "pkg_reinstall"
+    description = "强制重装单个软件包（dnf/yum -y reinstall <pkg>），恢复型变更需确认。"
+    input_schema = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "pattern": r"^[A-Za-z0-9._+-]+$",
+                "maxLength": 100,
+                "description": "软件包名",
+            }
+        },
+    }
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        return [_detect_rpm_frontend(), "-y", "reinstall", args["name"]]
+
+
 class PkgUpdateAllTool(Tool):
     name = "pkg_update_all"
     description = "更新所有可升级软件包（dnf/yum -y update），高风险需确认。"
@@ -346,6 +369,21 @@ class PkgCleanCacheTool(Tool):
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         return [_detect_rpm_frontend(), "clean", "all"]
+
+
+class PkgRebuildDbTool(PkgFamilyMixin, Tool):
+    name = "pkg_rebuild_db"
+    description = "重建 RPM 包数据库（rpm --rebuilddb），仅用于 rpm 数据库损坏后的恢复。"
+    input_schema = {"type": "object", "properties": {}}
+    risk_level = RiskLevel.HIGH
+    requires_root = True
+    read_only = False
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        f = self._require_known()
+        if f is not PkgFamily.RPM:
+            raise ToolError("pkg_rebuild_db 仅支持 RPM 系发行版")
+        return ["rpm", "--rebuilddb"]
 
 
 class PkgRemoveTool(Tool):
@@ -391,7 +429,9 @@ def register(registry: ToolRegistry) -> None:
     registry.register(PkgHistoryTool())
     registry.register(PkgInstallTool())
     registry.register(PkgUpdateTool())
+    registry.register(PkgReinstallTool())
     registry.register(PkgUpdateAllTool())
     registry.register(PkgSecurityUpgradeTool())
     registry.register(PkgCleanCacheTool())
+    registry.register(PkgRebuildDbTool())
     registry.register(PkgRemoveTool())

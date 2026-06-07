@@ -237,7 +237,7 @@ sudo bash /opt/kyagent/scripts/kyagent.sh prod-env
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `uname -m` 不是 `loongarch64` | 跑错平台 | 正式部署不要加 `--allow-non-loongarch`；非龙芯只做 dry-run |
+| `uname -m` 不是 `loongarch64` | 非龙芯 Linux / WSL 测试环境 | 安装器会记录当前架构并继续；默认仍使用 LoongArch-audited 轻依赖路径 |
 | pip 尝试安装 `jiter` | 装了 SDK extra | 删除 venv，重跑默认安装；不要安装 `.[openai]` |
 | pip 尝试安装 `pydantic-core` | 装成 pydantic v2 或 MCP SDK | 确认 requirements 是 `pydantic<2` |
 | `yaml.h` 缺失 | PyYAML C 扩展失败后 fallback | 只要最终安装成功即可；想消除日志可装 `libyaml-devel` |

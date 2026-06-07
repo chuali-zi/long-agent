@@ -23,6 +23,9 @@ executor:
   output_cap: 65536
   # 是否禁止任何 root 权限提升（除显式白名单 sudo 命令外）
   forbid_root: true
+  # 仅允许 Agent 对已预检为 LOW/read-only 的工具并行执行。
+  # 并行 worker 避免使用 POSIX preexec_fn，绕开多线程 fork 风险。
+  allow_parallel_read_only_tools: true
   # PATH 白名单（防注入）
   path:
     - /usr/local/bin
@@ -61,6 +64,24 @@ audit:
 
 rca:
   playbooks_file: configs/rca-playbooks.yaml
+
+planning:
+  enabled: true
+  database: ${KYAGENT_PLAN_DB:-./var/plans.db}
+
+web_knowledge:
+  # 受控事实知识检索出口；可用 KYAGENT_WEB_ALLOWED_DOMAINS 追加/覆盖时应保持最小集合。
+  allowed_domains:
+    - docs.python.org
+    - docs.github.com
+    - api.github.com
+    - github.com
+    - pypi.org
+    - api.osv.dev
+    - osv.dev
+    - nvd.nist.gov
+    - cve.mitre.org
+  max_bytes: 200000
 
 mcp:
   # 暴露的工具白名单（空则全部启用）

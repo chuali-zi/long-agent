@@ -45,6 +45,7 @@ from kyagent.config import Config, load_config
 from kyagent.confirm import auto_deny
 from kyagent.mcp.plugins import configured_registry
 from kyagent.progress import ProgressEvent
+from kyagent.planner import PlanStore
 from kyagent.runtime import build_audit_store
 from kyagent.safety.guardrail import Guardrail
 from kyagent.safety.intent import IntentGuard
@@ -242,6 +243,7 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
                 denied=result.denied,
                 notes=result.notes,
                 backend=agent.llm.name,
+                plan_id=result.plan_id,
             )
         finally:
             if not req.session_id:
@@ -379,6 +381,7 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
                         "tool_iterations": result.tool_iterations,
                         "denied": result.denied,
                         "notes": result.notes,
+                        "plan_id": result.plan_id,
                     }
                 except Exception as exc:
                     payload = {"error": str(exc), "text": str(exc)}
@@ -481,6 +484,37 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
         )
 
     # ---- 路由：audit ------------------------------------------------------
+
+    def _list_plans(limit: int):
+        store = PlanStore(cfg.resolve(cfg.planning.database))
+        try:
+            return [plan.to_dict() for plan in store.latest(limit)]
+        finally:
+            store.close()
+
+    def _get_plan(plan_id: str):
+        store = PlanStore(cfg.resolve(cfg.planning.database))
+        try:
+            return store.get(plan_id).to_dict()
+        finally:
+            store.close()
+
+    @app.get("/api/plans", response_model=S.PlanListResponse)
+    async def list_plans(limit: int = Query(20, ge=1, le=100)):
+        if not getattr(cfg.planning, "enabled", True):
+            return S.PlanListResponse(count=0, plans=[])
+        plans = await run_in_threadpool(_list_plans, limit)
+        return S.PlanListResponse(count=len(plans), plans=plans)
+
+    @app.get("/api/plans/{plan_id}", response_model=S.PlanDetailResponse)
+    async def plan_detail(plan_id: str):
+        if not plan_id.startswith("plan-") or len(plan_id) > 64:
+            raise HTTPException(status_code=422, detail="invalid plan_id")
+        try:
+            plan = await run_in_threadpool(_get_plan, plan_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"plan {plan_id} not found") from exc
+        return S.PlanDetailResponse(plan=plan)
 
     def _list_traces(limit: int):
         store = build_audit_store(cfg)

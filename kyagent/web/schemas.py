@@ -45,6 +45,7 @@ class AskResponse(BaseModel):
     denied: bool
     notes: list[str]
     backend: str
+    plan_id: Optional[str] = None
 
 
 # ---- /api/approvals -------------------------------------------------------
@@ -194,6 +195,15 @@ class TraceEvent(BaseModel):
 class TraceDetailResponse(BaseModel):
     trace_id: str
     events: list[TraceEvent]
+
+
+class PlanListResponse(BaseModel):
+    count: int
+    plans: list[dict[str, Any]]
+
+
+class PlanDetailResponse(BaseModel):
+    plan: dict[str, Any]
 
 
 # ---- /api/health ----------------------------------------------------------

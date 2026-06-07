@@ -25,6 +25,7 @@ from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
 from kyagent.progress import ProgressCallback, ProgressEvent, noop_progress
+from kyagent.planner import PlanSnapshot, PlanStore
 from kyagent.mcp.tools.pipeline import (
     PipelineError,
     check_safety,
@@ -59,6 +60,7 @@ class AgentRunResult:
     tool_iterations: int = 0
     denied: bool = False
     notes: list[str] = field(default_factory=list)
+    plan_id: str | None = None
 
 
 class Agent:
@@ -76,6 +78,7 @@ class Agent:
         intent_guard: IntentGuard | None = None,
         on_progress: ProgressCallback | None = None,
         on_user_choice: UserChoiceFn | None = None,
+        plan_store: PlanStore | None = None,
     ):
         self.cfg = cfg
         self.llm = llm
@@ -89,6 +92,7 @@ class Agent:
         self.on_progress: ProgressCallback = on_progress or noop_progress
         # ask_user_choice 工具的回调；UI 未注入时默认拒绝（保守）
         self.on_user_choice: UserChoiceFn = on_user_choice or auto_cancel_choice
+        self.plan_store = plan_store
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
         self._run_lock = threading.RLock()
@@ -114,6 +118,8 @@ class Agent:
             self._tool_pool = None
         self.audit.close_file()
         self.audit.store.close()
+        if self.plan_store is not None:
+            self.plan_store.close()
 
     def _emit(self, event: ProgressEvent) -> None:
         """防御式包装：TUI/外部回调抛异常不应影响 Agent 主循环。
@@ -135,9 +141,12 @@ class Agent:
         # 通道特定（LLM 后端、NL 意图层）在这里组合
         llm = build_backend(cfg)
         intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
+        plan_store = None
+        if getattr(cfg.planning, "enabled", True):
+            plan_store = PlanStore(cfg.resolve(cfg.planning.database))
         return cls(cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
                    intent_guard=intent_guard, on_progress=on_progress,
-                   on_user_choice=on_user_choice)
+                   on_user_choice=on_user_choice, plan_store=plan_store)
 
     # ---- 主入口 --------------------------------------------------------
 
@@ -154,9 +163,19 @@ class Agent:
         trace = Trace(user=user)
         self.audit.open(trace)
         trace.metadata.update({"backend": self.llm.name})
+        plan: PlanSnapshot | None = None
         self._emit(ProgressEvent(kind="agent_start", text=user_input))
 
         self.audit.event(trace, EventKind.USER_INPUT, {"text": user_input})
+        if self.plan_store is not None:
+            plan = self.plan_store.create_run_plan(
+                trace_id=trace.trace_id,
+                user=user,
+                title=user_input,
+                metadata={"backend": self.llm.name},
+            )
+            trace.metadata["plan_id"] = plan.plan_id
+            self._emit_plan(trace, plan, kind="plan_start", text=plan.title)
 
         notes: list[str] = []
         iterations = 0
@@ -185,9 +204,16 @@ class Agent:
                 )
                 self.audit.event(trace, EventKind.AGENT_REPLY,
                                  {"text": reply, "blocked_at": "intent"})
+                if plan is not None:
+                    plan = self._set_plan_step(
+                        trace, plan, "receive", "failed", "Intent layer denied request",
+                        event_kind="plan_step_end",
+                    )
+                    plan = self._set_plan_status(trace, plan, "failed", current_step="receive")
                 self.audit.close(trace)
                 return AgentRunResult(trace=trace, final_text=reply,
-                                      tool_iterations=0, denied=True, notes=notes)
+                                      tool_iterations=0, denied=True, notes=notes,
+                                      plan_id=plan.plan_id if plan else None)
 
             if intent_verdict.decision is Decision.CONFIRM:
                 approved = False
@@ -203,9 +229,17 @@ class Agent:
                     )
                     self.audit.event(trace, EventKind.AGENT_REPLY,
                                      {"text": reply, "blocked_at": "intent_confirm"})
+                    if plan is not None:
+                        plan = self._set_plan_step(
+                            trace, plan, "receive", "failed",
+                            "User rejected intent confirmation",
+                            event_kind="plan_step_end",
+                        )
+                        plan = self._set_plan_status(trace, plan, "failed", current_step="receive")
                     self.audit.close(trace)
                     return AgentRunResult(trace=trace, final_text=reply,
-                                          tool_iterations=0, denied=True, notes=notes)
+                                          tool_iterations=0, denied=True, notes=notes,
+                                          plan_id=plan.plan_id if plan else None)
 
             # 净化 stealth injection（零宽字符）：把净化后的文本送进 LLM，
             # 保留原文在 USER_INPUT 事件里以便审计追溯
@@ -216,9 +250,26 @@ class Agent:
         self.messages.append({"role": "user", "content": effective_input})
 
         tools_for_llm = self.registry.to_anthropic_tools()
+        if plan is not None:
+            plan = self._set_plan_step(
+                trace, plan, "receive", "complete", "Request accepted",
+                event_kind="plan_step_end",
+            )
+            plan = self._set_plan_step(
+                trace, plan, "reason", "running", "Starting reasoning/tool loop",
+                event_kind="plan_step_start",
+            )
 
         while iterations < self.cfg.agent.max_iterations:
             iterations += 1
+            budget_payload = {
+                "iteration": iterations,
+                "max_iterations": self.cfg.agent.max_iterations,
+                "reason": "loop",
+                "plan_id": plan.plan_id if plan else None,
+            }
+            self.audit.event(trace, EventKind.BUDGET, budget_payload)
+            self._emit(ProgressEvent(kind="budget_update", meta=budget_payload))
             self._emit(ProgressEvent(
                 kind="thinking_start",
                 meta={"iteration": iterations},
@@ -252,9 +303,16 @@ class Agent:
                     text=str(e),
                     meta={"reason": "llm_error"},
                 ))
+                if plan is not None:
+                    plan = self._set_plan_step(
+                        trace, plan, "reason", "failed", str(e),
+                        event_kind="plan_step_end",
+                    )
+                    plan = self._set_plan_status(trace, plan, "failed", current_step="reason")
                 self.audit.close(trace)
                 return AgentRunResult(trace=trace, final_text=f"LLM 调用失败：{e}",
-                                      tool_iterations=iterations, notes=notes)
+                                      tool_iterations=iterations, notes=notes,
+                                      plan_id=plan.plan_id if plan else None)
 
             self._emit(ProgressEvent(
                 kind="thinking_end",
@@ -273,11 +331,26 @@ class Agent:
                 final = "\n".join(assistant.texts()).strip()
                 self.messages.append({"role": "assistant",
                                       "content": [{"type": "text", "text": final}]})
+                if plan is not None:
+                    plan = self._set_plan_step(
+                        trace, plan, "reason", "complete", "No more tool calls",
+                        event_kind="plan_step_end",
+                    )
+                    plan = self._set_plan_step(
+                        trace, plan, "verify", "complete", "Final response prepared",
+                        event_kind="plan_step_end",
+                    )
+                    plan = self._set_plan_step(
+                        trace, plan, "respond", "complete", "Answer returned",
+                        event_kind="plan_step_end",
+                    )
+                    plan = self._set_plan_status(trace, plan, "complete", current_step="respond")
                 self.audit.event(trace, EventKind.AGENT_REPLY, {"text": final})
                 self.audit.close(trace)
                 self._emit(ProgressEvent(kind="agent_final", text=final))
                 return AgentRunResult(trace=trace, final_text=final,
-                                      tool_iterations=iterations, denied=denied, notes=notes)
+                                      tool_iterations=iterations, denied=denied, notes=notes,
+                                      plan_id=plan.plan_id if plan else None)
 
             # 把 assistant 消息原样追加（含 tool_use 块）
             self.messages.append({"role": "assistant",
@@ -295,9 +368,15 @@ class Agent:
             )
 
             if run_parallel:
+                if plan is not None:
+                    plan = self._set_plan_step(
+                        trace, plan, "reason", "running",
+                        f"Running {len(tool_uses)} read-only tools in parallel",
+                        event_kind="plan_step_update",
+                    )
                 pool = self._ensure_pool()
                 futures = [
-                    pool.submit(self._handle_tool_use, trace, tu, notes)
+                    pool.submit(self._handle_tool_use, trace, tu, notes, True)
                     for tu in tool_uses
                 ]
                 for idx, (tu, fut) in enumerate(zip(tool_uses, futures)):
@@ -312,7 +391,7 @@ class Agent:
                     }
             else:
                 for idx, tu in enumerate(tool_uses):
-                    result_block = self._handle_tool_use(trace, tu, notes)
+                    result_block = self._handle_tool_use(trace, tu, notes, False)
                     if result_block.is_error and result_block.content.startswith("[denied]"):
                         denied = True
                     tool_results[idx] = {
@@ -328,6 +407,12 @@ class Agent:
         # 超出最大迭代
         notes.append(f"达到最大迭代次数 {self.cfg.agent.max_iterations}")
         self.audit.event(trace, EventKind.ERROR, {"reason": "max_iterations"})
+        if plan is not None:
+            plan = self._set_plan_step(
+                trace, plan, "reason", "failed", "Reached max_iterations",
+                event_kind="plan_step_end",
+            )
+            plan = self._set_plan_status(trace, plan, "failed", current_step="reason")
         self.audit.close(trace)
         self._emit(ProgressEvent(
             kind="error",
@@ -339,6 +424,59 @@ class Agent:
                               tool_iterations=iterations, denied=denied, notes=notes)
 
     # ---- 工具调用处理 --------------------------------------------------
+
+    def _emit_plan(
+        self,
+        trace: Trace,
+        plan: PlanSnapshot,
+        *,
+        kind: str,
+        text: str = "",
+        step_id: str = "",
+    ) -> None:
+        snapshot = plan.to_dict()
+        payload = {"event": kind, "plan": snapshot, "plan_id": plan.plan_id}
+        if step_id:
+            payload["step_id"] = step_id
+        self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+        self._emit(ProgressEvent(kind=kind, text=text, meta=payload))  # type: ignore[arg-type]
+        self._emit(ProgressEvent(
+            kind="plan_snapshot",
+            text=plan.title,
+            meta={"plan": snapshot, "plan_id": plan.plan_id},
+        ))
+
+    def _set_plan_step(
+        self,
+        trace: Trace,
+        plan: PlanSnapshot,
+        step_id: str,
+        status: str,
+        detail: str,
+        *,
+        event_kind: str,
+    ) -> PlanSnapshot:
+        if self.plan_store is None:
+            return plan
+        updated = self.plan_store.set_step(plan.plan_id, step_id, status, detail)
+        self._emit_plan(trace, updated, kind=event_kind, text=detail, step_id=step_id)
+        return updated
+
+    def _set_plan_status(
+        self,
+        trace: Trace,
+        plan: PlanSnapshot,
+        status: str,
+        *,
+        current_step: str | None = None,
+    ) -> PlanSnapshot:
+        if self.plan_store is None:
+            return plan
+        updated = self.plan_store.set_status(
+            plan.plan_id, status, current_step=current_step
+        )
+        self._emit_plan(trace, updated, kind="plan_step_update", text=status)
+        return updated
 
     def _executor_supports_parallel_tools(self) -> bool:
         """Whether this executor can safely run tool calls from worker threads."""
@@ -372,7 +510,7 @@ class Agent:
         return verdict.decision is Decision.ALLOW
 
     def _handle_tool_use(self, trace: Trace, tu: ToolUseBlock,
-                        notes: list[str]) -> ToolResultBlock:
+                        notes: list[str], parallel_read_only: bool = False) -> ToolResultBlock:
         """对外入口：包一层 try/finally，确保 tool_call_end 一定发出。
 
         入口先发一次只含 tool 名的 tool_call_start；prepare_call 成功后
@@ -382,7 +520,9 @@ class Agent:
         ok = False
         result_block: ToolResultBlock | None = None
         try:
-            result_block = self._handle_tool_use_inner(trace, tu, notes)
+            result_block = self._handle_tool_use_inner(
+                trace, tu, notes, parallel_read_only=parallel_read_only
+            )
             ok = (not result_block.is_error)
             return result_block
         finally:
@@ -394,7 +534,8 @@ class Agent:
             ))
 
     def _handle_tool_use_inner(self, trace: Trace, tu: ToolUseBlock,
-                               notes: list[str]) -> ToolResultBlock:
+                               notes: list[str],
+                               parallel_read_only: bool = False) -> ToolResultBlock:
         # 特判：ask_user_choice 不走 ExecutionProxy / 安全护栏流水线，
         # 它是纯逻辑工具（UI 交互），单独路由。
         if tu.name == "ask_user_choice":
@@ -497,6 +638,7 @@ class Agent:
         # 3. 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
         _, formatted, content = execute_and_format(
             prep, trace=trace, audit=self.audit, executor=self.executor,
+            parallel_read_only=parallel_read_only,
         )
         return ToolResultBlock(tool_use_id=tu.id, is_error=not formatted.ok, content=content)
 

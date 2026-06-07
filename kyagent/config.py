@@ -105,6 +105,11 @@ class ExecutorConfig(BaseModel):
     #   forbid_root_strict=true → 彻底拒绝任何 root 提升（演示 / 无 sudoers 部署）
     forbid_root: bool = True
     forbid_root_strict: bool = False
+    # Enables Agent-level parallel scheduling for preflighted LOW/read-only tools.
+    # Parallel worker subprocesses skip POSIX preexec_fn and use start_new_session
+    # to avoid the preexec_fn + multithreaded fork hazard. Stronger sandboxing is
+    # intentionally left to the future cgroup/seccomp/namespace layer.
+    allow_parallel_read_only_tools: bool = True
     path: list[str] = Field(default_factory=lambda: ["/usr/local/bin", "/usr/bin", "/bin"])
 
 
@@ -146,12 +151,34 @@ class RcaConfig(BaseModel):
     playbooks_file: str = "configs/rca-playbooks.yaml"
 
 
+class PlanningConfig(BaseModel):
+    enabled: bool = True
+    database: str = "./var/plans.db"
+
+
+class WebKnowledgeConfig(BaseModel):
+    allowed_domains: list[str] = Field(default_factory=lambda: [
+        "docs.python.org",
+        "docs.github.com",
+        "api.github.com",
+        "github.com",
+        "pypi.org",
+        "api.osv.dev",
+        "osv.dev",
+        "nvd.nist.gov",
+        "cve.mitre.org",
+    ])
+    max_bytes: int = 200000
+
+
 class Config(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     rca: RcaConfig = Field(default_factory=RcaConfig)
+    planning: PlanningConfig = Field(default_factory=PlanningConfig)
+    web_knowledge: WebKnowledgeConfig = Field(default_factory=WebKnowledgeConfig)
     mcp: McpConfig = Field(default_factory=McpConfig)
 
     # 配置文件所在目录，用于解析其它相对路径

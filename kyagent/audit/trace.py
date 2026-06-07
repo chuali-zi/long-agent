@@ -19,6 +19,8 @@ class EventKind(str, Enum):
     SAFETY_CHECK = "safety_check"      # 4. 安全校验（命中规则 + verdict）
     EXECUTION = "execution"            # 5. 命令实际执行（落地账户、cmdline）
     EXECUTION_RESULT = "execution_result"  # 5b. 执行结果
+    PLAN_UPDATE = "plan_update"        # Durable task plan state transition
+    BUDGET = "budget"                  # Iteration/tool budget snapshot
     AGENT_REPLY = "agent_reply"        # 6. Agent 最终回复给用户
     ERROR = "error"
 

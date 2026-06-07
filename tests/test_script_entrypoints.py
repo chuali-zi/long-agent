@@ -55,6 +55,7 @@ def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
     readme = read_repo("README.md")
 
     for command in (
+        "sudo bash scripts/developer-quick-test.sh",
         "bash scripts/kyagent.sh install",
         "sudo bash scripts/kyagent.sh permissions",
         "sudo bash /opt/kyagent/scripts/kyagent.sh prod-env",
@@ -66,7 +67,29 @@ def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
 
     assert "docs/deployment/permissions.md" in readme
     assert "docs/deployment/web.md" in readme
-    assert len(readme.splitlines()) < 180
+    assert len(readme.splitlines()) < 230
+
+
+def test_developer_quick_test_script_chains_readme_flow() -> None:
+    script = read_repo("scripts/developer-quick-test.sh")
+    readme = read_repo("README.md")
+
+    for phrase in (
+        "install-loongarch.sh",
+        "--yes --with-web",
+        "setup-sudoers-max-test.sh",
+        "prod-env --deepseek-key-file",
+        "KYAGENT_WEB_ADMIN_TOKEN=admin",
+        "visudo -cf /etc/sudoers.d/kyagent",
+        "sudo -l -U",
+        "tools list",
+        "which process used the most cpu",
+        "web --env-file",
+    ):
+        assert phrase in script
+
+    assert "sudo bash scripts/developer-quick-test.sh" in readme
+    assert "KYAGENT_WEB_ADMIN_TOKEN=admin" in readme
 
 
 def test_prod_env_script_writes_only_the_minimal_runtime_env() -> None:

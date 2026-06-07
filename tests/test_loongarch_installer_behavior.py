@@ -41,14 +41,16 @@ def _run_bash(command: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_non_loongarch_override_requires_dry_run() -> None:
+def test_non_loongarch_linux_arch_check_continues_for_wsl_testing() -> None:
     result = _run_bash(
-        "bash scripts/install-loongarch.sh --yes --allow-non-loongarch "
-        "--skip-system-packages --skip-sudoers"
+        "source scripts/install-loongarch.sh\n"
+        "DRY_RUN=0\n"
+        "ALLOW_NON_LOONGARCH=0\n"
+        "detect_arch"
     )
 
-    assert result.returncode != 0
-    assert "--allow-non-loongarch requires --dry-run" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "architecture:" in result.stdout
 
 
 def test_shell_assignment_roundtrips_metacharacters_without_execution(tmp_path: Path) -> None:

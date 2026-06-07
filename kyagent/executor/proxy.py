@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -84,7 +85,9 @@ class ExecutionProxy:
         此判据即可激活并行路径，届时 _is_parallel_safe + audit per-trace
         锁会真正发挥作用。
         """
-        return self._shared_preexec is None
+        if sys.platform == "win32":
+            return False
+        return bool(getattr(self.cfg, "allow_parallel_read_only_tools", False))
 
     def _resolve_command(self, cmd: str) -> str | None:
         cached = self._which_cache.get(cmd)
@@ -113,6 +116,7 @@ class ExecutionProxy:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         stdin: str | None = None,
+        parallel_read_only: bool = False,
     ) -> ExecutionResult:
         if not argv:
             return ExecutionResult(
@@ -132,7 +136,14 @@ class ExecutionProxy:
         if sys.platform == "win32":
             return self._run_windows_mock(argv, requires_root)
 
-        return self._run_posix(argv, requires_root=requires_root, cwd=cwd, env=env, stdin=stdin)
+        return self._run_posix(
+            argv,
+            requires_root=requires_root,
+            cwd=cwd,
+            env=env,
+            stdin=stdin,
+            parallel_read_only=parallel_read_only,
+        )
 
     # ---- POSIX 真正落地 ------------------------------------------------
 
@@ -144,6 +155,7 @@ class ExecutionProxy:
         cwd: str | None,
         env: dict[str, str] | None,
         stdin: str | None,
+        parallel_read_only: bool,
     ) -> ExecutionResult:
         # 1. 在 sudo 包装之前解析真实工具命令。绝对路径同样必须位于白名单目录。
         resolved = self._resolve_command(argv[0])
@@ -175,8 +187,16 @@ class ExecutionProxy:
             clean_env = build_clean_env(self.cfg, extra=env)
         else:
             clean_env = dict(self._env_template)
-        # preexec_fn 是无状态闭包，复用同一份。
-        preexec = self._shared_preexec
+        # preexec_fn is unsafe after fork in a multithreaded parent. The Agent
+        # only sets ``parallel_read_only`` for LOW/read-only calls that already
+        # passed deterministic guardrail preflight; those worker calls use
+        # start_new_session instead and intentionally skip the rlimit preexec.
+        threaded_parallel = (
+            parallel_read_only
+            and threading.current_thread() is not threading.main_thread()
+            and getattr(self.cfg, "allow_parallel_read_only_tools", False)
+        )
+        preexec = None if threaded_parallel else self._shared_preexec
 
         start = time.monotonic()
         try:
@@ -188,6 +208,7 @@ class ExecutionProxy:
                 env=clean_env,
                 cwd=cwd,
                 preexec_fn=preexec,
+                start_new_session=preexec is None,
                 close_fds=True,
             )
         except FileNotFoundError as e:

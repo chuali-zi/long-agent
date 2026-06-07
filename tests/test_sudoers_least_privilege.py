@@ -303,12 +303,16 @@ def test_render_pkg_mgmt_enabled_outputs_correct_rules() -> None:
     assert "/usr/bin/yum ^-y update [A-Za-z0-9._+-]+$" in out
     assert "/usr/bin/dnf -y update" in out
     assert "/usr/bin/yum -y update" in out
+    assert "/usr/bin/dnf ^-y reinstall [A-Za-z0-9._+-]+$" in out
+    assert "/usr/bin/yum ^-y reinstall [A-Za-z0-9._+-]+$" in out
     assert "/usr/bin/dnf -y update --security" in out
     assert "/usr/bin/yum -y update --security" in out
     assert "/usr/bin/dnf clean all" in out
     assert "/usr/bin/yum clean all" in out
+    assert "/usr/bin/rpm --rebuilddb" in out
     assert "^-y remove [A-Za-z0-9._+-]+$" not in out
     assert "^-y update .*$" not in out
+    assert "^-y reinstall .*$" not in out
     assert "Cmnd_Alias KY_PKG_MUTATE" in out
     assert "kyagent  ALL=(root)  NOPASSWD: KY_PKG_MUTATE" in out
 
@@ -450,7 +454,9 @@ def test_default_sudoers_does_not_grant_write_operations() -> None:
         "journalctl --vacuum",
         "dnf -y install",
         "dnf -y update",
+        "dnf -y reinstall",
         "yum -y update",
+        "rpm --rebuilddb",
         "kyagent-file-delete",
         "/usr/bin/kill",
     ]
@@ -480,7 +486,7 @@ def test_prod_wrapper_defaults_enable_all_write_switches() -> None:
 def test_prod_wrapper_does_not_enable_wildcard_package_remove_by_default() -> None:
     text = PROD_WRAPPER.read_text(encoding="utf-8")
     assert "install|remove <pkg>" not in text
-    assert "dnf/yum install/update/security/clean-cache" in text
+    assert "dnf/yum install/update/reinstall/security/clean-cache + rpm rebuilddb" in text
     assert "KYAGENT_PKG_REMOVE_ALLOWLIST" in text
 
 

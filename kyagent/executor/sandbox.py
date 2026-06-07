@@ -32,6 +32,8 @@ class SandboxConfig:
     forbid_root: bool = True
     # 严格模式：彻底拒绝任何 root 提升，绕过 sudoers。仅用于演示 / 无 sudoers 部署
     forbid_root_strict: bool = False
+    # Allow Agent to run preflighted LOW/read-only tools in parallel worker threads.
+    allow_parallel_read_only_tools: bool = True
 
 
 def make_preexec_fn(cfg: SandboxConfig):

@@ -1,0 +1,2007 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kyagent · 运维 Agent 控制台</title>
+<!--
+  ============================================================================
+  kyagent web 控制台  ·  单文件前端（drop-in 替换 kyagent/web/static/index.html）
+  ----------------------------------------------------------------------------
+  · 纯静态，零外部依赖（无 CDN / 无 Google Fonts / 无外链）—— 墙内、离线、
+    LoongArch / 麒麟 桌面浏览器均可直接运行。
+  · 所有 API 接口、SSE 事件名、元素 ID、CSS class 钩子均与原版一致，
+    后端 (kyagent/web/server.py) 无需任何改动即可对接。
+  · 字体全部使用系统本地已装字体栈（思源/苹方/宋体/文泉驿…），不下载任何字形。
+  · 视觉：Anthropic / Claude 美学 —— 米色纸面 + 黏土棕 + 手绘抽象简笔画。
+  ============================================================================
+  【后端对接清单 · 与 server.py 一一对应】
+    GET  /api/health                        → 顶部版本横幅
+    GET  /api/tools                         → “工具”页
+    POST /api/ask/stream    (SSE)           → 主控制台对话流
+    POST /api/sessions/{id}/reset           → 清空会话
+    POST /api/approvals/{id}/approve|reject → 人工审批
+    POST /api/choices/{id}/select           → 分支选择
+    POST /api/safety/check                  → “安全”护栏调试
+    GET  /api/audit/traces[/{id}]           → “审计”页
+  ============================================================================
+-->
+<style>
+  /* ========================================================================
+     1. 设计令牌（颜色 / 阴影）—— Anthropic 米色纸面 + 黏土棕
+     ===================================================================== */
+  :root {
+    --bg:        #EBE5D8;   /* 主背景 · 暖米色 (Cloud) */
+    --paper:     #FAF6EC;   /* 卡片纸面 */
+    --paper-2:   #FFFFFF;   /* 抬升纸面 */
+    --paper-3:   #F2ECDD;   /* 凹陷 / 次级 */
+    --ink:       #232020;   /* 主文字 · 暖黑 */
+    --ink-soft:  #4A443C;
+    --muted:     #8A8276;   /* 次要文字 · 暖灰 */
+    --line:      #D8CFBC;   /* 描边 · 暖米线 */
+    --line-soft: #E7DFCD;
+
+    --clay:      #C45C36;   /* 主强调 · 黏土棕 (Claude) */
+    --clay-deep: #A4482A;
+    --clay-soft: #F0DDCF;   /* 强调浅底 */
+    --clay-ink:  #6E2E18;
+
+    --user:      #6B7A4F;   /* operator 绿橄榄 */
+    --user-soft: #E8EAD8;
+    --agent:     #C45C36;   /* agent = 黏土棕 */
+
+    --sage:      #5E7B57;   /* low */
+    --ochre:     #B8862F;   /* medium */
+    --danger:    #B23A22;   /* high / critical */
+    --danger-soft:#F3DCD3;
+
+    --shadow-sm: 0 1px 2px rgba(60,44,28,.06);
+    --shadow:    0 14px 38px rgba(74,52,30,.13);
+    --shadow-lg: 0 22px 60px rgba(74,52,30,.20);
+
+    /* 字体栈 —— 全部为系统本地字体，墙内/离线可用 */
+    --sans: "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC",
+            "Noto Sans CJK SC", "Microsoft YaHei", "WenQuanYi Micro Hei",
+            -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --serif: "Songti SC", "Source Han Serif SC", "Noto Serif CJK SC",
+             "STSong", Georgia, "Times New Roman", "SimSun", serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, "Cascadia Code",
+            "DejaVu Sans Mono", Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--bg);
+    /* 极淡的纸纹：两层斜向噪点，纯 CSS 渐变，无图片 */
+    background-image:
+      radial-gradient(circle at 14% -10%, rgba(196,92,54,.05), transparent 42%),
+      radial-gradient(circle at 92% 4%, rgba(107,122,79,.05), transparent 40%);
+    background-attachment: fixed;
+    font: 15px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: var(--clay-soft); color: var(--clay-ink); }
+
+  /* 滚动条 —— 暖色细身 */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #cfc6b1; border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #bcb19a; background-clip: padding-box; }
+
+  /* ========================================================================
+     2. 顶栏
+     ===================================================================== */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 18px;
+    padding: 14px clamp(16px, 4vw, 40px);
+    background: rgba(235,229,216,.84);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(14px) saturate(1.1);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .spark { width: 34px; height: 34px; flex: none; color: var(--clay); }
+  .brand .wordmark { display: flex; flex-direction: column; line-height: 1; }
+  .brand h1 {
+    margin: 0; font-family: var(--serif); font-weight: 600;
+    font-size: 21px; letter-spacing: .3px; color: var(--ink);
+  }
+  .brand h1 em { font-style: italic; color: var(--clay); }
+  .brand .sub { margin-top: 3px; font-size: 11px; color: var(--muted); letter-spacing: .14em; text-transform: uppercase; }
+
+  .banner {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--ink-soft);
+    padding: 4px 11px; border-radius: 99px;
+    background: var(--paper); border: 1px solid var(--line);
+  }
+  .banner .dot { width: 7px; height: 7px; border-radius: 99px; background: var(--muted); box-shadow: 0 0 0 0 rgba(94,123,87,.5); }
+  .banner.ok .dot { background: var(--sage); animation: livePulse 2.4s ease-in-out infinite; }
+  .banner.bad .dot { background: var(--danger); }
+  @keyframes livePulse { 0%,100%{ box-shadow: 0 0 0 0 rgba(94,123,87,.45);} 50%{ box-shadow: 0 0 0 5px rgba(94,123,87,0);} }
+
+  .token-field {
+    margin-left: auto; display: flex; align-items: center; gap: 7px;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+    padding: 4px 6px 4px 11px; max-width: 250px;
+  }
+  .token-field svg { width: 14px; height: 14px; color: var(--muted); flex: none; }
+  .token-field input {
+    border: 0; background: transparent; color: var(--ink); font: 12px var(--mono);
+    width: 100%; padding: 4px 2px;
+  }
+  .token-field input:focus { outline: none; }
+  .token-field input::placeholder { color: var(--muted); font-family: var(--sans); }
+
+  nav { display: flex; gap: 2px; margin-left: auto; }
+  nav button {
+    position: relative; background: transparent; color: var(--muted);
+    border: 0; border-radius: 8px; padding: 8px 14px;
+    font: 600 14px var(--sans); cursor: pointer; transition: color .15s;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button.active { color: var(--ink); }
+  /* 手绘下划线（内联 SVG data-uri，波浪笔触，黏土棕） */
+  nav button.active::after {
+    content: ""; position: absolute; left: 10px; right: 10px; bottom: 1px; height: 6px;
+    background: no-repeat center/100% 6px
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='6'%3E%3Cpath d='M1 4.2C14 1.6 26 1.4 40 3 54 4.6 66 4.8 79 2.4' fill='none' stroke='%23C45C36' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+  }
+
+  /* ========================================================================
+     3. 布局
+     ===================================================================== */
+  main { width: min(1280px, calc(100vw - 32px)); margin: 0 auto; padding: 22px 0 48px; }
+  .shell { display: grid; grid-template-columns: minmax(0,1fr) 360px; gap: 18px; align-items: stretch; height: calc(100vh - 132px); min-height: 520px; }
+  .shell > div { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  .chat-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  aside { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  aside .panel { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+  .panel {
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px; box-shadow: var(--shadow-sm);
+  }
+  .panel + .panel { margin-top: 16px; }
+  .panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .panel-head h3 { margin: 0; font-family: var(--serif); font-weight: 600; font-size: 17px; }
+  .panel-head .count { color: var(--muted); font-size: 13px; font-weight: 400; }
+  .panel-head .spacer { margin-left: auto; }
+  .eyebrow { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--clay); font-weight: 700; }
+
+  /* ========================================================================
+     4. 遥测舱 —— 固定左下角的「抽象星座」（Anthropic 风，收纳全部状态）
+        收起：手绘星座节点 + 当前状态；展开：health/session/trace/审核/事件/token
+     ===================================================================== */
+  .telemetry { position: fixed; left: 22px; bottom: 22px; z-index: 45; font-family: var(--sans); }
+
+  .telemetry-orb {
+    display: flex; align-items: center; gap: 11px; cursor: grab; touch-action: none;
+    background: rgba(250,246,236,.92); border: 1px solid var(--line);
+    border-radius: 99px; padding: 8px 16px 8px 9px; color: var(--ink);
+    box-shadow: var(--shadow); backdrop-filter: blur(12px) saturate(1.1);
+    transition: border-color .15s, transform .1s, box-shadow .2s;
+  }
+  .telemetry-orb:hover { border-color: var(--clay); transform: translateY(-1px); }
+  .telemetry-orb:active { transform: translateY(0); }
+
+  /* 抽象星座字形 */
+  .orb-glyph { position: relative; width: 40px; height: 40px; flex: none; }
+  .orb-glyph .constellation { width: 100%; height: 100%; overflow: visible; }
+  .orb-glyph .c-link { stroke: var(--line); stroke-width: 1.4; fill: none; stroke-linecap: round; transition: stroke .3s; }
+  .orb-glyph .c-node { fill: var(--muted); transition: fill .3s, r .3s; }
+  /* 节点活态：health(连接) / approval(待审) */
+  .telemetry.ok   .n-health   { fill: var(--sage); }
+  .telemetry.bad  .n-health   { fill: var(--danger); }
+  .telemetry.pend .n-approval { fill: var(--clay); }
+  .telemetry.pend .n-approval { animation: nodeBeat 1.3s ease-in-out infinite; }
+  @keyframes nodeBeat { 0%,100%{ r: 3; } 50%{ r: 4.4; } }
+  /* 工作中：整组星座缓慢旋转 + 主节点发光 */
+  body.agent-working .orb-glyph .constellation { animation: orbSpin 6s linear infinite; transform-origin: 50% 50%; }
+  body.agent-working .orb-glyph .c-link { stroke: var(--clay); }
+  body.agent-working .orb-glyph .n-core { fill: var(--clay); filter: drop-shadow(0 0 5px rgba(196,92,54,.6)); }
+  @keyframes orbSpin { to { transform: rotate(360deg); } }
+
+  .orb-status { display: flex; flex-direction: column; line-height: 1.2; padding-right: 4px; }
+  .orb-status .s-label { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  .orb-status .s-val { font-size: 13.5px; font-weight: 700; color: var(--ink); max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .orb-caret { width: 14px; height: 14px; color: var(--muted); flex: none; transition: transform .2s; }
+  .telemetry.open .orb-caret { transform: rotate(180deg); }
+
+  /* 展开详情 —— 默认向「右上」弹出（贴合左下角的遥测舱）；拖动后按位置自动转向屏幕中心 */
+  .telemetry-pop {
+    position: absolute; left: 0; right: auto; bottom: calc(100% + 12px); width: 318px;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 16px;
+    padding: 16px; box-shadow: var(--shadow-lg);
+    opacity: 0; transform: translateY(8px) scale(.98); transform-origin: bottom left;
+    pointer-events: none; transition: opacity .18s, transform .18s;
+  }
+  .telemetry.open .telemetry-pop { opacity: 1; transform: none; pointer-events: auto; }
+  /* 拖动态：抓手光标 + 拖动时隐藏展开面板 */
+  .telemetry.dragging .telemetry-orb { cursor: grabbing; }
+  .telemetry.dragging .telemetry-orb:hover { transform: none; }
+  .telemetry.dragging .telemetry-pop { display: none; }
+  /* 遥测舱在右半屏 → 面板向左弹出 */
+  .telemetry.flip-left .telemetry-pop { left: auto; right: 0; transform-origin: bottom right; }
+  /* 遥测舱在上半屏 → 面板向下弹出 */
+  .telemetry.flip-down .telemetry-pop { bottom: auto; top: calc(100% + 12px); }
+  .telemetry.flip-down:not(.flip-left) .telemetry-pop { transform-origin: top left; }
+  .telemetry.flip-down.flip-left .telemetry-pop { transform-origin: top right; }
+  .telemetry-pop .pop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .telemetry-pop .pop-head .eyebrow { font-size: 10px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .stat-cell {
+    background: var(--paper-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px;
+  }
+  .stat-cell.full { grid-column: 1 / -1; }
+  .stat-cell .label { color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; }
+  .stat-cell .value { margin-top: 3px; font-weight: 700; font-size: 14px; color: var(--ink); word-break: break-word; }
+  .stat-cell .value.mono { font-family: var(--mono); font-size: 12px; }
+  .run-detail {
+    margin-top: 6px; color: var(--ink-soft); font: 12.5px/1.55 var(--sans);
+    max-height: 190px; overflow: auto; scrollbar-gutter: stable;
+  }
+  .run-detail .activity-title { color: var(--ink); font-weight: 800; margin-bottom: 5px; }
+  .run-detail pre {
+    margin: 0; padding: 9px 10px; border-radius: 8px; background: var(--paper-3);
+    border: 1px solid var(--line-soft); color: var(--ink-soft);
+    white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 var(--mono);
+  }
+  .run-detail .muted-line { color: var(--muted); }
+  .pop-token {
+    margin-top: 11px; display: flex; align-items: center; gap: 8px;
+    background: var(--paper-2); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px 6px 11px;
+  }
+  .pop-token svg { width: 14px; height: 14px; color: var(--muted); flex: none; }
+  .pop-token input { border: 0; background: transparent; color: var(--ink); font: 12px var(--mono); width: 100%; padding: 4px 2px; }
+  .pop-token input:focus { outline: none; }
+  .pop-token input::placeholder { color: var(--muted); font-family: var(--sans); }
+
+  /* ---- agent 行动时的「闪烁星芒」动画（Claude Code 风），用于 thinking 气泡 ---- */
+  @keyframes edgeFlow { to { background-position: 0 -220%; } }
+  .spark-anim {
+    position: relative; width: 30px; height: 30px; flex: none;
+    color: var(--clay); display: none; place-items: center;
+  }
+  body.agent-working .spark-anim { display: grid; }
+  .spark-anim svg { position: absolute; fill: currentColor; will-change: transform, opacity; }
+  .spark-anim .s-big {
+    width: 24px; height: 24px; left: 3px; top: 3px; transform-origin: center;
+    filter: drop-shadow(0 0 6px rgba(196,92,54,.45));
+    animation: sparkPulse 1.45s cubic-bezier(.4,0,.2,1) infinite;
+  }
+  .spark-anim .s-small {
+    width: 11px; height: 11px; right: 0; top: 0; transform-origin: center; color: var(--clay-deep);
+    animation: sparkPop 1.45s ease-in-out .42s infinite;
+  }
+  @keyframes sparkPulse {
+    0%, 100% { transform: scale(.5) rotate(0deg);   opacity: .5; }
+    50%      { transform: scale(1.15) rotate(35deg); opacity: 1; }
+  }
+  @keyframes sparkPop {
+    0%, 100% { transform: scale(.2);  opacity: 0; }
+    45%      { transform: scale(1);   opacity: .95; }
+  }
+  /* thinking 气泡的行内小星芒：流式输出时持续闪烁 */
+  .who .spark-inline {
+    width: 13px; height: 13px; fill: var(--clay); vertical-align: -2px; margin-right: 2px;
+    animation: sparkTwinkle 1.2s ease-in-out infinite;
+  }
+  @keyframes sparkTwinkle {
+    0%, 100% { transform: scale(.7) rotate(0deg); opacity: .5; }
+    50%      { transform: scale(1.1) rotate(30deg); opacity: 1; }
+  }
+
+  /* ========================================================================
+     5. 对话区
+     ===================================================================== */
+  .chat-log {
+    flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+    padding: 8px 6px 8px 2px; display: flex; flex-direction: column; gap: 16px;
+    scroll-behavior: smooth;
+  }
+  /* 空状态手绘占位（JS 有内容时被覆盖） */
+  .chat-empty {
+    margin: auto; text-align: center; color: var(--muted); padding: 30px 20px; max-width: 360px;
+  }
+  .chat-empty svg { width: 132px; height: 100px; color: var(--clay); opacity: .9; margin-bottom: 8px; }
+  .chat-empty .t { font-family: var(--serif); font-size: 18px; color: var(--ink-soft); margin-bottom: 4px; }
+  .chat-empty .d { font-size: 13px; line-height: 1.5; }
+
+  .msg { margin: 0; max-width: 100%; }
+  .msg .who {
+    margin-bottom: 6px; color: var(--muted); font-size: 11px;
+    letter-spacing: .1em; text-transform: uppercase; font-weight: 700;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* operator 气泡（右） */
+  .msg.user {
+    margin-left: auto; max-width: 80%;
+    padding: 12px 15px; border-radius: 16px 16px 4px 16px;
+    background: var(--user-soft); border: 1px solid #cdd3b6;
+  }
+  .msg.user .who { color: var(--user); justify-content: flex-end; }
+  .msg.user .body { color: #3b4429; }
+
+  /* agent 终答气泡（左） —— 黏土棕，最高视觉权重 */
+  .msg.agent {
+    max-width: 88%;
+    padding: 15px 18px; border-radius: 16px 16px 16px 4px;
+    background: linear-gradient(180deg, #FBF1EA, var(--clay-soft));
+    border: 1px solid #e3b69e; box-shadow: var(--shadow-sm);
+  }
+  .msg.agent .who { color: var(--clay-deep); }
+  .msg.agent .body { color: #4a2417; font-size: 15.5px; line-height: 1.62; }
+  .msg.agent .body.md-doc { white-space: normal; }
+  .md-doc > *:first-child { margin-top: 0; }
+  .md-doc > *:last-child { margin-bottom: 0; }
+  .md-doc h1, .md-doc h2, .md-doc h3, .md-doc h4, .md-doc h5, .md-doc h6 {
+    margin: 1em 0 .45em; color: #3f1e12; line-height: 1.25; font-family: var(--serif);
+  }
+  .md-doc h1 { font-size: 1.48em; padding-bottom: .28em; border-bottom: 1px solid rgba(164,72,42,.24); }
+  .md-doc h2 { font-size: 1.3em; padding-bottom: .2em; border-bottom: 1px solid rgba(164,72,42,.18); }
+  .md-doc h3 { font-size: 1.12em; }
+  .md-doc p { margin: .55em 0; }
+  .md-doc ul, .md-doc ol { margin: .55em 0 .7em; padding-left: 1.35em; }
+  .md-doc li { margin: .22em 0; }
+  .md-doc blockquote {
+    margin: .7em 0; padding: .15em 0 .15em 1em; color: var(--ink-soft);
+    border-left: 3px solid rgba(164,72,42,.35);
+  }
+  .md-doc pre {
+    margin: .75em 0; padding: 11px 12px; border-radius: 8px;
+    background: rgba(255,255,255,.58); border: 1px solid rgba(164,72,42,.22);
+    overflow: auto; white-space: pre; font: 12.5px/1.5 var(--mono);
+  }
+  .md-doc code {
+    padding: .08em .32em; border-radius: 5px; background: rgba(255,255,255,.62);
+    border: 1px solid rgba(164,72,42,.16); font-family: var(--mono); font-size: .92em;
+  }
+  .md-doc pre code { padding: 0; border: 0; background: transparent; font-size: inherit; }
+  .md-doc a { color: var(--clay-deep); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  /* md 表格 —— 在气泡内的牛皮纸表，覆盖全局 sticky/大写表头样式 */
+  .md-doc .md-table-wrap {
+    margin: .8em 0; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    border: 1px solid rgba(164,72,42,.24); border-radius: 9px; background: rgba(255,255,255,.34);
+  }
+  .md-doc table { width: 100%; border-collapse: collapse; font-size: .95em; margin: 0; }
+  .md-doc thead th {
+    position: static; text-transform: none; letter-spacing: 0;
+    font-size: .96em; font-weight: 700; color: #3f1e12; white-space: nowrap;
+    background: rgba(255,255,255,.55); padding: 8px 12px;
+    border-bottom: 1px solid rgba(164,72,42,.3);
+  }
+  .md-doc tbody td {
+    padding: 7px 12px; color: #4a2417; vertical-align: top;
+    border-top: 1px solid rgba(164,72,42,.14);
+  }
+  .md-doc tbody tr:hover { background: rgba(255,255,255,.34); }
+  .md-doc th + th, .md-doc td + td { border-left: 1px solid rgba(164,72,42,.12); }
+  .md-doc td code, .md-doc th code {
+    background: rgba(255,255,255,.62); color: var(--clay-ink); border-color: rgba(164,72,42,.2);
+  }
+
+  /* thinking —— 浅笔记体 */
+  .msg.thinking {
+    color: var(--ink-soft); background: var(--paper-3);
+    border: 1px dashed var(--line); border-left: 3px solid var(--muted);
+    padding: 10px 13px; border-radius: 8px; font-size: 13px; font-style: italic;
+  }
+  .msg.thinking:empty { display: none; }
+  .msg.thinking .body { white-space: pre-wrap; }
+
+  /* event —— 极轻的流水线注记 */
+  .msg.event {
+    color: var(--muted); font-size: 12px; padding: 2px 4px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .msg.event::before { content: ""; width: 14px; height: 1px; background: var(--line); flex: none; }
+
+  /* tool 调用 —— 牛皮纸 + 等宽，黏土左条（中性偏暖，而非刺眼红） */
+  .msg.tool {
+    color: var(--ink-soft); background: var(--paper-2);
+    border: 1px solid var(--line); border-left: 4px solid var(--clay);
+    padding: 11px 13px; border-radius: 8px; font: 12.5px/1.55 var(--mono);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .msg.tool .who { font-family: var(--sans); color: var(--clay-deep); }
+
+  /* error —— 红黏土告警 */
+  .msg.error {
+    color: var(--clay-ink); background: var(--danger-soft);
+    border: 1px solid #e0b3a4; border-left: 4px solid var(--danger);
+    padding: 11px 13px; border-radius: 8px;
+  }
+  .msg.error .who { color: var(--danger); }
+
+  /* ========================================================================
+     6. 输入条
+     ===================================================================== */
+  textarea, input[type=text] {
+    width: 100%; background: var(--paper-2); color: var(--ink);
+    border: 1px solid var(--line); padding: 11px 13px; border-radius: 10px;
+    font: inherit; resize: vertical; transition: border-color .15s, box-shadow .15s;
+  }
+  textarea::placeholder, input::placeholder { color: var(--muted); }
+  textarea:focus, input:focus { outline: none; border-color: var(--clay); box-shadow: 0 0 0 3px var(--clay-soft); }
+
+  .composer { display: flex; gap: 12px; align-items: stretch; }
+  .composer textarea { flex: 1; }
+  .composer .actions { flex: 0 0 130px; display: flex; flex-direction: column; gap: 9px; }
+
+  button.primary, button.approve, button.reject, button.ghost {
+    border-radius: 10px; font: 700 14px var(--sans); cursor: pointer;
+    border: 1px solid transparent; transition: transform .08s, background .15s, box-shadow .15s;
+  }
+  button.primary:active, button.approve:active, button.reject:active, button.ghost:active { transform: translateY(1px); }
+  button.primary {
+    background: var(--clay); color: #fff8f3; padding: 11px 18px;
+    box-shadow: 0 6px 16px rgba(196,92,54,.28);
+  }
+  button.primary:hover { background: var(--clay-deep); }
+  button.ghost { background: transparent; color: var(--ink-soft); border-color: var(--line); padding: 10px 14px; }
+  button.ghost:hover { background: var(--paper-3); border-color: var(--muted); }
+  button.approve { background: var(--sage); color: #f3f7ef; padding: 11px 14px; }
+  button.approve:hover { filter: brightness(1.06); }
+  button.reject { background: var(--danger); color: #fdf0ec; padding: 11px 14px; }
+  button.reject:hover { filter: brightness(1.06); }
+  button:disabled { opacity: .5; cursor: wait; transform: none; box-shadow: none; }
+
+  /* ========================================================================
+     7. 侧栏：审批 / 事件
+     ===================================================================== */
+  aside .panel { position: relative; }
+  /* 侧栏两栏分配：人工审核略高、Plan 在下 */
+  /* 侧栏两栏分配：审核小(上, ~1/3)、Plan 长(下, ~2/3) */
+  aside .approval-card { flex: 1; }
+  aside .plan-card { flex: 2; }
+  /* 审核框：不滚动，仅作待命占位 + 计数；真实审批以浮动卡片弹出 */
+  #approvalDock { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: center; }
+  /* 审核框较矮（~1/3 栏高），占位插画收紧以免裁切 */
+  #approvalDock .dock-empty { padding: 6px 6px; }
+  #approvalDock .dock-empty svg { width: 46px; height: 38px; margin-bottom: 4px; }
+  #approvalDock .dock-empty .d { font-size: 12px; }
+  .dock-empty { text-align: center; color: var(--muted); padding: 14px 6px; }
+  .dock-empty svg { width: 86px; height: 70px; color: var(--clay); opacity: .82; margin-bottom: 6px; }
+  .dock-empty .d { font-size: 12.5px; line-height: 1.5; }
+
+  /* ---- 审核浮动弹层：卡片「弹出」效果，不挤压/不滚动小面板 ---- */
+  .approval-layer {
+    position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 12px;
+    pointer-events: none;
+  }
+  .approval-layer:empty { display: none; }
+  .approval-layer > * { pointer-events: auto; }
+  @keyframes cardPopIn {
+    0%   { opacity: 0; transform: translateY(-14px) scale(.92); }
+    62%  { opacity: 1; transform: translateY(3px) scale(1.015); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes cardPopOut {
+    0%   { opacity: 1; transform: none; }
+    100% { opacity: 0; transform: translateY(-8px) scale(.96); }
+  }
+  .approval-layer .pop-in  { animation: cardPopIn .42s cubic-bezier(.34,1.56,.64,1); }
+  /* pop-out 需压过 .approval-panel.resolved 的 animation:none，故提高优先级 */
+  .approval-layer .approval-panel.pop-out,
+  .approval-layer .choice-panel.pop-out { animation: cardPopOut .26s ease forwards !important; }
+
+  /* ---- 执行计划 Plan ---- */
+  #planDock { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 4px; }
+  .plan-list { display: flex; flex-direction: column; }
+  .plan-step {
+    display: flex; align-items: flex-start; gap: 11px;
+    padding: 9px 9px; border-radius: 9px; transition: background .15s;
+  }
+  .plan-step + .plan-step { border-top: 1px solid var(--line-soft); }
+  .plan-step:hover { background: var(--paper-3); }
+  /* 左侧小格子：表示该步是否完成 */
+  .plan-check {
+    flex: none; width: 18px; height: 18px; margin-top: 1px; position: relative;
+    border: 1.7px solid var(--line); border-radius: 5px; background: var(--paper-2);
+    transition: border-color .18s, background .18s;
+  }
+  .plan-num { flex: none; width: 18px; text-align: right; color: var(--muted); font: 700 11px var(--mono); margin-top: 2px; }
+  .plan-text { font-size: 13.5px; line-height: 1.5; color: var(--ink-soft); overflow-wrap: anywhere; }
+  /* running —— 黏土脉冲 */
+  .plan-step[data-status="running"] .plan-check { border-color: var(--clay); }
+  .plan-step[data-status="running"] .plan-check::after {
+    content: ""; position: absolute; inset: 3px; border-radius: 2px;
+    background: var(--clay); animation: planPulse 1s ease-in-out infinite;
+  }
+  .plan-step[data-status="running"] .plan-text { color: var(--ink); font-weight: 600; }
+  .plan-step[data-status="running"] .plan-num { color: var(--clay); }
+  @keyframes planPulse { 0%,100%{ opacity:.3; transform:scale(.6);} 50%{ opacity:1; transform:scale(1);} }
+  /* done —— 橄榄绿打勾 */
+  .plan-step[data-status="done"] .plan-check { border-color: var(--sage); background: var(--sage); }
+  .plan-step[data-status="done"] .plan-check::after {
+    content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 9px;
+    border: solid #f7faf4; border-width: 0 2px 2px 0; transform: rotate(42deg);
+  }
+  .plan-step[data-status="done"] .plan-text { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+  /* failed —— 红叉 */
+  .plan-step[data-status="failed"] .plan-check { border-color: var(--danger); background: var(--danger-soft); }
+  .plan-step[data-status="failed"] .plan-check::after {
+    content: "×"; position: absolute; inset: 0; display: grid; place-items: center;
+    color: var(--danger); font: 800 14px/1 var(--sans);
+  }
+
+  /* 审批卡片 —— 红黏土告警纸，温和脉冲 */
+  .approval-panel {
+    border: 1.5px solid var(--danger);
+    background: linear-gradient(160deg, #FBEAE2, var(--danger-soft));
+    border-radius: 12px; padding: 15px; box-shadow: var(--shadow);
+    animation: pulseAlert 1.9s ease-in-out infinite;
+  }
+  .approval-panel + .approval-panel, .choice-panel + * { margin-top: 12px; }
+  .approval-panel.resolved { animation: none; border-color: var(--line); background: var(--paper-3); opacity: .8; }
+  @keyframes pulseAlert { 0%,100%{ box-shadow: var(--shadow);} 50%{ box-shadow: 0 0 0 4px rgba(178,58,34,.14), var(--shadow);} }
+  .approval-head { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; }
+  .approval-title { font-family: var(--serif); font-size: 16px; font-weight: 600; color: var(--clay-ink); margin-top: 2px; }
+  .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 14px; }
+  .summary-list { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-soft); }
+  .summary-list li { margin: 3px 0; }
+
+  /* 选择卡片 —— 黏土描边纸 */
+  .choice-panel {
+    border: 1.5px solid var(--clay); background: var(--clay-soft);
+    border-radius: 12px; padding: 15px; box-shadow: var(--shadow-sm);
+  }
+  .choice-actions { display: grid; gap: 9px; margin-top: 14px; }
+  .choice-actions button { text-align: left; }
+
+  .label { color: var(--muted); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; }
+
+  /* ========================================================================
+     8. 通用：pill / 表格 / 代码 / details
+     ===================================================================== */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; min-height: 21px;
+    padding: 2px 10px; border-radius: 99px; font-size: 11px; font-weight: 700;
+    background: var(--paper-3); color: var(--ink-soft); border: 1px solid var(--line);
+    text-transform: lowercase; letter-spacing: .02em;
+  }
+  .pill.low     { color: var(--sage);   background: #e9efe4; border-color: #cdddc4; }
+  .pill.medium  { color: #8a6315;       background: #f6ecd4; border-color: #e6d3a6; }
+  .pill.high, .pill.critical, .pill.unknown {
+    color: var(--danger); background: var(--danger-soft); border-color: #e3b6a8;
+  }
+
+  pre {
+    background: #2c2723; color: #f0e7d8; padding: 12px 13px; border-radius: 9px;
+    overflow-x: auto; margin: 8px 0; font: 12.5px/1.55 var(--mono);
+    border: 1px solid #3d362f;
+  }
+  code { font-family: var(--mono); font-size: .92em; background: var(--paper-3); padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line-soft); }
+  pre code { background: none; border: 0; padding: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  thead th {
+    text-align: left; padding: 9px 10px; border-bottom: 2px solid var(--line);
+    color: var(--muted); font-weight: 600; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    position: sticky; top: 0; background: var(--paper);
+  }
+  tbody td { text-align: left; padding: 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tbody tr { transition: background .12s; }
+  tbody tr:hover { background: var(--paper-3); }
+  tbody tr:last-child td { border-bottom: 0; }
+  td code { background: var(--clay-soft); color: var(--clay-ink); border-color: #e6cbba; }
+
+  a { color: var(--clay-deep); text-decoration-color: var(--clay-soft); text-underline-offset: 3px; }
+  a:hover { color: var(--clay); }
+
+  details {
+    border: 1px solid var(--line); border-radius: 9px; padding: 4px 12px; margin: 8px 0;
+    background: var(--paper-2);
+  }
+  details summary { cursor: pointer; padding: 7px 0; font-family: var(--mono); font-size: 12.5px; color: var(--ink-soft); }
+  details summary:hover { color: var(--clay-deep); }
+  details[open] summary { color: var(--clay-deep); border-bottom: 1px dashed var(--line); margin-bottom: 6px; }
+
+  .muted { color: var(--muted); }
+  .hide { display: none !important; }
+  .help { font-size: 12.5px; color: var(--muted); }
+
+  /* 安全护栏结果块 */
+  #safetyResult h4 { font-family: var(--serif); font-weight: 600; margin: 14px 0 8px; display: flex; align-items: center; gap: 8px; }
+  #safetyResult h4:first-child { margin-top: 0; }
+  #safetyResult ul { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+  #safetyResult ul li { margin: 3px 0; }
+
+  /* ========================================================================
+     9. 响应式
+     ===================================================================== */
+  @media (max-width: 920px) {
+    header { flex-wrap: wrap; }
+    .token-field { order: 3; margin-left: 0; max-width: none; flex: 1 1 100%; }
+    nav { order: 2; width: 100%; overflow-x: auto; }
+    .shell, .status-strip { grid-template-columns: 1fr; }
+    .shell { height: auto; min-height: 0; }
+    .chat-log { min-height: 360px; max-height: 58vh; }
+    #approvalDock { max-height: 44vh; }
+    .status-strip { grid-template-columns: 1fr 1fr; }
+    .msg.user, .msg.agent { max-width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====================== 顶栏 ====================== -->
+<header>
+  <div class="brand">
+    <!-- 手绘 Anthropic 风「火花/星芒」标记 —— 抽象、略不规则的辐射笔触 -->
+    <svg class="spark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <g stroke="currentColor" stroke-width="3" stroke-linecap="round">
+        <path d="M24 6c-1 6-1 11 0 12 1-1 1-6 0-12z"/>
+        <path d="M24 30c-1 6-1 11 0 12 1-1 1-6 0-12z"/>
+        <path d="M6 24c6-1 11-1 12 0-1 1-6 1-12 0z"/>
+        <path d="M30 24c6-1 11-1 12 0-1 1-6 1-12 0z"/>
+        <path d="M12 12c4 3 7 6 8 8-2-1-5-4-8-8z"/>
+        <path d="M28 28c4 3 7 6 8 8-2-1-5-4-8-8z"/>
+        <path d="M36 12c-4 3-7 6-8 8 2-1 5-4 8-8z"/>
+        <path d="M12 36c4-3 7-6 8-8-2 1-5 4-8 8z"/>
+      </g>
+      <circle cx="24" cy="24" r="2.6" fill="currentColor"/>
+    </svg>
+    <div class="wordmark">
+      <h1>ky<em>agent</em></h1>
+      <span class="sub">运维 Agent 控制台</span>
+    </div>
+  </div>
+
+  <nav>
+    <button data-tab="chat" class="active">控制台</button>
+    <button data-tab="tools">工具</button>
+    <button data-tab="safety">安全</button>
+    <button data-tab="audit">审计</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ====================== TAB · 控制台 ====================== -->
+  <section id="tab-chat">
+    <div class="shell">
+      <div>
+        <div class="panel chat-panel">
+          <div class="panel-head">
+            <span class="eyebrow">对话</span>
+            <h3 style="margin-left:-2px">运维会话</h3>
+          </div>
+          <!-- id=chatLog：所有消息由 appendMsg() 注入 -->
+          <div class="chat-log" id="chatLog">
+            <!-- 空状态占位（首条消息进来即被清掉 / 推到上方） -->
+            <div class="chat-empty" id="chatEmpty">
+              <svg viewBox="0 0 160 120" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="22" y="20" width="116" height="78" rx="9"/>
+                <path d="M22 36h116" opacity=".7"/>
+                <circle cx="33" cy="28" r="2"/><circle cx="41" cy="28" r="2"/><circle cx="49" cy="28" r="2"/>
+                <path d="M38 56l14 11-14 11"/>
+                <path d="M64 80h34"/>
+                <path d="M120 104c6 6 14 8 22 6-6-2-9-7-9-13" opacity=".75"/>
+              </svg>
+              <div class="t">描述一个运维任务</div>
+              <div class="d">例如「检查 nginx 状态并清理 30 天前的 /var/log 归档」。<br>Agent 会先思考，必要时请求人工审批。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel composer-panel">
+          <!-- 输入条：id=askInput / sendBtn / sendAsk() / resetSession() 不可改 -->
+          <div class="composer">
+            <textarea id="askInput" rows="3" placeholder="描述运维任务，回车换行，点击发送…"></textarea>
+            <div class="actions">
+              <button class="primary" id="sendBtn" onclick="sendAsk()">发送</button>
+              <button class="ghost" onclick="resetSession()">清空会话</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <aside>
+        <!-- 人工审核：右上角，较小。真实审批以浮动卡片弹出（见 #approvalLayer），此处仅占位+计数 -->
+        <div class="panel approval-card">
+          <div class="panel-head"><span class="eyebrow">人工审核</span><h3 style="margin-left:-2px">待审批 <span class="count" id="approvalPanelCount"></span></h3></div>
+          <!-- id=approvalDock：待命占位（审批卡片改为浮动弹出，不在此滚动） -->
+          <div id="approvalDock">
+            <div class="dock-empty">
+              <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/>
+                <path d="M48 52l9 9 18-19"/>
+              </svg>
+              <div class="d">高风险操作会在这里<br>弹出审批卡片。</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ====================== 执行计划 · Plan ======================
+             平时为空。Agent 执行任务时由 SSE 'plan' / 'plan_step' 事件填充。
+             后端对接（server.py · on_progress 直接 emit，前端零改动）：
+               · {kind:'plan', steps:[{id, text, status}]}  → 设置/替换整个计划
+               · {kind:'plan_step', id, status}             → 更新单步状态
+                 status ∈ pending | running | done | failed
+             左侧小格子（.plan-check）表示该步是否完成。
+             —— 纯原生 DOM，无任何外部依赖，LoongArch / 麒麟 浏览器可直接运行。 -->
+        <div class="panel plan-card">
+          <div class="panel-head">
+            <span class="eyebrow">执行计划</span>
+            <h3 style="margin-left:-2px">Plan <span class="count" id="planCount"></span></h3>
+          </div>
+          <!-- id=planDock：plan 步骤注入处 -->
+          <div id="planDock">
+            <div class="dock-empty">
+              <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="30" y="16" width="60" height="74" rx="8"/>
+                <path d="M48 12h24v10H48z"/>
+                <path d="M42 40h12" opacity=".5"/><path d="M62 40h16"/>
+                <path d="M42 56h12" opacity=".5"/><path d="M62 56h16"/>
+                <path d="M42 72h12" opacity=".5"/><path d="M62 72h16"/>
+                <path d="M44 39l3 3 5-6" opacity=".9"/>
+              </svg>
+              <div class="d">Agent 接到任务后，<br>执行计划会逐步显示在这里。</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ====================== TAB · 工具 ====================== -->
+  <section id="tab-tools" class="hide">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="eyebrow">注册表</span>
+        <h3 style="margin-left:-2px">已注册工具 <span class="count" id="toolCount"></span></h3>
+        <div class="spacer"></div>
+        <!-- id=toolFilter / renderTools() -->
+        <input type="text" id="toolFilter" placeholder="按名称 / 描述过滤…" oninput="renderTools()" style="max-width:240px">
+      </div>
+    </div>
+    <div class="panel" style="padding:6px 18px 14px">
+      <!-- id=toolTable：列结构由 renderTools() 填充，勿改 thead 顺序 -->
+      <table id="toolTable">
+        <thead><tr><th>name</th><th>risk</th><th>root</th><th>read-only</th><th>description</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====================== TAB · 安全 ====================== -->
+  <section id="tab-safety" class="hide">
+    <div class="panel">
+      <div class="panel-head"><span class="eyebrow">护栏调试</span><h3 style="margin-left:-2px">意图 / shell 命令裁决</h3></div>
+      <!-- id=safetyInput / checkSafety() -->
+      <textarea id="safetyInput" rows="3" placeholder="如：rm -rf /etc   或   帮我清理 /var/log 下的旧日志…"></textarea>
+      <div style="margin-top:12px; display:flex; align-items:center; gap:14px;">
+        <button class="primary" onclick="checkSafety()">校验</button>
+        <span class="help">两层都跑（意图 + argv），综合取最严</span>
+      </div>
+    </div>
+    <!-- id=safetyResult：裁决结果注入处 -->
+    <div class="panel" id="safetyResult"><span class="help">输入命令或意图后点击「校验」查看裁决。</span></div>
+  </section>
+
+  <!-- ====================== TAB · 审计 ====================== -->
+  <section id="tab-audit" class="hide">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="eyebrow">审计</span><h3 style="margin-left:-2px">最近 trace</h3>
+        <div class="spacer"></div>
+        <button class="ghost" onclick="loadTraces()">刷新</button>
+      </div>
+    </div>
+    <div class="panel" style="padding:6px 18px 14px">
+      <!-- id=traceTable / loadTraces() -->
+      <table id="traceTable">
+        <thead><tr><th>trace_id</th><th>user</th><th>started_at</th><th>channel</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <!-- id=traceDetail：showTrace() 注入推理链 -->
+    <div class="panel" id="traceDetail"><span class="help">点击上方任意 trace_id 查看推理链。</span></div>
+  </section>
+</main>
+
+<!-- 审核浮动弹层：审批 / 选择卡片在此「弹出」，定位由 JS 锚定到右上审核面板 -->
+<div class="approval-layer" id="approvalLayer"></div>
+
+<!-- ============================================================================
+     遥测舱 · 抽象星座（固定左下角）—— 收纳原顶部全部状态
+     收起态：星座节点(连接/会话/trace/审核) + 当前状态文字 + 行动星芒
+     展开态：health / session / trace / 审核 / 事件流 / Bearer token
+     注意：banner / bannerText / runStatus / sessionView / traceView /
+           approvalView / eventMetrics / apiToken 等 id 均迁入此处，JS 写入不变。
+     ========================================================================== -->
+<div class="telemetry" id="telemetry">
+  <button class="telemetry-orb" id="telemetryOrb" type="button" aria-label="状态遥测" aria-expanded="false">
+    <span class="orb-glyph">
+      <!-- 手绘抽象星座：4 节点 + 波浪连线，节点颜色反映活态 -->
+      <svg class="constellation" viewBox="0 0 40 40" aria-hidden="true">
+        <path class="c-link" d="M11 13C16 11 23 12 28 10"/>
+        <path class="c-link" d="M11 13C9 19 12 25 20 28"/>
+        <path class="c-link" d="M28 10C32 16 30 24 24 27"/>
+        <path class="c-link" d="M20 28C22 28 23 27 24 27"/>
+        <path class="c-link" d="M20 20C16 18 13 15 11 13" opacity=".7"/>
+        <path class="c-link" d="M20 20C24 17 26 13 28 10" opacity=".7"/>
+        <circle class="c-node n-core" cx="20" cy="20" r="3.2"/>
+        <circle class="c-node n-health" cx="11" cy="13" r="3"/>
+        <circle class="c-node n-session" cx="28" cy="10" r="2.6"/>
+        <circle class="c-node n-approval" cx="24" cy="27" r="3"/>
+        <circle class="c-node n-trace" cx="20" cy="28" r="2.2"/>
+      </svg>
+      <!-- 行动星芒（body.agent-working 时显示） -->
+      <span class="spark-anim" id="agentSpark" aria-hidden="true" style="position:absolute;inset:5px;width:30px;height:30px;">
+        <svg class="s-big" viewBox="0 0 24 24"><path d="M12 0c1 7.2 4.8 11 12 12-7.2 1-11 4.8-12 12-1-7.2-4.8-11-12-12 7.2-1 11-4.8 12-12z"/></svg>
+        <svg class="s-small" viewBox="0 0 24 24"><path d="M12 0c1 7.2 4.8 11 12 12-7.2 1-11 4.8-12 12-1-7.2-4.8-11-12-12 7.2-1 11-4.8 12-12z"/></svg>
+      </span>
+    </span>
+    <span class="orb-status">
+      <span class="s-label">当前状态</span>
+      <span class="s-val" id="runStatus">空闲</span>
+    </span>
+    <svg class="orb-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+  </button>
+
+  <div class="telemetry-pop" id="telemetryPop">
+    <div class="pop-head">
+      <span class="eyebrow">遥测</span>
+      <!-- /api/health 健康徽标（id=banner / bannerText 由 JS 写入） -->
+      <span class="banner" id="banner" style="margin-left:auto"><span class="dot"></span><span id="bannerText">连接中…</span></span>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-cell"><div class="label">会话</div><div class="value mono" id="sessionView"></div></div>
+      <div class="stat-cell"><div class="label">Trace</div><div class="value mono" id="traceView">—</div></div>
+      <div class="stat-cell"><div class="label">审核</div><div class="value" id="approvalView">无待处理</div></div>
+      <div class="stat-cell"><div class="label">事件流</div><div class="value" id="eventMetrics" style="font-weight:400">等待事件</div></div>
+      <div class="stat-cell full">
+        <div class="label">Agent 状态</div>
+        <div class="run-detail" id="agentStatusDetail">
+          <div class="muted-line">等待任务</div>
+        </div>
+      </div>
+    </div>
+    <!-- Bearer token（审批 / 审计鉴权）—— id=apiToken, onchange=saveToken 不可改 -->
+    <label class="pop-token" title="审批 / 审计接口的 Bearer token">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 11V8a5 5 0 0110 0v3"/><rect x="5" y="11" width="14" height="9" rx="2"/></svg>
+      <input type="text" id="apiToken" placeholder="Bearer token" onchange="saveToken()">
+    </label>
+  </div>
+</div>
+
+<!-- ============================================================================
+     【占位 MOCK 层 · PLACEHOLDER ONLY】
+     无后端时拦截全部 /api/* 请求，让前端对话展示效果可独立测试。
+     · /api/ask/stream  → 接 Claude（window.claude.complete），按原版 SSE 协议
+       吐 thinking_delta / tool_call_start|end / final 帧，前端零改动即可渲染。
+     · 其余接口（health / tools / safety / audit / approvals / choices / reset）
+       返回贴合运维场景的示例数据。
+     生产部署：整段删除即可恢复真实后端；或加 ?live 参数临时绕过本层。
+     ========================================================================== -->
+<script>
+(function () {
+  if (location.search.includes('live')) return;   // ?live → 直连真实后端，跳过 mock
+
+  const realFetch = window.fetch.bind(window);
+  const enc = new TextEncoder();
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const json = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), {status, headers: {'Content-Type': 'application/json'}});
+
+  /* ---- 示例：工具注册表 ---- */
+  const TOOLS = [
+    {name: 'nginx_status',     risk: 'low',      requires_root: false, read_only: true,  description: '查询 nginx 进程与 worker 状态'},
+    {name: 'disk_usage',       risk: 'low',      requires_root: false, read_only: true,  description: '统计指定挂载点磁盘水位'},
+    {name: 'list_files',       risk: 'low',      requires_root: false, read_only: true,  description: '按条件列出文件（支持 mtime / 大小过滤）'},
+    {name: 'tail_log',         risk: 'low',      requires_root: false, read_only: true,  description: '读取日志文件尾部 N 行'},
+    {name: 'systemctl_restart',risk: 'medium',   requires_root: true,  read_only: false, description: '重启指定 systemd 服务'},
+    {name: 'chmod_path',       risk: 'medium',   requires_root: true,  read_only: false, description: '修改文件/目录权限位'},
+    {name: 'delete_files',     risk: 'high',     requires_root: true,  read_only: false, description: '永久删除匹配到的文件（不可逆）'},
+    {name: 'run_shell',        risk: 'critical', requires_root: true,  read_only: false, description: '执行任意 shell 命令（最高风险，强制审批）'},
+  ];
+
+  /* ---- 示例：审计 trace ---- */
+  const now = Math.floor(Date.now() / 1000);
+  const TRACES = [
+    {trace_id: 'a3f9c1b7e204', user: 'web',   started_at: now - 120, channel: 'web'},
+    {trace_id: 'b7d2e8a14c55', user: 'alice', started_at: now - 3600, channel: 'cli'},
+    {trace_id: 'c1a4f009d7b8', user: 'web',   started_at: now - 86400, channel: 'web'},
+  ];
+  const traceEvents = id => ({
+    trace_id: id,
+    events: [
+      {seq: 1, kind: 'user_message',   payload: {text: '检查 nginx 状态并清理旧日志'}},
+      {seq: 2, kind: 'thinking',       payload: {text: '先只读确认服务与磁盘，再列出待清理清单，删除前请求审批。'}},
+      {seq: 3, kind: 'tool_call',      payload: {tool: 'nginx_status', argv: {}, ok: true}},
+      {seq: 4, kind: 'tool_call',      payload: {tool: 'disk_usage', argv: {path: '/var/log'}, ok: true}},
+      {seq: 5, kind: 'approval',       payload: {id: 'apr_7c12', risk: 'high', decision: 'approve'}},
+      {seq: 6, kind: 'final',          payload: {text: '已完成清理，释放约 1.2G。'}},
+    ],
+  });
+
+  /* ---- 示例：安全护栏裁决（简易关键词匹配） ---- */
+  function safetyVerdict(text) {
+    const t = (text || '').toLowerCase();
+    const mk = (layer, risk, decision, hits, rationale) =>
+      ({layer, risk, decision, hits, rationale});
+    let risk = 'low', decision = 'allow', hits = [], rationale = ['未命中高危规则，按低风险放行。'];
+    if (/rm\s+-rf|mkfs|dd\s+if=|:\(\)\s*\{|>\s*\/dev\/sd|shutdown|reboot|format/.test(t)) {
+      risk = 'critical'; decision = 'deny';
+      hits = [{rule_id: 'destructive.fs', category: 'filesystem', risk: 'critical', matched: text.slice(0, 40)}];
+      rationale = ['命中不可逆破坏性操作规则。', '默认拒绝，需显式高权限审批通道。'];
+    } else if (/sudo|chmod\s+777|delete|删除|kill\s+-9|chown|truncate/.test(t)) {
+      risk = 'medium'; decision = 'confirm';
+      hits = [{rule_id: 'privileged.write', category: 'privilege', risk: 'medium', matched: text.slice(0, 40)}];
+      rationale = ['涉及提权或写操作，要求人工二次确认。'];
+    }
+    const intent = mk('intent', risk, decision, hits, rationale);
+    const argv = mk('argv', risk, decision, hits, ['argv 层复核：' + rationale[0]]);
+    return {intent, argv, final_risk: risk, final_decision: decision};
+  }
+
+  /* ---- 构造 SSE 帧 ---- */
+  const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+  /* ---- /api/ask/stream → 接 Claude + 模拟思考/工具事件 ---- */
+  async function askStream(reqText) {
+    const stream = new ReadableStream({
+      async start(controller) {
+        const push = (event, data) => controller.enqueue(enc.encode(frame(event, data)));
+        try {
+          // 0) 先打印执行计划（占位 MOCK；真实后端在 on_progress emit 同名事件即可）
+          const plan = [
+            {id: 'p1', text: '解析运维意图与目标范围'},
+            {id: 'p2', text: '只读核查服务与磁盘现状'},
+            {id: 'p3', text: '评估风险并生成执行清单'},
+            {id: 'p4', text: '生成最终答复'},
+          ];
+          push('progress', {kind: 'plan', steps: plan.map(s => ({...s, status: 'pending'}))});
+          await sleep(260);
+
+          // 1) 步骤一：解析意图（伴随思考流，驱动状态舱 + thinking 计数）
+          push('progress', {kind: 'plan_step', id: 'p1', status: 'running'});
+          const thoughts = [
+            '解析运维意图，', '优先用只读工具确认现状，', '再判断是否涉及高风险写操作；',
+            '若不可逆，则在执行前提交人工审批。',
+          ];
+          for (const chunk of thoughts) {
+            push('progress', {kind: 'thinking_delta', delta: chunk});
+            await sleep(280);
+          }
+          push('progress', {kind: 'plan_step', id: 'p1', status: 'done'});
+
+          // 2) 步骤二：只读工具调用（演示工具气泡）
+          push('progress', {kind: 'plan_step', id: 'p2', status: 'running'});
+          push('progress', {kind: 'tool_call_start', tool: 'disk_usage', argv: {path: '/var/log'}});
+          await sleep(420);
+          push('progress', {kind: 'tool_call_end', tool: 'disk_usage',
+            meta: {ok: true}, text: '/var/log 4.7G / 20G (24%)'});
+          push('progress', {kind: 'plan_step', id: 'p2', status: 'done'});
+          await sleep(220);
+
+          // 3) 步骤三：风险评估
+          push('progress', {kind: 'plan_step', id: 'p3', status: 'running'});
+          await sleep(520);
+          push('progress', {kind: 'plan_step', id: 'p3', status: 'done'});
+
+          // 3.5) 高风险任务 → 弹出审批卡片（占位演示；真实后端由 server.py emit approval_required）
+          if (/删除|清理|rm\s|drop|重启|restart|kill|格式化|format|reboot|shutdown/i.test(reqText)) {
+            push('approval_required', {
+              id: 'apr_' + Math.random().toString(16).slice(2, 6),
+              title: '高风险操作需要人工确认',
+              risk: 'high',
+              body: 'find /var/log -name "*.gz" -mtime +30 -delete   # 38 files · ~1.2G',
+              summary_lines: [
+                '影响范围：/var/log/*.gz（38 个文件，约 1.2G）',
+                '不可逆：文件将被永久删除',
+                '建议：先确认无审计留存需求',
+              ],
+            });
+            await sleep(420);
+          }
+
+          // 4) 步骤四：终答 —— 真实调用 Claude
+          push('progress', {kind: 'plan_step', id: 'p4', status: 'running'});
+          push('progress', {kind: 'thinking_delta', delta: ' 生成答复…'});
+          let answer;
+          if (window.claude && window.claude.complete) {
+            answer = await window.claude.complete({
+              messages: [{
+                role: 'user',
+                content:
+                  '你是 kyagent —— 一个中文运维助手，运行在企业内网控制台。' +
+                  '请用简洁、专业的中文 Markdown 回答下面的运维任务，' +
+                  '可分点说明你会怎么排查/执行、涉及的命令、以及风险提示。' +
+                  '不要执行真实命令，只给出建议性答复。\n\n任务：' + reqText,
+              }],
+            });
+          } else {
+            answer = '（未检测到 Claude 接口）这是占位答复。任务已收到：\n\n> ' + reqText;
+          }
+          push('progress', {kind: 'plan_step', id: 'p4', status: 'done'});
+          push('final', {text: answer, trace_id: 'mock-' + Math.random().toString(16).slice(2, 14)});
+        } catch (e) {
+          push('progress', {kind: 'error', text: 'mock 生成失败：' + (e && e.message || e)});
+          push('final', {text: '（占位层出错）' + (e && e.message || e), trace_id: 'mock-error'});
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {status: 200, headers: {'Content-Type': 'text/event-stream'}});
+  }
+
+  /* ---- 路由分发 ---- */
+  window.fetch = async function (input, opts = {}) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    if (!url.includes('/api/')) return realFetch(input, opts);
+    const path = url.split('?')[0].replace(/^.*?(\/api\/)/, '/api/');
+    let bodyText = '';
+    try { bodyText = opts.body ? (typeof opts.body === 'string' ? opts.body : '') : ''; } catch (_) {}
+    const body = (() => { try { return bodyText ? JSON.parse(bodyText) : {}; } catch { return {}; } })();
+    await sleep(120);   // 轻微延迟，贴近真实网络
+
+    if (path === '/api/health') return json({version: '0.1.0-mock', ok: true});
+    if (path === '/api/tools')  return json({count: TOOLS.length, tools: TOOLS});
+    if (path === '/api/ask/stream') return askStream(body.text || '');
+    if (path === '/api/safety/check') return json(safetyVerdict(body.text || ''));
+    if (path === '/api/audit/traces') return json({traces: TRACES});
+    if (/^\/api\/audit\/traces\/.+/.test(path)) return json(traceEvents(decodeURIComponent(path.split('/').pop())));
+    if (/^\/api\/sessions\/.+\/reset$/.test(path)) return json({ok: true});
+    if (/^\/api\/approvals\/.+\/(approve|reject)$/.test(path)) {
+      const decision = path.endsWith('approve') ? 'approve' : 'reject';
+      const id = path.split('/')[3];
+      return json({id, decision, status: decision + 'd'});
+    }
+    if (/^\/api\/choices\/.+\/select$/.test(path)) {
+      const id = path.split('/')[3];
+      return json({choice_id: id, value: body.value, status: 'selected'});
+    }
+    return json({error: 'mock: 未实现的接口 ' + path}, 404);
+  };
+
+  console.info('[kyagent] 占位 MOCK 层已启用 —— 对话接 Claude，其余接口返回示例数据。加 ?live 可绕过。');
+})();
+</script>
+
+<script>
+/* ============================================================================
+   逻辑层 —— 与原版 server.py 接口完全一致，仅在视觉/空状态处做了无害增强。
+   下方每个 fetch 都标注了对应后端路由。改 UI 时请勿改动这些调用与元素 id。
+   ========================================================================== */
+
+const SESSION_ID = (() => {
+  let s = localStorage.getItem('ky_sid');
+  if (!s) { s = 'web-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('ky_sid', s); }
+  return s;
+})();
+document.getElementById('apiToken').value = localStorage.getItem('ky_token') || '';
+const state = { busy: false, pendingApprovals: new Map(), metrics: {thinking: 0, tools: 0, approvals: 0} };
+const activityState = {title: '空闲', detail: '等待任务', thinking: ''};
+document.getElementById('sessionView').textContent = SESSION_ID;
+
+/* ---- Tab 切换（保留原 data-tab 协议） ---- */
+document.querySelectorAll('header nav button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('header nav button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    ['chat','tools','safety','audit'].forEach(t => {
+      document.getElementById('tab-'+t).classList.toggle('hide', t !== b.dataset.tab);
+    });
+    if (b.dataset.tab === 'tools') loadTools();
+    if (b.dataset.tab === 'audit') loadTraces();
+  };
+});
+
+function saveToken() {
+  localStorage.setItem('ky_token', document.getElementById('apiToken').value.trim());
+}
+function apiHeaders(extra = {}) {
+  const token = (document.getElementById('apiToken').value || '').trim();
+  return token ? {...extra, 'Authorization': `Bearer ${token}`} : extra;
+}
+
+/* ---- 遥测舱展开/收起 ---- */
+const _tele = document.getElementById('telemetry');
+document.getElementById('telemetryOrb').addEventListener('click', () => {
+  const open = _tele.classList.toggle('open');
+  document.getElementById('telemetryOrb').setAttribute('aria-expanded', open);
+});
+document.addEventListener('click', e => {
+  if (_tele.classList.contains('open') && !_tele.contains(e.target)) _tele.classList.remove('open');
+});
+
+/* ---- 遥测舱「当前状态」可拖动（纯原生指针事件，无依赖；位置记忆 localStorage） ---- */
+(function makeOrbDraggable() {
+  const orb = document.getElementById('telemetryOrb');
+  let start = null, moved = false;
+  function clampApply(left, top) {
+    const w = _tele.offsetWidth, h = _tele.offsetHeight, m = 8;
+    left = Math.max(m, Math.min(left, window.innerWidth - w - m));
+    top = Math.max(m, Math.min(top, window.innerHeight - h - m));
+    _tele.style.left = left + 'px';
+    _tele.style.top = top + 'px';
+    _tele.style.right = 'auto';
+    _tele.style.bottom = 'auto';
+    _tele.classList.toggle('flip-down', top < window.innerHeight / 2);
+    _tele.classList.toggle('flip-left', left > window.innerWidth / 2);
+  }
+  // 恢复上次位置
+  try {
+    const saved = JSON.parse(localStorage.getItem('ky_orb_pos') || 'null');
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+      requestAnimationFrame(() => clampApply(saved.left, saved.top));
+    }
+  } catch (_) {}
+  orb.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const r = _tele.getBoundingClientRect();
+    start = { x: e.clientX, y: e.clientY, ox: r.left, oy: r.top };
+    moved = false;
+    try { orb.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  orb.addEventListener('pointermove', e => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (!moved && Math.hypot(dx, dy) < 4) return;   // 阈值内仍视为点击
+    moved = true;
+    _tele.classList.add('dragging');
+    _tele.classList.remove('open');
+    clampApply(start.ox + dx, start.oy + dy);
+  });
+  function endDrag(e) {
+    if (!start) return;
+    try { orb.releasePointerCapture(e.pointerId); } catch (_) {}
+    _tele.classList.remove('dragging');
+    if (moved) {
+      const r = _tele.getBoundingClientRect();
+      localStorage.setItem('ky_orb_pos', JSON.stringify({ left: r.left, top: r.top }));
+      orb.addEventListener('click', swallowClick, true);   // 吞掉拖动结束后的那次点击
+    }
+    start = null;
+  }
+  function swallowClick(ev) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    orb.removeEventListener('click', swallowClick, true);
+  }
+  orb.addEventListener('pointerup', endDrag);
+  orb.addEventListener('pointercancel', endDrag);
+  // 视口缩放时把遥测舱拉回可视范围
+  window.addEventListener('resize', () => {
+    if (_tele.style.left) {
+      const r = _tele.getBoundingClientRect();
+      clampApply(r.left, r.top);
+    }
+  });
+})();
+
+/* ---- GET /api/health ---- */
+function setBanner(cls, text) {
+  const b = document.getElementById('banner');
+  b.className = 'banner' + (cls ? ' ' + cls : '');
+  document.getElementById('bannerText').textContent = text;
+  /* 同步星座「连接」节点活态 */
+  _tele.classList.toggle('ok', cls === 'ok');
+  _tele.classList.toggle('bad', cls === 'bad');
+}
+fetch('/api/health', {headers: apiHeaders()}).then(r => r.json()).then(h => {
+  setBanner('ok', `v${h.version}`);
+}).catch(e => {
+  setBanner('bad', '连接失败');
+});
+
+function setStatus(text) {
+  document.getElementById('runStatus').textContent = text;
+}
+/* agent 行动中：切换闪烁星芒动画。sendAsk 开始=true，结束/抦截/重置=false */
+function setAgentWorking(on) {
+  document.body.classList.toggle('agent-working', !!on);
+}
+function updateApprovalStatus() {
+  const n = state.pendingApprovals.size;
+  document.getElementById('approvalView').textContent = n ? `${n} 个待审核` : '无待处理';
+  const pc = document.getElementById('approvalPanelCount');
+  if (pc) pc.textContent = n ? String(n) : '';
+  /* 审核小面板：无待审时显示待命占位 */
+  const dock = document.getElementById('approvalDock');
+  if (dock && !n) {
+    dock.innerHTML =
+      `<div class="dock-empty">
+        <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/><path d="M48 52l9 9 18-19"/>
+        </svg>
+        <div class="d">高风险操作会在这里<br>弹出审批卡片。</div>
+      </div>`;
+  } else if (dock && n) {
+    dock.innerHTML =
+      `<div class="dock-empty" style="color:var(--clay-deep)">
+        <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/><path d="M48 52l9 9 18-19"/>
+        </svg>
+        <div class="d"><b>${n}</b> 张审批卡片已弹出，<br>请在上方处理。</div>
+      </div>`;
+  }
+  /* 同步星座「审核」节点：有待审则点亮脉动 */
+  _tele.classList.toggle('pend', n > 0);
+}
+/* 浮动弹层锚定到右上「审核」面板（随窗口变化重定位） */
+function positionApprovalLayer() {
+  const panel = document.querySelector('.approval-card');
+  const layer = document.getElementById('approvalLayer');
+  if (!panel || !layer) return;
+  const r = panel.getBoundingClientRect();
+  layer.style.top = r.top + 'px';
+  layer.style.left = r.left + 'px';
+  layer.style.width = r.width + 'px';
+}
+window.addEventListener('resize', positionApprovalLayer);
+window.addEventListener('scroll', positionApprovalLayer, true);
+function updateMetrics() {
+  document.getElementById('eventMetrics').innerHTML =
+    `<span class="pill">thinking ${state.metrics.thinking}</span> ` +
+    `<span class="pill">tools ${state.metrics.tools}</span> ` +
+    `<span class="pill">approvals ${state.metrics.approvals}</span>`;
+}
+function esc(s) {
+  return (s ?? '').toString().replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+}
+function setActivity(title, detail) {
+  activityState.title = title || '运行中';
+  activityState.detail = detail || '';
+  renderActivity();
+}
+function resetActivity() {
+  activityState.title = '调度中';
+  activityState.detail = '等待后端事件...';
+  activityState.thinking = '';
+  renderActivity();
+}
+function renderActivity() {
+  const box = document.getElementById('agentStatusDetail');
+  if (!box) return;
+  box.replaceChildren();
+  const title = document.createElement('div');
+  title.className = 'activity-title';
+  title.textContent = activityState.title || '运行中';
+  box.appendChild(title);
+  const lines = [];
+  if (activityState.thinking) lines.push('思考：\n' + activityState.thinking);
+  if (activityState.detail) lines.push(activityState.detail);
+  if (!lines.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted-line';
+    empty.textContent = '等待任务';
+    box.appendChild(empty);
+    return;
+  }
+  const pre = document.createElement('pre');
+  pre.textContent = lines.join('\n\n');
+  box.appendChild(pre);
+}
+function appendInlineMarkdown(parent, text) {
+  const src = String(text ?? '');
+  const re = /(`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+)\))/g;
+  let last = 0;
+  for (const m of src.matchAll(re)) {
+    if (m.index > last) parent.appendChild(document.createTextNode(src.slice(last, m.index)));
+    if (m[2]) {
+      const code = document.createElement('code');
+      code.textContent = m[2];
+      parent.appendChild(code);
+    } else if (m[3]) {
+      const strong = document.createElement('strong');
+      strong.textContent = m[3];
+      parent.appendChild(strong);
+    } else if (m[4]) {
+      const em = document.createElement('em');
+      em.textContent = m[4];
+      parent.appendChild(em);
+    } else if (m[5] && m[6]) {
+      const a = document.createElement('a');
+      a.textContent = m[5];
+      a.href = m[6];
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      parent.appendChild(a);
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) parent.appendChild(document.createTextNode(src.slice(last)));
+}
+function markdownLooksRenderable(text) {
+  return /(^|\n)(#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s+|```)|(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/)/.test(text || '')
+    || hasMarkdownTable(text);
+}
+/* ---- GFM 表格：严格校验，不合格则降级为普通文本 ---- */
+function isTableSeparator(line) {
+  if (line == null) return false;
+  const s = line.trim();
+  // 整行只能由 空格 | : - 组成，且必须含有 -
+  if (!s.includes('-') || /[^\s|:-]/.test(s)) return false;
+  const cells = s.replace(/^\|/, '').replace(/\|$/, '').split('|');
+  if (!cells.length) return false;
+  // 每个单元格须形如 ---  :--  --:  :--:（至少 2 个连字符）
+  return cells.every(c => /^\s*:?-{2,}:?\s*$/.test(c));
+}
+function splitTableRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+}
+function hasMarkdownTable(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i - 1].includes('|') && isTableSeparator(lines[i])
+        && splitTableRow(lines[i - 1]).length === splitTableRow(lines[i]).length) return true;
+  }
+  return false;
+}
+function renderMarkdownInto(el, text) {
+  try {
+    const source = String(text ?? '');
+    if (!markdownLooksRenderable(source)) {
+      el.textContent = source;
+      return;
+    }
+    el.classList.add('md-doc');
+    el.replaceChildren();
+    const lines = source.replace(/\r\n?/g, '\n').split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i += 1; continue; }
+      const fence = line.match(/^```(.*)$/);
+      if (fence) {
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        const buf = [];
+        i += 1;
+        while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i += 1; }
+        if (i < lines.length) i += 1;
+        code.textContent = buf.join('\n');
+        pre.appendChild(code);
+        el.appendChild(pre);
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        const h = document.createElement('h' + heading[1].length);
+        appendInlineMarkdown(h, heading[2]);
+        el.appendChild(h);
+        i += 1;
+        continue;
+      }
+      const quote = line.match(/^>\s?(.*)$/);
+      if (quote) {
+        const block = document.createElement('blockquote');
+        const parts = [];
+        while (i < lines.length) {
+          const q = lines[i].match(/^>\s?(.*)$/);
+          if (!q) break;
+          parts.push(q[1]);
+          i += 1;
+        }
+        appendInlineMarkdown(block, parts.join('\n'));
+        el.appendChild(block);
+        continue;
+      }
+      const list = line.match(/^(\s*)([-*]|\d+\.)\s+(.+)$/);
+      if (list) {
+        const ordered = /\d+\./.test(list[2]);
+        const ul = document.createElement(ordered ? 'ol' : 'ul');
+        while (i < lines.length) {
+          const item = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.+)$/);
+          if (!item || (/\d+\./.test(item[2]) !== ordered)) break;
+          const li = document.createElement('li');
+          appendInlineMarkdown(li, item[3]);
+          ul.appendChild(li);
+          i += 1;
+        }
+        el.appendChild(ul);
+        continue;
+      }
+      // GFM 表格：当前行含 | 且下一行是合法分隔行、列数一致才渲染；否则降级走段落
+      if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        const header = splitTableRow(line);
+        const sep = splitTableRow(lines[i + 1]);
+        if (header.length >= 1 && sep.length === header.length) {
+          const aligns = sep.map(c => {
+            const l = c.trim().startsWith(':'), r = c.trim().endsWith(':');
+            return l && r ? 'center' : r ? 'right' : l ? 'left' : '';
+          });
+          const rows = [];
+          let j = i + 2;
+          while (j < lines.length && lines[j].trim() && lines[j].includes('|')) {
+            rows.push(splitTableRow(lines[j]));
+            j += 1;
+          }
+          const table = document.createElement('table');
+          const thead = document.createElement('thead');
+          const htr = document.createElement('tr');
+          header.forEach((h, idx) => {
+            const th = document.createElement('th');
+            if (aligns[idx]) th.style.textAlign = aligns[idx];
+            appendInlineMarkdown(th, h);
+            htr.appendChild(th);
+          });
+          thead.appendChild(htr);
+          table.appendChild(thead);
+          const tbody = document.createElement('tbody');
+          rows.forEach(r => {
+            const tr = document.createElement('tr');
+            for (let idx = 0; idx < header.length; idx += 1) {
+              const td = document.createElement('td');
+              if (aligns[idx]) td.style.textAlign = aligns[idx];
+              appendInlineMarkdown(td, r[idx] ?? '');
+              tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+          });
+          table.appendChild(tbody);
+          const wrap = document.createElement('div');
+          wrap.className = 'md-table-wrap';
+          wrap.appendChild(table);
+          el.appendChild(wrap);
+          i = j;
+          continue;
+        }
+      }
+      const paragraph = [];
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s+|```|>\s?|[-*]\s+|\d+\.\s+)/.test(lines[i])) {
+        paragraph.push(lines[i]);
+        i += 1;
+      }
+      const p = document.createElement('p');
+      appendInlineMarkdown(p, paragraph.join(' '));
+      el.appendChild(p);
+    }
+  } catch {
+    el.classList.remove('md-doc');
+    el.textContent = text || '';
+  }
+}
+function approvalDomId(id) {
+  return 'approval-' + encodeURIComponent(id).replace(/%/g, '_');
+}
+
+/* ============================================================================
+   执行计划 · Plan —— 纯原生 DOM，无外部依赖（LoongArch / 麒麟 浏览器可直接运行）
+   后端对接（server.py · on_progress 直接 emit 这两类 progress 事件，前端零改动）：
+     · {kind:'plan',      steps:[{id, text, status}]}  → 设置/替换整个计划
+     · {kind:'plan_step', id, status}                  → 更新单步状态
+       status ∈ pending | running | done | failed
+   ========================================================================== */
+const planState = { steps: [] };
+function planEmptyHtml() {
+  return `<div class="dock-empty">
+      <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="30" y="16" width="60" height="74" rx="8"/><path d="M48 12h24v10H48z"/>
+        <path d="M42 40h12" opacity=".5"/><path d="M62 40h16"/>
+        <path d="M42 56h12" opacity=".5"/><path d="M62 56h16"/>
+        <path d="M42 72h12" opacity=".5"/><path d="M62 72h16"/>
+        <path d="M44 39l3 3 5-6" opacity=".9"/>
+      </svg>
+      <div class="d">Agent 接到任务后，<br>执行计划会逐步显示在这里。</div>
+    </div>`;
+}
+function updatePlanCount() {
+  const el = document.getElementById('planCount');
+  if (!el) return;
+  const total = planState.steps.length;
+  const done = planState.steps.filter(s => s.status === 'done').length;
+  el.textContent = total ? `${done}/${total}` : '';
+}
+function drawPlan() {
+  const dock = document.getElementById('planDock');
+  if (!dock) return;
+  if (!planState.steps.length) { dock.innerHTML = planEmptyHtml(); updatePlanCount(); return; }
+  const list = document.createElement('div');
+  list.className = 'plan-list';
+  planState.steps.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'plan-step';
+    row.dataset.status = s.status || 'pending';
+    const num = document.createElement('span');
+    num.className = 'plan-num';
+    num.textContent = (i + 1);
+    const chk = document.createElement('span');
+    chk.className = 'plan-check';
+    const txt = document.createElement('span');
+    txt.className = 'plan-text';
+    txt.textContent = s.text;
+    row.append(num, chk, txt);
+    list.appendChild(row);
+  });
+  dock.replaceChildren(list);
+  updatePlanCount();
+}
+function renderPlan(steps) {
+  planState.steps = (steps || []).map((s, i) => (typeof s === 'string'
+    ? { id: 'step-' + i, text: s, status: 'pending' }
+    : { id: s.id ?? ('step-' + i), text: s.text ?? String(s), status: s.status || 'pending' }));
+  drawPlan();
+}
+function setPlanStep(id, status) {
+  const s = planState.steps.find(x => x.id === id);
+  if (s) { s.status = status || 'pending'; drawPlan(); }
+}
+function resetPlan() {
+  planState.steps = [];
+  const dock = document.getElementById('planDock');
+  if (dock) dock.innerHTML = planEmptyHtml();
+  updatePlanCount();
+}
+/* 首条真实消息进来时，移除空状态占位 */
+function clearChatEmpty() {
+  const e = document.getElementById('chatEmpty');
+  if (e) e.remove();
+}
+const chatFollow = {enabled: true, programmatic: false, timer: 0};
+function chatNearBottom(log) {
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+}
+function followChatOutput() {
+  const log = document.getElementById('chatLog');
+  if (!chatFollow.enabled) return;
+  requestAnimationFrame(() => {
+    chatFollow.programmatic = true;
+    clearTimeout(chatFollow.timer);
+    log.scrollTo({top: log.scrollHeight, behavior: 'smooth'});
+    chatFollow.timer = setTimeout(() => {
+      if (chatFollow.enabled) {
+        const oldBehavior = log.style.scrollBehavior;
+        log.style.scrollBehavior = 'auto';
+        log.scrollTop = log.scrollHeight;
+        log.style.scrollBehavior = oldBehavior;
+      }
+      chatFollow.programmatic = false;
+    }, 450);
+  });
+}
+const chatLogEl = document.getElementById('chatLog');
+chatLogEl.addEventListener('scroll', () => {
+  if (!chatFollow.programmatic) chatFollow.enabled = chatNearBottom(chatLogEl);
+}, {passive: true});
+chatLogEl.addEventListener('wheel', () => { chatFollow.enabled = false; }, {passive: true});
+chatLogEl.addEventListener('touchmove', () => { chatFollow.enabled = false; }, {passive: true});
+function appendMsg(cls, who, text, opts = {}) {
+  clearChatEmpty();
+  const log = document.getElementById('chatLog');
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  /* thinking 气泡的 who 标签前加一颗闪烁小星，强化「正在思考」的观感 */
+  const sparkSvg = cls === 'thinking'
+    ? '<svg class="spark-inline" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 0c1 7.2 4.8 11 12 12-7.2 1-11 4.8-12 12-1-7.2-4.8-11-12-12 7.2-1 11-4.8 12-12z"/></svg>'
+    : '';
+  div.innerHTML = who ? `<div class="who">${sparkSvg}${esc(who)}</div><div class="body"></div>` : '<div class="body"></div>';
+  const body = div.querySelector('.body');
+  if (opts.markdown) renderMarkdownInto(body, text || '');
+  else body.textContent = text || '';
+  log.appendChild(div);
+  followChatOutput();
+  return div;
+}
+function summarize(value) {
+  if (value == null || value === '') return '(空)';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > 260 ? text.slice(0, 260) + '...' : text;
+}
+function toolName(p) {
+  return p.tool || p.name || p.tool_name || 'unknown_tool';
+}
+function toolArgv(p) {
+  return p.argv ?? p.args ?? p.arguments ?? {};
+}
+
+/* ---- SSE progress 事件分发（与 server.py on_progress 对齐） ---- */
+function handleProgress(p) {
+  if (p.kind === 'thinking_delta') {
+    state.metrics.thinking += 1;
+    updateMetrics();
+    currentThinking += p.delta || '';
+    activityState.thinking = currentThinking;
+    setActivity('思考中', activityState.detail);
+    setStatus('思考中');
+  } else if (p.kind === 'tool_call_start') {
+    state.metrics.tools += 1;
+    updateMetrics();
+    const name = toolName(p);
+    setStatus(`调用工具：${name}`);
+    setActivity(`调用工具：${name}`, `argv: ${summarize(toolArgv(p))}`);
+  } else if (p.kind === 'tool_call_end') {
+    const ok = p.meta?.ok ?? p.ok;
+    const name = toolName(p);
+    setStatus(`工具结束：${name}`);
+    setActivity(`工具结束：${name}`, `${ok === false ? 'FAILED' : 'OK'} ${name}\nresult: ${summarize(p.text ?? p.result ?? p.output ?? p.meta)}`);
+  } else if (p.kind === 'approval_required') {
+    renderApproval(p);
+  } else if (p.kind === 'plan') {
+    renderPlan(p.steps);
+  } else if (p.kind === 'plan_step') {
+    setPlanStep(p.id, p.status);
+  } else if (p.kind === 'approval_resolved') {
+    resolveApproval(p);
+  } else if (p.kind === 'error') {
+    setStatus('错误');
+    setActivity('错误', p.text || p.message || '未知错误');
+    appendMsg('error', 'error', p.text || p.message || '未知错误');
+  } else {
+    const label = p.kind || '运行中';
+    setStatus(label);
+    setActivity(label, p.text || summarize(p.meta || ''));
+  }
+}
+
+let currentThinking = '';
+let currentThinkingDiv = null;
+
+/* ---- POST /api/ask/stream （SSE 流式对话） ---- */
+async function sendAsk() {
+  if (state.busy) return;
+  const input = document.getElementById('askInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  state.busy = true;
+  setAgentWorking(true);
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('traceView').textContent = '—';
+  chatFollow.enabled = true;
+  appendMsg('user', 'operator', text);
+  currentThinking = '';
+  currentThinkingDiv = null;
+  resetActivity();
+  resetPlan();
+  setStatus('调度中');
+
+  try {
+    const resp = await fetch('/api/ask/stream', {
+      method: 'POST',
+      headers: apiHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({text, user: 'web', session_id: SESSION_ID}),
+    });
+    if (!resp.ok) {
+      setActivity('请求失败', `HTTP ${resp.status}`);
+      setStatus('请求失败');
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const frames = buf.split('\n\n');
+      buf = frames.pop();
+      for (const frame of frames) handleSseFrame(frame);
+    }
+    if (buf.trim()) handleSseFrame(buf);
+  } catch (e) {
+    appendMsg('error', 'error', e.message || e);
+    setStatus('连接异常');
+  } finally {
+    state.busy = false;
+    setAgentWorking(false);
+    document.getElementById('sendBtn').disabled = false;
+  }
+}
+
+/* ---- SSE 帧解析（event: / data: 协议，与 _sse_pack 对齐） ---- */
+function handleSseFrame(frame) {
+  const lines = frame.split('\n');
+  let event = 'message', data = '';
+  for (const ln of lines) {
+    if (ln.startsWith('event:')) event = ln.slice(6).trim();
+    else if (ln.startsWith('data:')) data += ln.slice(5).trimStart();
+  }
+  if (!data) return;
+  let p; try { p = JSON.parse(data); } catch { return; }
+  if (event === 'progress' || event === 'message') {
+    handleProgress(p);
+  } else if (event === 'approval_required') {
+    renderApproval(p);
+  } else if (event === 'approval_resolved') {
+    resolveApproval(p);
+  } else if (event === 'choice_required') {
+    renderChoice(p);
+  } else if (event === 'choice_resolved') {
+    resolveChoice(p);
+  } else if (event === 'final') {
+    const trace = p.trace_id ? String(p.trace_id) : '-';
+    document.getElementById('traceView').textContent = trace === '-' ? '—' : trace.slice(0, 12);
+    setStatus(p.denied ? '已被护栏拦截' : '完成');
+    setActivity(p.denied ? '已被护栏拦截' : '完成', p.text ? '最终答复已输出到会话。' : '无最终文本。');
+    appendMsg('agent', 'agent · final', p.text || '(空)', {markdown: true});
+    if (p.denied) appendMsg('error', 'safety', '被安全护栏拦截');
+  } else {
+    handleProgress({kind: event, ...p});
+  }
+}
+
+/* ---- 审批卡片渲染（POST /api/approvals/{id}/approve|reject） ---- */
+function renderApproval(p) {
+  const id = p.id || p.approval_id || p.request_id;
+  if (!id) return;
+  state.pendingApprovals.set(id, p);
+  state.metrics.approvals += 1;
+  updateMetrics();
+  updateApprovalStatus();
+  setStatus('等待人工审核');
+  setActivity('等待人工审核', p.title || '需要人工审核');
+  appendMsg('error', 'approval_required', p.title || '需要人工审核');
+
+  const layer = document.getElementById('approvalLayer');
+  const old = document.getElementById(approvalDomId(id));
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.className = 'approval-panel pop-in';
+  div.id = approvalDomId(id);
+  div.addEventListener('animationend', function onPop(e) {
+    if (e.animationName === 'cardPopIn') { div.classList.remove('pop-in'); div.removeEventListener('animationend', onPop); }
+  });
+  const risk = p.risk || 'unknown';
+  const body = p.body || p.cmd || p.command || p.text || '';
+  const summary = Array.isArray(p.summary_lines) ? p.summary_lines : [];
+  div.innerHTML = `
+    <div class="approval-head">
+      <div>
+        <div class="label">approval_required</div>
+        <div class="approval-title">${esc(p.title || '高风险操作需要审核')}</div>
+      </div>
+      <span class="pill ${esc(risk)}">${esc(risk)}</span>
+    </div>
+    <div class="muted" style="font-size:12px">id: <code>${esc(id)}</code></div>
+    <pre>${esc(body || '(无命令/正文)')}</pre>
+    ${summary.length ? `<ul class="summary-list">${summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="muted" style="font-size:12.5px">按当前风险级别进入人工审核</div>'}
+    <div class="approval-actions">
+      <button class="approve" type="button" data-decision="approve">批准</button>
+      <button class="reject" type="button" data-decision="reject">拒绝</button>
+    </div>`;
+  div.querySelectorAll('button[data-decision]').forEach(btn => {
+    btn.onclick = () => decideApproval(id, btn.dataset.decision);
+  });
+  positionApprovalLayer();
+  layer.prepend(div);
+  updateApprovalStatus();
+}
+
+/* ---- 选择卡片渲染（POST /api/choices/{id}/select） ---- */
+function choiceDomId(id) {
+  return 'choice-' + encodeURIComponent(id).replace(/%/g, '_');
+}
+function renderChoice(p) {
+  const id = p.choice_id;
+  if (!id) return;
+  setStatus('等待选择');
+  const layer = document.getElementById('approvalLayer');
+  const div = document.createElement('div');
+  div.className = 'choice-panel pop-in';
+  div.id = choiceDomId(id);
+  div.addEventListener('animationend', function onPop(e) {
+    if (e.animationName === 'cardPopIn') { div.classList.remove('pop-in'); div.removeEventListener('animationend', onPop); }
+  });
+  div.innerHTML = `<div class="label">choice_required</div><div class="approval-title">${esc(p.question)}</div>
+    <div class="choice-actions">${(p.options || []).map(o => `<button class="ghost" type="button" data-value="${esc(o.value)}">${esc(o.label)}${o.description ? ` — ${esc(o.description)}` : ''}</button>`).join('')}</div>`;
+  div.querySelectorAll('button').forEach(button => {
+    button.onclick = () => selectChoice(id, button.dataset.value);
+  });
+  positionApprovalLayer();
+  layer.prepend(div);
+}
+async function selectChoice(id, value) {
+  const resp = await fetch(`/api/choices/${encodeURIComponent(id)}/select`, {
+    method: 'POST',
+    headers: apiHeaders({'Content-Type': 'application/json'}),
+    body: JSON.stringify({value, reviewer: 'web'}),
+  });
+  if (!resp.ok) {
+    appendMsg('error', 'choice', `选择失败：HTTP ${resp.status}`);
+    return;
+  }
+  resolveChoice(await resp.json());
+}
+function resolveChoice(p) {
+  const card = document.getElementById(choiceDomId(p.choice_id));
+  if (card) {
+    card.innerHTML = `<div class="label">choice_resolved</div><div class="approval-title">${esc(p.value || p.status)}</div>`;
+    setTimeout(() => {
+      card.classList.add('pop-out');
+      let done = false;
+      const finish = () => { if (done) return; done = true; card.remove(); };
+      card.addEventListener('animationend', finish, {once: true});
+      setTimeout(finish, 360);   // 兜底：reduced-motion 下 animationend 不触发
+    }, 900);
+  }
+  setStatus('运行中');
+}
+
+/* ---- 审批裁决 ---- */
+async function decideApproval(id, decision) {
+  const card = document.getElementById(approvalDomId(id));
+  if (!card) return;
+  card.querySelectorAll('button').forEach(b => b.disabled = true);
+  setStatus(decision === 'approve' ? '正在批准审核' : '正在拒绝审核');
+  try {
+    const resp = await fetch(`/api/approvals/${encodeURIComponent(id)}/${decision}`, {
+      method: 'POST',
+      headers: apiHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({reviewer: 'web', reason: 'browser decision'}),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    resolveApproval(await resp.json());
+  } catch (e) {
+    appendMsg('error', 'approval', `${decision} 失败：${e.message || e}`);
+    card.querySelectorAll('button').forEach(b => b.disabled = false);
+    setStatus('审核操作失败');
+  }
+}
+function approveApproval(id) { return decideApproval(id, 'approve'); }
+function rejectApproval(id) { return decideApproval(id, 'reject'); }
+
+function resolveApproval(p) {
+  const id = p.id || p.approval_id || p.request_id;
+  if (!id) return;
+  const card = document.getElementById(approvalDomId(id));
+  if (!state.pendingApprovals.has(id) && card?.classList.contains('resolved')) return;
+  state.pendingApprovals.delete(id);
+  if (card) {
+    card.classList.add('resolved');
+    const act = card.querySelector('.approval-actions');
+    if (act) act.innerHTML = `<span class="pill">${esc(p.decision || p.status || 'resolved')}</span>`;
+    /* 短暂展示裁决结果后，浮动卡片淡出移除（不滚动堆积） */
+    setTimeout(() => {
+      card.classList.add('pop-out');
+      let done = false;
+      const finish = () => { if (done) return; done = true; card.remove(); updateApprovalStatus(); };
+      card.addEventListener('animationend', finish, {once: true});
+      setTimeout(finish, 360);   // 兜底：reduced-motion 下动画被禁用，animationend 不触发
+    }, 900);
+  }
+  updateApprovalStatus();
+  setStatus(state.pendingApprovals.size ? '等待人工审核' : '运行中');
+  setActivity(state.pendingApprovals.size ? '等待人工审核' : '运行中', `approval_resolved ${id}: ${p.decision || p.status || 'resolved'}`);
+}
+
+/* ---- POST /api/sessions/{id}/reset ---- */
+async function resetSession() {
+  await fetch(`/api/sessions/${SESSION_ID}/reset`, {method:'POST', headers: apiHeaders()});
+  document.getElementById('chatLog').innerHTML =
+    `<div class="chat-empty" id="chatEmpty">
+       <svg viewBox="0 0 160 120" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+         <rect x="22" y="20" width="116" height="78" rx="9"/><path d="M22 36h116" opacity=".7"/>
+         <circle cx="33" cy="28" r="2"/><circle cx="41" cy="28" r="2"/><circle cx="49" cy="28" r="2"/>
+         <path d="M38 56l14 11-14 11"/><path d="M64 80h34"/>
+         <path d="M120 104c6 6 14 8 22 6-6-2-9-7-9-13" opacity=".75"/>
+       </svg>
+       <div class="t">会话已清空</div><div class="d">输入新的运维任务重新开始。</div>
+     </div>`;
+  document.getElementById('approvalDock').innerHTML =
+    `<div class="dock-empty">
+       <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+         <path d="M60 14l32 11v22c0 22-15 33-32 39-17-6-32-17-32-39V25z"/><path d="M48 52l9 9 18-19"/>
+       </svg>
+       <div class="d">高风险操作会在这里<br>弹出审批卡片。</div>
+     </div>`;
+  document.getElementById('approvalLayer').replaceChildren();
+  state.pendingApprovals.clear();
+  state.metrics = {thinking: 0, tools: 0, approvals: 0};
+  activityState.title = '空闲';
+  activityState.detail = '等待任务';
+  activityState.thinking = '';
+  renderActivity();
+  resetPlan();
+  updateApprovalStatus();
+  updateMetrics();
+  setStatus('空闲');
+}
+
+updateMetrics();
+
+/* ---- GET /api/tools ---- */
+let _allTools = [];
+async function loadTools() {
+  const r = await fetch('/api/tools', {headers: apiHeaders()}); const j = await r.json();
+  _allTools = j.tools || [];
+  document.getElementById('toolCount').textContent = `(${j.count ?? _allTools.length})`;
+  renderTools();
+}
+function renderTools() {
+  const f = (document.getElementById('toolFilter').value || '').toLowerCase();
+  const tbody = document.querySelector('#toolTable tbody');
+  tbody.innerHTML = '';
+  for (const t of _allTools) {
+    const hay = `${t.name || ''} ${t.description || ''}`.toLowerCase();
+    if (f && !hay.includes(f)) continue;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><code>${esc(t.name)}</code></td>
+      <td><span class="pill ${esc(t.risk)}">${esc(t.risk)}</span></td>
+      <td>${t.requires_root ? 'yes' : 'no'}</td>
+      <td>${t.read_only ? 'yes' : 'no'}</td>
+      <td>${esc((t.description || '').split('\n')[0])}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+/* ---- POST /api/safety/check ---- */
+async function checkSafety() {
+  const text = document.getElementById('safetyInput').value.trim();
+  if (!text) return;
+  const r = await fetch('/api/safety/check', {
+    method:'POST', headers:apiHeaders({'Content-Type':'application/json'}),
+    body: JSON.stringify({text, layer: 'both'}),
+  });
+  const j = await r.json();
+  const box = document.getElementById('safetyResult');
+  const blockHtml = b => b ? `
+    <h4>${esc(b.layer)} 层
+      <span class="pill ${esc(b.risk)}">${esc(b.risk)}</span>
+      <span class="pill ${b.decision === 'deny' ? 'critical' : b.decision === 'confirm' ? 'medium' : 'low'}">${esc(b.decision)}</span>
+    </h4>
+    <ul>${(b.hits || []).map(h => `<li><code>${esc(h.rule_id)}</code> [${esc(h.category || '')}] ${esc(h.risk)}: ${esc(h.matched)}</li>`).join('') || '<li class="muted">(无命中)</li>'}</ul>
+    <pre>${esc((b.rationale || []).join('\n') || '(无说明)')}</pre>` : '';
+  box.innerHTML = `
+    ${blockHtml(j.intent)}
+    ${blockHtml(j.argv)}
+    ${j.final_decision ? `<h4>综合裁决 <span class="pill ${esc(j.final_risk)}">${esc(j.final_risk)}</span> <span class="pill ${j.final_decision === 'deny' ? 'critical' : j.final_decision === 'confirm' ? 'medium' : 'low'}">${esc(j.final_decision)}</span></h4>` : ''}
+  `;
+}
+
+/* ---- GET /api/audit/traces[/{id}] ---- */
+async function loadTraces() {
+  const r = await fetch('/api/audit/traces?limit=20', {headers: apiHeaders()}); const j = await r.json();
+  const tbody = document.querySelector('#traceTable tbody');
+  tbody.innerHTML = '';
+  for (const t of (j.traces || [])) {
+    const tr = document.createElement('tr');
+    const ts = new Date(t.started_at * 1000).toLocaleString();
+    tr.innerHTML = `<td><a href="#" data-id="${esc(t.trace_id)}"><code>${esc(t.trace_id)}</code></a></td><td>${esc(t.user)}</td><td>${esc(ts)}</td><td>${esc(t.channel)}</td>`;
+    tr.querySelector('a').onclick = e => { e.preventDefault(); showTrace(t.trace_id); };
+    tbody.appendChild(tr);
+  }
+}
+async function showTrace(id) {
+  const r = await fetch(`/api/audit/traces/${encodeURIComponent(id)}`, {headers: apiHeaders()}); const j = await r.json();
+  const box = document.getElementById('traceDetail');
+  box.innerHTML = `<div class="panel-head"><span class="eyebrow">推理链</span><h3 style="margin-left:-2px">trace ${esc(id)}</h3></div>` + (j.events || []).map(ev => `
+    <details><summary>#${String(ev.seq).padStart(2,'0')} ${esc(ev.kind)}</summary>
+    <pre>${esc(JSON.stringify(ev.payload, null, 2))}</pre></details>`).join('');
+}
+
+/* ============================================================================
+   【演示数据 · DEMO ONLY】
+   仅当 URL 带 ?demo=1 时注入，用于无后端环境下预览视觉效果。
+   生产部署可整段删除，绝不影响真实接口（默认不触发）。
+   ========================================================================== */
+if (location.search.includes('demo')) {
+  setBanner('ok', 'v0.1.0');
+  setStatus('完成');
+  document.getElementById('traceView').textContent = 'a3f9c1b7e204';
+  clearChatEmpty();
+  appendMsg('user', 'operator', '检查 nginx 服务状态，并清理 /var/log 下 30 天前的归档日志。');
+  activityState.thinking = '先用只读工具确认 nginx 在跑、磁盘水位，再列出待清理文件清单，最后才执行删除——删除属高风险，需人工确认。';
+  setActivity('工具结束：disk_usage', 'OK disk_usage\nresult: /var/log 4.7G / 20G (24%) · archives older-than-30d: 38 files, 1.2G');
+  state.metrics = {thinking: 6, tools: 2, approvals: 1}; updateMetrics();
+  renderApproval({
+    id: 'apr_7c12',
+    title: '删除 38 个归档日志文件',
+    risk: 'high',
+    body: 'find /var/log -name "*.gz" -mtime +30 -delete   # 38 files · ~1.2G',
+    summary_lines: ['影响范围：/var/log/*.gz（38 个文件，约 1.2G）', '不可逆：文件将被永久删除', '建议：先确认无审计留存需求'],
+  });
+  appendMsg('agent', 'agent · final', '已确认 nginx 正常运行（active, 4 worker），/var/log 使用率 24%。检出 38 个 30 天前归档共约 1.2G，删除操作为高风险，已提交右侧审批卡片，请人工确认后执行。', {markdown: true});
+  /* ?demo=working —— 定格在「agent 行动中」状态，预览星芒脉冲动画 */
+  if (location.search.includes('working')) {
+    setStatus('思考中');
+    setAgentWorking(true);
+  }
+}
+</script>
+</body>
+</html>

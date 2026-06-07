@@ -131,6 +131,7 @@ def execute_and_format(
     trace: Trace,
     audit: AuditLogger,
     executor: ExecutionProxy,
+    parallel_read_only: bool = False,
 ) -> tuple[ExecutionResult, ToolResult, str]:
     """落地执行 + 工具格式化 + 共享 content 拼接（stderr + 长度截断）。
 
@@ -145,7 +146,17 @@ def execute_and_format(
         "argv": prepared.argv,
         "requires_root": prepared.tool.requires_root,
     })
-    exec_result = executor.run(prepared.argv, requires_root=prepared.tool.requires_root)
+    if parallel_read_only:
+        exec_result = executor.run(
+            prepared.argv,
+            requires_root=prepared.tool.requires_root,
+            parallel_read_only=True,
+        )
+    else:
+        exec_result = executor.run(
+            prepared.argv,
+            requires_root=prepared.tool.requires_root,
+        )
     exec_result.extra["tool_args"] = prepared.cleaned
     execution_result = audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
 
