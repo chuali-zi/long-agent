@@ -23,6 +23,33 @@ sudo bash scripts/install-loongarch.sh --yes --with-web
 
 默认 sudoers 只放行只读查询。需要"清理日志、装包、显式白名单卸包、终止进程、重启常见服务"等写能力时，用一键生产预设 `sudo bash scripts/kyagent.sh permissions-prod --yes` 一次配好（危险动作仍被层层拦截）；授权范围与裁剪见 [最小权限配置](docs/deployment/permissions.md)。
 
+## sudoers 权限档位与切换
+
+项目现在有三种 sudoers 档位，都会写入同一个目标文件 `/etc/sudoers.d/kyagent`，后执行的脚本会覆盖前一个档位：
+
+```bash
+# 正常最小权限：默认正式安全模型，只放行必要 root 只读查询
+sudo bash scripts/setup-sudoers.sh
+
+# 生产预设权限：仍是白名单，但预开常见写操作，用于正式演示/生产运维
+sudo bash scripts/setup-sudoers-prod.sh --yes
+
+# 最大测试权限：仅用于极限测试，等价于给 kyagent 完整免密 root
+sudo bash scripts/setup-sudoers-max-test.sh --yes
+```
+
+区别：`setup-sudoers.sh` 是最小权限基线；`setup-sudoers-prod.sh` 是最小权限脚本的生产封装，仍按固定命令和参数正则放行；`setup-sudoers-max-test.sh` 是新增的极限测试脚本，会写入 `${KYAGENT_USER:-kyagent} ALL=(ALL:ALL) NOPASSWD:SETENV: ALL`，用于测试全部工具、权限最大边界和工具层安全护栏，不代表正常安全模型。
+
+从最大测试权限恢复到正常 sudoers，直接重新执行正常脚本即可：
+
+```bash
+sudo bash scripts/setup-sudoers.sh
+sudo visudo -cf /etc/sudoers.d/kyagent
+sudo -l -U kyagent
+```
+
+最大测试 sudoers 禁止长期保留，禁止用于生产、正式安全演示和不受控联网任务。测试结束后务必切回 `setup-sudoers.sh` 或 `setup-sudoers-prod.sh --yes`。
+
 ## 配置 API Key
 
 推荐把 DeepSeek key 放进 root 可读的临时密钥文件，再让脚本写入 `/etc/kyagent/env`：
