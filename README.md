@@ -6,7 +6,7 @@ kyagent 是面向 A2 赛题的安全智能运维 Agent：在 LoongArch Linux + �
 
 ## 开发者快速测试
 
-在 LoongArch/Kylin 目标机上，想把下面 README 链路一次性顺完，可以直接运行新增脚本。默认只交互输入一次 DeepSeek API key；脚本会复制到 `/opt/kyagent`、安装 Web 依赖、切到最大测试 sudoers、重写 `/etc/kyagent/env`，并把 `KYAGENT_WEB_ADMIN_TOKEN=admin` 写在 `DEEPSEEK_API_KEY` 同一个环境文件里，随后执行快速验收和真实 CLI 提问，最后启动 Web。
+在 LoongArch/Kylin 目标机上，想把下面 README 链路一次性顺完，可以直接运行新增脚本。默认只交互输入一次 DeepSeek API key；脚本会复制到 `/opt/kyagent`、安装 Web 依赖、切到最大测试 sudoers、重写 `/etc/kyagent/env`，并把 `KYAGENT_WEB_ADMIN_TOKEN=admin123` 写在 `DEEPSEEK_API_KEY` 同一个环境文件里，随后执行快速验收和真实 CLI 提问，最后启动 Web。
 
 ```bash
 sudo bash scripts/developer-quick-test.sh
@@ -90,7 +90,7 @@ KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
 KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
 KYAGENT_PLAN_DB=/var/lib/kyagent/plans.db
 DEEPSEEK_API_KEY=sk-your-deepseek-key
-KYAGENT_WEB_ADMIN_TOKEN=admin
+KYAGENT_WEB_ADMIN_TOKEN=admin123
 ```
 
 key 只从环境变量读取，不从 YAML 或 `kyagent.json` 读取。

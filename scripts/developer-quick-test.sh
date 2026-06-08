@@ -29,7 +29,7 @@ Runs the README path end to end for developer verification:
   1. copy the repo to /opt/kyagent
   2. run install-loongarch.sh --yes --with-web
   3. switch sudoers to the maximal test policy
-  4. write /etc/kyagent/env with DEEPSEEK_API_KEY and KYAGENT_WEB_ADMIN_TOKEN=admin
+  4. write /etc/kyagent/env with DEEPSEEK_API_KEY and KYAGENT_WEB_ADMIN_TOKEN=admin123
   5. run README validation commands and the real CLI prompt
   6. start the Web UI
 
@@ -154,19 +154,19 @@ write_admin_token_to_env() {
     {
       print
       if ($0 ~ /^DEEPSEEK_API_KEY=/ && wrote == 0) {
-        print "KYAGENT_WEB_ADMIN_TOKEN=admin"
+        print "KYAGENT_WEB_ADMIN_TOKEN=admin123"
         wrote = 1
       }
     }
     END {
       if (wrote == 0) {
-        print "KYAGENT_WEB_ADMIN_TOKEN=admin"
+        print "KYAGENT_WEB_ADMIN_TOKEN=admin123"
       }
     }
   ' "$ENV_FILE" >"$tmp"
   install -m 0640 -o root -g "$KYAGENT_USER" "$tmp" "$ENV_FILE"
   rm -f "$tmp"
-  log "wrote KYAGENT_WEB_ADMIN_TOKEN=admin to $ENV_FILE"
+  log "wrote KYAGENT_WEB_ADMIN_TOKEN=admin123 to $ENV_FILE"
 }
 
 runtime_kyagent() {

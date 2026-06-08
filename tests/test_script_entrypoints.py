@@ -79,7 +79,7 @@ def test_developer_quick_test_script_chains_readme_flow() -> None:
         "--yes --with-web",
         "setup-sudoers-max-test.sh",
         "prod-env --deepseek-key-file",
-        "KYAGENT_WEB_ADMIN_TOKEN=admin",
+        "KYAGENT_WEB_ADMIN_TOKEN=admin123",
         "visudo -cf /etc/sudoers.d/kyagent",
         "sudo -l -U",
         "tools list",
@@ -89,7 +89,7 @@ def test_developer_quick_test_script_chains_readme_flow() -> None:
         assert phrase in script
 
     assert "sudo bash scripts/developer-quick-test.sh" in readme
-    assert "KYAGENT_WEB_ADMIN_TOKEN=admin" in readme
+    assert "KYAGENT_WEB_ADMIN_TOKEN=admin123" in readme
 
 
 def test_prod_env_script_writes_only_the_minimal_runtime_env() -> None:
