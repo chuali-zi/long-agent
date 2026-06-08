@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kyagent.planner import PlanStore
+from kyagent.planner import PlanStore, PlanTodoItem
 
 
 def test_plan_store_persists_steps(tmp_path):
@@ -14,6 +14,11 @@ def test_plan_store_persists_steps(tmp_path):
     updated = store.set_step(plan.plan_id, "reason", "running", "Checking tools")
     assert updated.current_step == "reason"
     assert updated.steps[1].status == "running"
+    with_todos = store.replace_todos(plan.plan_id, [
+        PlanTodoItem("todo-1", "Inspect current state", status="in_progress", priority="high"),
+        PlanTodoItem("todo-2", "Report result", status="pending", priority="medium"),
+    ])
+    assert [t.content for t in with_todos.todos] == ["Inspect current state", "Report result"]
     done = store.set_status(plan.plan_id, "complete", current_step="respond")
     assert done.status == "complete"
     store.close()
@@ -22,5 +27,7 @@ def test_plan_store_persists_steps(tmp_path):
     loaded = reopened.get(plan.plan_id)
     assert loaded.status == "complete"
     assert loaded.steps[1].detail == "Checking tools"
+    assert loaded.todos[0].status == "in_progress"
+    assert loaded.todos[0].priority == "high"
     assert reopened.latest(1)[0].plan_id == plan.plan_id
     reopened.close()

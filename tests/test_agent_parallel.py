@@ -33,7 +33,10 @@ class ScriptedBackend(LlmBackend):
 
         return AssistantMessage(
             blocks=[
-                TextBlock(text="dispatching"),
+                TextBlock(text=(
+                    "TODO 1: Dispatch the scripted tool calls for this test turn.\n"
+                    "TODO 2: Return the combined tool results to the agent loop."
+                )),
                 *[
                     ToolUseBlock(id=f"tool-{idx}", name=name, input=args)
                     for idx, (name, args) in enumerate(self.calls)

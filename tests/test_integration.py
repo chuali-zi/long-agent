@@ -6,9 +6,42 @@ from pathlib import Path
 import pytest
 
 from kyagent.agent.core import Agent
+from kyagent.agent.llm import AssistantMessage, LlmBackend, TextBlock, ToolUseBlock
 from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import Config
+
+
+class _NoPlanToolBackend(LlmBackend):
+    name = "no_plan_tool"
+
+    def chat(self, system, messages, tools):
+        return AssistantMessage(
+            blocks=[
+                TextBlock(text="我直接查一下。"),
+                ToolUseBlock(id="no-plan-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
+            ],
+            stop_reason="tool_use",
+        )
+
+
+class _PlannedToolBackend(LlmBackend):
+    name = "planned_tool"
+
+    def chat(self, system, messages, tools):
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
+        return AssistantMessage(
+            blocks=[
+                TextBlock(text=(
+                    "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
+                    "TODO 2: 根据结果返回关键证据。"
+                )),
+                ToolUseBlock(id="planned-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
+            ],
+            stop_reason="tool_use",
+        )
 
 
 @pytest.fixture
@@ -52,6 +85,37 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.INTENT_CHECK.value) < kinds.index(EventKind.LLM_THOUGHT.value)
     # PERCEPTION 是结果型证据：必须在真实 EXECUTION_RESULT 之后落库。
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
+
+
+def test_tool_use_without_todo_plan_is_blocked(agent):
+    agent.llm = _NoPlanToolBackend()
+    agent.cfg.agent.max_iterations = 1
+    result = agent.ask("查下 CPU 占用最高的进程")
+    kinds = [e.kind.value for e in result.trace.events]
+    assert EventKind.LLM_THOUGHT.value in kinds
+    assert EventKind.PLAN_UPDATE.value in kinds
+    assert EventKind.TOOL_REQUEST.value not in kinds
+    assert EventKind.EXECUTION.value not in kinds
+    plan_required = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+    ]
+    assert plan_required
+
+
+def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
+    agent.llm = _PlannedToolBackend()
+    result = agent.ask("查下 CPU 占用最高的进程")
+    kinds = [e.kind.value for e in result.trace.events]
+    assert EventKind.TOOL_REQUEST.value in kinds
+    assert EventKind.EXECUTION.value in kinds
+    assert result.plan_id is not None
+    plan = agent.plan_store.get(result.plan_id)
+    assert [todo.content for todo in plan.todos] == [
+        "调用只读工具查看 CPU 进程列表。",
+        "根据结果返回关键证据。",
+    ]
+    assert plan.todos[0].status == "in_progress"
 
 
 def test_nl_intent_blocks_destructive_request(agent):

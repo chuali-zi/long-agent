@@ -1028,7 +1028,11 @@ class MockBackend(LlmBackend):
             ])
         return AssistantMessage(
             blocks=[
-                TextBlock(text=f"我先通过工具 `{tool_name}` 感知一下系统再回答。"),
+                TextBlock(text=(
+                    "TODO 1: 调用必要的只读工具感知当前系统状态。\n"
+                    "TODO 2: 根据工具结果给出简洁结论和关键证据。\n"
+                    f"我先通过工具 `{tool_name}` 感知一下系统再回答。"
+                )),
                 ToolUseBlock(id=f"mock-{uuid.uuid4().hex[:8]}", name=tool_name, input=args),
             ],
             stop_reason="tool_use",

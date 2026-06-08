@@ -95,7 +95,10 @@ class _ChoiceBackend(LlmBackend):
             )
         return AssistantMessage(
             blocks=[
-                TextBlock(text="need user input"),
+                TextBlock(text=(
+                    "TODO 1: Ask the user to choose one allowed option.\n"
+                    "TODO 2: Continue only after the choice tool returns."
+                )),
                 ToolUseBlock(
                     id="tool-0", name="ask_user_choice", input=self.tool_args
                 ),

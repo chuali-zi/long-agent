@@ -1,0 +1,1 @@
+2026-06-08: Implemented todo-style plan-before-act for kyagent backend. Added durable plan todos, prompt guidance, a runtime gate before tool execution, mock backend compliance, and tests for blocked unplanned tool use plus persisted planned tool use.

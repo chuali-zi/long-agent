@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 import threading
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
@@ -25,7 +26,7 @@ from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
 from kyagent.progress import ProgressCallback, ProgressEvent, noop_progress
-from kyagent.planner import PlanSnapshot, PlanStore
+from kyagent.planner import PlanSnapshot, PlanStore, PlanTodoItem
 from kyagent.mcp.tools.pipeline import (
     PipelineError,
     check_safety,
@@ -352,6 +353,45 @@ class Agent:
                                       tool_iterations=iterations, denied=denied, notes=notes,
                                       plan_id=plan.plan_id if plan else None)
 
+            todos = self._extract_todo_plan(assistant.texts())
+            if not todos:
+                notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
+                payload = {
+                    "event": "plan_required",
+                    "reason": "tool_use_without_todo_plan",
+                    "tool_calls": [t.name for t in tool_uses],
+                    "plan_id": plan.plan_id if plan else None,
+                }
+                self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                self._emit(ProgressEvent(
+                    kind="plan_required",
+                    text="工具调用前必须先给出 TODO 计划",
+                    meta=payload,
+                ))
+                if plan is not None:
+                    plan = self._set_plan_step(
+                        trace, plan, "reason", "running",
+                        "Blocked tool calls until a todo plan is provided",
+                        event_kind="plan_step_update",
+                    )
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
+                        "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
+                        "然后再发起必要的工具调用。"
+                    ),
+                })
+                continue
+
+            if plan is not None and self.plan_store is not None:
+                plan = self.plan_store.replace_todos(plan.plan_id, todos)
+                self._emit_plan(
+                    trace, plan, kind="plan_step_update",
+                    text="Todo plan accepted before tool execution",
+                    step_id="reason",
+                )
+
             # 把 assistant 消息原样追加（含 tool_use 块）
             self.messages.append({"role": "assistant",
                                   "content": self._blocks_to_dict(assistant)})
@@ -444,6 +484,39 @@ class Agent:
             kind="plan_snapshot",
             text=plan.title,
             meta={"plan": snapshot, "plan_id": plan.plan_id},
+        ))
+
+    _TODO_LINE_RE = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:TODO|Todo|todo|PLAN|Plan|plan|任务|步骤)\s*"
+        r"\d{1,2}\s*[:：.)、-]\s*(.+?)\s*$"
+    )
+    _CHECKBOX_TODO_RE = re.compile(r"^\s*[-*]\s*\[[ xX-]\]\s*(.+?)\s*$")
+
+    def _extract_todo_plan(self, texts: list[str]) -> list[PlanTodoItem]:
+        items: list[PlanTodoItem] = []
+        for text in texts:
+            for line in text.splitlines():
+                match = self._TODO_LINE_RE.match(line) or self._CHECKBOX_TODO_RE.match(line)
+                if not match:
+                    continue
+                content = match.group(1).strip()
+                if not content:
+                    continue
+                priority = "high" if self._todo_looks_high_priority(content) else "medium"
+                status = "in_progress" if not items else "pending"
+                items.append(PlanTodoItem(
+                    todo_id=f"todo-{len(items) + 1}",
+                    content=content,
+                    status=status,
+                    priority=priority,
+                ))
+        return items[:20]
+
+    def _todo_looks_high_priority(self, content: str) -> bool:
+        lowered = content.lower()
+        return any(token in lowered for token in (
+            "high", "critical", "危险", "高危", "变更", "重启", "删除", "清空",
+            "restart", "remove", "truncate", "kill",
         ))
 
     def _set_plan_step(

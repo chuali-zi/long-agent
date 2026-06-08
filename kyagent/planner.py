@@ -19,6 +19,8 @@ from typing import Any, Literal
 
 PlanStatus = Literal["pending", "running", "blocked", "complete", "failed"]
 StepStatus = Literal["pending", "running", "complete", "failed", "skipped"]
+TodoStatus = Literal["pending", "in_progress", "completed", "cancelled"]
+TodoPriority = Literal["high", "medium", "low"]
 
 
 @dataclass
@@ -40,6 +42,24 @@ class PlanStep:
 
 
 @dataclass
+class PlanTodoItem:
+    todo_id: str
+    content: str
+    status: TodoStatus = "pending"
+    priority: TodoPriority = "medium"
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "todo_id": self.todo_id,
+            "content": self.content,
+            "status": self.status,
+            "priority": self.priority,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
 class PlanSnapshot:
     plan_id: str
     trace_id: str
@@ -49,6 +69,7 @@ class PlanSnapshot:
     created_at: float
     updated_at: float
     steps: list[PlanStep]
+    todos: list[PlanTodoItem] = field(default_factory=list)
     current_step: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -64,6 +85,7 @@ class PlanSnapshot:
             "current_step": self.current_step,
             "metadata": self.metadata,
             "steps": [s.to_dict() for s in self.steps],
+            "todos": [t.to_dict() for t in self.todos],
         }
 
 
@@ -89,6 +111,18 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     detail     TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL,
     PRIMARY KEY (plan_id, step_id),
+    FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
+);
+
+CREATE TABLE IF NOT EXISTS plan_todos (
+    plan_id    TEXT NOT NULL,
+    todo_id    TEXT NOT NULL,
+    ordinal    INTEGER NOT NULL,
+    content    TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    priority   TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (plan_id, todo_id),
     FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
 );
 
@@ -212,6 +246,37 @@ class PlanStore:
             )
         return self.get(plan_id)
 
+    def replace_todos(
+        self,
+        plan_id: str,
+        todos: list[PlanTodoItem],
+    ) -> PlanSnapshot:
+        now = time.time()
+        with self._lock:
+            self._conn.execute("DELETE FROM plan_todos WHERE plan_id=?", (plan_id,))
+            for ordinal, todo in enumerate(todos):
+                self._conn.execute(
+                    """
+                    INSERT INTO plan_todos(
+                        plan_id,todo_id,ordinal,content,status,priority,updated_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        plan_id,
+                        todo.todo_id,
+                        ordinal,
+                        todo.content[:500],
+                        todo.status,
+                        todo.priority,
+                        now,
+                    ),
+                )
+            self._conn.execute(
+                "UPDATE plans SET updated_at=? WHERE plan_id=?",
+                (now, plan_id),
+            )
+        return self.get(plan_id)
+
     def get(self, plan_id: str) -> PlanSnapshot:
         with self._lock:
             row = self._conn.execute(
@@ -230,6 +295,13 @@ class PlanStore:
                 """,
                 (plan_id,),
             ).fetchall()
+            todo_rows = self._conn.execute(
+                """
+                SELECT todo_id,content,status,priority,updated_at
+                FROM plan_todos WHERE plan_id=? ORDER BY ordinal
+                """,
+                (plan_id,),
+            ).fetchall()
         return PlanSnapshot(
             plan_id=row[0],
             trace_id=row[1],
@@ -243,6 +315,12 @@ class PlanStore:
             steps=[
                 PlanStep(step_id=s[0], title=s[1], status=s[2], detail=s[3], updated_at=s[4])
                 for s in step_rows
+            ],
+            todos=[
+                PlanTodoItem(
+                    todo_id=t[0], content=t[1], status=t[2], priority=t[3], updated_at=t[4]
+                )
+                for t in todo_rows
             ],
         )
 
