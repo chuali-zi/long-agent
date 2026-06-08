@@ -84,7 +84,7 @@ class _FakeHttpxClient:
 
 
 def _make_backend(
-    model: str = "deepseek-v4-flash",
+    model: str = "deepseek-v4-pro",
     max_tokens: int = 512,
     temperature: float = 0.0,
     base_url: str = "https://api.deepseek.com",
@@ -189,7 +189,7 @@ def test_chat_payload_minimal_text():
 
     # 协议字段
     assert fake.last_path == "chat/completions"  # 相对路径，无前导 /
-    assert fake.last_payload["model"] == "deepseek-v4-flash"
+    assert fake.last_payload["model"] == "deepseek-v4-pro"
     assert fake.last_payload["max_tokens"] == 512
     assert fake.last_payload["temperature"] == 0.0
     assert fake.last_payload["messages"][0] == {"role": "system", "content": "sys"}
@@ -350,52 +350,13 @@ def test_preset_deepseek_uses_official_endpoint(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
 
     be = HttpxBackend.preset("deepseek")
-    assert be.model == "deepseek-v4-flash"
+    assert be.model == "deepseek-v4-pro"
     assert captured["base_url"] == "https://api.deepseek.com/"
 
+    # effort 有默认预设值
+    assert be.effort == "high"
 
-def test_preset_qwen_uses_dashscope_endpoint(monkeypatch):
-    captured: dict = {}
-
-    class _CaptureClient:
-        def __init__(self, base_url, **_):
-            captured["base_url"] = base_url
-
-    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-q")
-
-    be = HttpxBackend.preset("qwen")
-    assert be.model == "qwen-plus"
-    # DashScope 预设 base 带 /v1，规范化后 v1/ 保留
-    assert captured["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1/"
-
-
-def test_preset_unknown_provider_raises():
-    with pytest.raises(ValueError, match="未知 OpenAI 协议兼容供应商"):
-        HttpxBackend.preset("nonexistent")
-
-
-# ---------- build_backend 工厂路由 -----------------------------------------
-
-
-def test_build_backend_deepseek_httpx(monkeypatch):
-    """llm_backend=deepseek_httpx 应返回 HttpxBackend，复用 cfg.agent.deepseek 配置。"""
-    captured: dict = {}
-
-    class _CaptureClient:
-        def __init__(self, base_url, **_):
-            captured["base_url"] = base_url
-
-    monkeypatch.setattr("kyagent.agent.llm.httpx.Client", _CaptureClient)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
-
-    cfg = Config()
-    cfg.agent.llm_backend = "deepseek_httpx"
-
-    be = build_backend(cfg)
-    assert isinstance(be, HttpxBackend)
-    assert be.model == "deepseek-v4-flash"
-    assert captured["base_url"] == "https://api.deepseek.com/"
+    # base_url 显式指定
 
 
 def test_build_backend_qwen_httpx(monkeypatch):

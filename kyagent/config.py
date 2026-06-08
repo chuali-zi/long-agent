@@ -57,9 +57,10 @@ class DeepSeekConfig(BaseModel):
     LoongArch Old World 推荐 deepseek_httpx，避免 openai SDK 拉入 jiter。
     Key 获取：https://platform.deepseek.com
     """
-    model: str = "deepseek-v4-flash"
+    model: str = "deepseek-v4-pro"
     max_tokens: int = 20480
     temperature: float = 0.2
+    effort: str = "high"
     api_key_env: str = "DEEPSEEK_API_KEY"
     # 留空则使用预设 https://api.deepseek.com；仅在使用第三方反代时填
     base_url: str | None = None

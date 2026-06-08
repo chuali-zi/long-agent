@@ -308,7 +308,7 @@ def test_build_backend_constructs_deepseek_preset(monkeypatch):
 
     be = build_backend(cfg)
     assert isinstance(be, OpenAIBackend)
-    assert be.model == "deepseek-v4-flash"  # 预设值
+    assert be.model == "deepseek-v4-pro"  # 预设值
     assert captured["base_url"] == "https://api.deepseek.com"
     assert captured["api_key"] == "sk-deepseek-test"
 

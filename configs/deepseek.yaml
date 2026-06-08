@@ -21,6 +21,7 @@
 #   - 官方示例使用 OpenAI API 格式（可选 openai SDK，或直接 HTTP）
 #   - base_url:  https://api.deepseek.com  （/v1 是兼容别名，不必加）
 #   - 模型 ID:   deepseek-v4-flash  / deepseek-v4-pro
+#   - reasoning_effort: low / medium / high（v4-pro 推理强度）
 #   - tools/function calling 仅按本仓库 HttpxBackend 覆盖的 tool_calls 子集验证
 agent:
   name: kyagent
@@ -30,9 +31,10 @@ agent:
   deepseek:
     # 价格和模型列表变化快；部署前看官方 Models & Pricing：
     # https://api-docs.deepseek.com/quick_start/pricing
-    model: ${KYAGENT_DEEPSEEK_MODEL:-deepseek-v4-flash}
+    model: ${KYAGENT_DEEPSEEK_MODEL:-deepseek-v4-pro}
     max_tokens: 20480
     temperature: 0.2
+    effort: ${KYAGENT_DEEPSEEK_EFFORT:-high}
     api_key_env: DEEPSEEK_API_KEY
     # key 仅通过 DEEPSEEK_API_KEY 注入，不写入项目文件。
     # 留空走 https://api.deepseek.com；仅在使用反代时填

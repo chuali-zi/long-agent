@@ -203,9 +203,10 @@ class OpenAIBackend(LlmBackend):
     _PRESETS: dict[str, dict[str, str]] = {
         "deepseek": {
             "base_url": "https://api.deepseek.com",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-v4-pro",
             "api_key_env": "DEEPSEEK_API_KEY",
-            "display": "DeepSeek (V4 Flash)",
+            "display": "DeepSeek (V4 Pro)",
+            "effort": "high",
         },
         "qwen": {
             # 国内默认；海外用户改 dashscope-intl.aliyuncs.com / dashscope-us.aliyuncs.com
@@ -221,6 +222,7 @@ class OpenAIBackend(LlmBackend):
         model: str,
         max_tokens: int,
         temperature: float = 0.2,
+        effort: str | None = None,
         api_key_env: str = "OPENAI_API_KEY",
         api_key: str | None = None,
         base_url: str | None = None,
@@ -245,6 +247,7 @@ class OpenAIBackend(LlmBackend):
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.effort = effort
         # display_name 仅供 CLI banner / 审计 metadata 显示，不影响协议
         if display_name:
             self.name = f"openai({display_name})"
@@ -256,6 +259,7 @@ class OpenAIBackend(LlmBackend):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.2,
+        effort: str | None = None,
         api_key_env: str | None = None,
         api_key: str | None = None,
         base_url_override: str | None = None,
@@ -275,6 +279,7 @@ class OpenAIBackend(LlmBackend):
             model=model or p["model"],
             max_tokens=max_tokens,
             temperature=temperature,
+            effort=effort or p.get("effort"),
             api_key_env=api_key_env or p["api_key_env"],
             api_key=api_key,
             base_url=base_url_override or p["base_url"],
@@ -293,6 +298,8 @@ class OpenAIBackend(LlmBackend):
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if self.effort:
+            kwargs["reasoning_effort"] = self.effort
         if oai_tools:
             kwargs["tools"] = oai_tools
             kwargs["tool_choice"] = "auto"
@@ -318,6 +325,8 @@ class OpenAIBackend(LlmBackend):
             "temperature": self.temperature,
             "stream": True,
         }
+        if self.effort:
+            kwargs["reasoning_effort"] = self.effort
         if oai_tools:
             kwargs["tools"] = oai_tools
             kwargs["tool_choice"] = "auto"
@@ -587,6 +596,7 @@ class HttpxBackend(LlmBackend):
         model: str,
         max_tokens: int,
         temperature: float = 0.2,
+        effort: str | None = None,
         api_key_env: str = "OPENAI_API_KEY",
         api_key: str | None = None,
         base_url: str | None = None,
@@ -623,6 +633,7 @@ class HttpxBackend(LlmBackend):
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.effort = effort
         self.timeout = timeout
         self.max_retries = max_retries
         if display_name:
@@ -635,6 +646,7 @@ class HttpxBackend(LlmBackend):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.2,
+        effort: str | None = None,
         api_key_env: str | None = None,
         api_key: str | None = None,
         base_url_override: str | None = None,
@@ -654,6 +666,7 @@ class HttpxBackend(LlmBackend):
             model=model or p["model"],
             max_tokens=max_tokens,
             temperature=temperature,
+            effort=effort or p.get("effort"),
             api_key_env=api_key_env or p["api_key_env"],
             api_key=api_key,
             base_url=base_url_override or p["base_url"],
@@ -673,6 +686,8 @@ class HttpxBackend(LlmBackend):
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if self.effort:
+            payload["reasoning_effort"] = self.effort
         if oai_tools:
             payload["tools"] = oai_tools
             payload["tool_choice"] = "auto"
@@ -700,6 +715,8 @@ class HttpxBackend(LlmBackend):
             "temperature": self.temperature,
             "stream": True,
         }
+        if self.effort:
+            payload["reasoning_effort"] = self.effort
         if oai_tools:
             payload["tools"] = oai_tools
             payload["tool_choice"] = "auto"
@@ -1159,6 +1176,7 @@ def _construct_backend(cfg) -> LlmBackend:
             model=sub.model or None,
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,
+            effort=getattr(sub, "effort", None),
             api_key_env=env,
             base_url_override=sub.base_url or None,
         )
@@ -1190,6 +1208,7 @@ def _construct_backend(cfg) -> LlmBackend:
             model=sub.model or None,
             max_tokens=sub.max_tokens,
             temperature=sub.temperature,
+            effort=getattr(sub, "effort", None),
             api_key_env=env,
             base_url_override=sub.base_url or None,
         )

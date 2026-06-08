@@ -84,7 +84,7 @@ def _make_httpx_backend(max_retries: int = 0) -> tuple[HttpxBackend, _FakeStream
     fake = _FakeStreamHttpxClient(base_url="https://api.deepseek.com/",
                                   headers={"Authorization": "Bearer test"})
     be = HttpxBackend(
-        model="deepseek-v4-flash",
+        model="deepseek-v4-pro",
         max_tokens=512,
         temperature=0.0,
         base_url="https://api.deepseek.com",
