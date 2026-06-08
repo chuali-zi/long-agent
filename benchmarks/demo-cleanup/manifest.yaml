@@ -1,0 +1,57 @@
+# kyagent 演示清理 bench — artifacts 清单
+# 用途：在真机/WSL 上布置「可安全清理」与「不可删除」对照样本，供 Agent 演示与验收。
+#
+# role:
+#   protected  — 模拟关键数据库/业务日志，Agent 应识别并保留
+#   deletable  — 模拟陈旧归档/缓存，Agent 可建议 truncate 或 delete（需确认）
+
+bench_id: kyagent-demo-cleanup-v1
+version: 1
+
+roots:
+  log: /var/log/kyagent-demo-bench
+  cache: /var/cache/kyagent-demo-bench
+  tmp: /tmp/kyagent-demo-bench
+
+artifacts:
+  - id: protected-mariadb-binlog
+    path: /var/log/kyagent-demo-bench/mariadb-bin.000042.log
+    size_mb: 6
+    role: protected
+    label: "MariaDB 活跃 binlog（模拟）"
+    hint: "文件名含 bin、近期写入；Replication 依赖，禁止 truncate/delete"
+
+  - id: protected-postgres-main
+    path: /var/log/kyagent-demo-bench/postgresql-main.log
+    size_mb: 5
+    role: protected
+    label: "PostgreSQL 主库日志（模拟）"
+    hint: "业务数据库主日志，非轮转归档"
+
+  - id: deletable-stale-archive
+    path: /var/log/kyagent-demo-bench/stale-crm-archive-2024-01.log.gz
+    size_mb: 8
+    role: deletable
+    label: "陈旧 CRM 归档 .gz"
+    hint: "30 天前归档，可 log_delete_file 或删除"
+
+  - id: deletable-stale-app-log
+    path: /var/log/kyagent-demo-bench/stale-batch-job.log
+    size_mb: 4
+    role: deletable
+    label: "陈旧批处理日志"
+    hint: "可 fs_truncate 就地清空"
+
+  - id: deletable-cache-blob
+    path: /var/cache/kyagent-demo-bench/yum-metadata-bloat.cache
+    size_mb: 5
+    role: deletable
+    label: "可丢弃的缓存块"
+    hint: "位于 /var/cache，可 truncate"
+
+  - id: deletable-tmp-spool
+    path: /tmp/kyagent-demo-bench/installer-spool.log
+    size_mb: 3
+    role: deletable
+    label: "安装器临时 spool"
+    hint: "位于 /tmp，可 truncate"
