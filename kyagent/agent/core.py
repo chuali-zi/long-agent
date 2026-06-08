@@ -8,6 +8,7 @@ import sys
 import threading
 import json
 import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
@@ -52,6 +53,46 @@ from kyagent.safety.policy import Decision
 # 具体的 verdict → ConfirmRequest 翻译由各 Verdict 自己负责（to_confirm_request），
 # Agent 与 UI 都不依赖具体 verdict 类型。
 _auto_deny = auto_deny  # backward-compat 别名，旧引用不破
+
+
+_OS_ENGLISH_QUESTION_RE = re.compile(
+    r"\b("
+    r"os|kylin|linux|systemd|service(?:s)?|daemon(?:s)?|"
+    r"process(?:es)?|pid(?:s)?|cpu|memory|mem|disk(?:s)?|"
+    r"filesystem(?:s)?|inode(?:s)?|mount(?:s)?|swap|load|uptime|"
+    r"kernel(?:s)?|port(?:s)?|listen(?:ing)?|socket(?:s)?|"
+    r"network|route(?:s)?|dns|log(?:s)?|journal|audit|selinux|"
+    r"firewall|package(?:s)?|rpm|deb|nginx|sshd?|mysql|mariadb|"
+    r"postgres|redis|docker"
+    r")\b",
+    re.IGNORECASE,
+)
+_OS_CHINESE_QUESTION_RE = re.compile(
+    r"("
+    r"系统|操作系统|麒麟|服务|进程|端口|监听|网络|磁盘|文件系统|"
+    r"内存|负载|日志|防火墙|软件包|内核|挂载|审计|僵尸进程|"
+    r"排查|重启|巡检"
+    r")"
+)
+_OS_PERCEPTION_TOOL_PREFIXES = (
+    "process_",
+    "lsof_",
+    "net_",
+    "log_",
+    "svc_",
+    "fs_",
+    "pkg_",
+    "disk_",
+    "sys_",
+    "sec_",
+    "compliance_",
+    "loongarch_",
+    "boot_",
+)
+_NON_PERCEPTION_READ_ONLY_TOOLS = {
+    "ask_user_choice",
+    "submit_rca_report",
+}
 
 
 @dataclass
@@ -181,6 +222,9 @@ class Agent:
         notes: list[str] = []
         iterations = 0
         denied = False
+        evidence_gate_required = self._is_os_question(user_input)
+        evidence_gate_forced_once = False
+        evidence_gate_extra_summary = False
 
         # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
         # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
@@ -261,12 +305,18 @@ class Agent:
                 event_kind="plan_step_start",
             )
 
-        while iterations < self.cfg.agent.max_iterations:
+        while iterations < self.cfg.agent.max_iterations or evidence_gate_extra_summary:
+            extra_summary_iteration = (
+                evidence_gate_extra_summary
+                and iterations >= self.cfg.agent.max_iterations
+            )
+            if evidence_gate_extra_summary:
+                evidence_gate_extra_summary = False
             iterations += 1
             budget_payload = {
                 "iteration": iterations,
                 "max_iterations": self.cfg.agent.max_iterations,
-                "reason": "loop",
+                "reason": "evidence_gate_summary" if extra_summary_iteration else "loop",
                 "plan_id": plan.plan_id if plan else None,
             }
             self.audit.event(trace, EventKind.BUDGET, budget_payload)
@@ -330,6 +380,119 @@ class Agent:
             # 没有工具调用：终结
             if not tool_uses:
                 final = "\n".join(assistant.texts()).strip()
+                if evidence_gate_required and not self._has_perception_evidence(trace):
+                    if evidence_gate_forced_once:
+                        notes.append("OS 问题强制只读感知后仍未产生 PERCEPTION evidence_id")
+                        self.audit.event(trace, EventKind.ERROR, {
+                            "reason": "evidence_gate_no_evidence_after_forced_tool",
+                        })
+                        if plan is not None:
+                            plan = self._set_plan_step(
+                                trace, plan, "reason", "failed",
+                                "Forced read-only perception did not produce evidence",
+                                event_kind="plan_step_end",
+                            )
+                            plan = self._set_plan_status(
+                                trace, plan, "failed", current_step="reason"
+                            )
+                        self.audit.close(trace)
+                        self._emit(ProgressEvent(
+                            kind="error",
+                            text="OS 问题最终回答前缺少 PERCEPTION evidence_id",
+                            meta={"reason": "evidence_gate_no_evidence_after_forced_tool"},
+                        ))
+                        return AgentRunResult(
+                            trace=trace,
+                            final_text="OS 问题最终回答前缺少系统感知证据，已中止。",
+                            tool_iterations=iterations,
+                            denied=denied,
+                            notes=notes,
+                            plan_id=plan.plan_id if plan else None,
+                        )
+                    forced_tool = self._default_evidence_gate_tool_use()
+                    if forced_tool is None:
+                        notes.append("OS 问题缺少可用的只读感知工具，证据门无法放行")
+                        self.audit.event(trace, EventKind.ERROR, {
+                            "reason": "evidence_gate_no_read_only_tool",
+                        })
+                        if plan is not None:
+                            plan = self._set_plan_step(
+                                trace, plan, "reason", "failed",
+                                "Evidence gate found no read-only perception tool",
+                                event_kind="plan_step_end",
+                            )
+                            plan = self._set_plan_status(
+                                trace, plan, "failed", current_step="reason"
+                            )
+                        self.audit.close(trace)
+                        self._emit(ProgressEvent(
+                            kind="error",
+                            text="OS 问题最终回答前缺少 PERCEPTION evidence_id，且没有可用只读工具",
+                            meta={"reason": "evidence_gate_no_read_only_tool"},
+                        ))
+                        return AgentRunResult(
+                            trace=trace,
+                            final_text="OS 问题最终回答前缺少系统感知证据，且没有可用只读工具，已中止。",
+                            tool_iterations=iterations,
+                            denied=denied,
+                            notes=notes,
+                            plan_id=plan.plan_id if plan else None,
+                        )
+                    notes.append("OS 问题在最终回答前缺少 PERCEPTION evidence_id，已强制只读感知")
+                    evidence_gate_forced_once = True
+                    payload = {
+                        "event": "evidence_gate_forced_perception",
+                        "reason": "os_final_without_perception_evidence",
+                        "iteration": iterations,
+                        "tool": forced_tool.name,
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_step_update",
+                        text="OS 问题最终回答前必须先产生 PERCEPTION evidence_id",
+                        meta=payload,
+                    ))
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "TODO 1: 调用低风险只读工具感知当前系统状态。\n"
+                                    "TODO 2: 将感知结果作为最终回答前的证据。"
+                                ),
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": forced_tool.id,
+                                "name": forced_tool.name,
+                                "input": forced_tool.input,
+                            },
+                        ],
+                    })
+                    if plan is not None:
+                        plan = self._set_plan_step(
+                            trace, plan, "reason", "running",
+                            "Evidence gate forced read-only perception before final answer",
+                            event_kind="plan_step_update",
+                        )
+                    result_block = self._handle_tool_use(trace, forced_tool, notes, False)
+                    if result_block.is_error and result_block.content.startswith("[denied]"):
+                        denied = True
+                    self.messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": forced_tool.id,
+                            "content": result_block.content,
+                            "is_error": result_block.is_error,
+                        }],
+                    })
+                    if iterations >= self.cfg.agent.max_iterations:
+                        evidence_gate_extra_summary = True
+                    continue
+
                 self.messages.append({"role": "assistant",
                                       "content": [{"type": "text", "text": final}]})
                 if plan is not None:
@@ -581,6 +744,51 @@ class Agent:
             return False
         verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
         return verdict.decision is Decision.ALLOW
+
+    @staticmethod
+    def _is_os_question(text: str) -> bool:
+        text = text or ""
+        return bool(
+            _OS_ENGLISH_QUESTION_RE.search(text)
+            or _OS_CHINESE_QUESTION_RE.search(text)
+        )
+
+    @staticmethod
+    def _has_perception_evidence(trace: Trace) -> bool:
+        return any(
+            event.kind is EventKind.PERCEPTION and event.payload.get("evidence_id")
+            for event in trace.events
+        )
+
+    def _default_evidence_gate_tool_use(self) -> ToolUseBlock | None:
+        preferred = [
+            "sys_uptime",
+            "sys_loadavg",
+            "sys_memory",
+            "fs_df",
+            "process_list",
+            "svc_failed",
+            "net_listen",
+        ]
+        for name in preferred:
+            tool = self.registry.get(name)
+            if tool is None or not tool.read_only:
+                continue
+            if tool.name in _NON_PERCEPTION_READ_ONLY_TOOLS:
+                continue
+            if not tool.name.startswith(_OS_PERCEPTION_TOOL_PREFIXES):
+                continue
+            try:
+                cleaned = tool.validate({})
+                tool.build_argv(cleaned)
+            except ToolError:
+                continue
+            return ToolUseBlock(
+                id=f"evidence-gate-{uuid.uuid4().hex[:8]}",
+                name=tool.name,
+                input={},
+            )
+        return None
 
     def _handle_tool_use(self, trace: Trace, tu: ToolUseBlock,
                         notes: list[str], parallel_read_only: bool = False) -> ToolResultBlock:

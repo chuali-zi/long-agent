@@ -34,6 +34,11 @@ from kyagent.mcp.tools import (
     compliance as compliance_mod,
     loongarch as loongarch_mod,
 )
+from kyagent.safety.write_preflight import (
+    PathMetadata,
+    WritePreflightDecision,
+    WritePreflightResult,
+)
 
 
 # ---- fixtures --------------------------------------------------------------
@@ -1061,15 +1066,33 @@ class TestWriteOperationTools:
 
     # ---- FsTruncateTool ----
 
-    def test_fs_truncate_argv(self):
+    def test_fs_truncate_argv(self, monkeypatch):
+        monkeypatch.setattr(
+            filesystem_mod,
+            "classify_write_preflight",
+            lambda path, *, operation: WritePreflightResult(
+                WritePreflightDecision.ALLOW_CONFIRM,
+                "old-rotated-log",
+                "test",
+            ),
+        )
         t = filesystem_mod.FsTruncateTool()
-        argv = _argv(t, {"path": "/var/log/messages"})
-        assert argv == ["kyagent-log-clean", "/var/log/messages"]
+        argv = _argv(t, {"path": "/var/log/kyagent-test-old.1"})
+        assert argv == ["kyagent-log-clean", "/var/log/kyagent-test-old.1"]
 
-    def test_fs_truncate_argv_tmp(self):
+    def test_fs_truncate_argv_tmp(self, monkeypatch):
+        monkeypatch.setattr(
+            filesystem_mod,
+            "classify_write_preflight",
+            lambda path, *, operation: WritePreflightResult(
+                WritePreflightDecision.ALLOW_CONFIRM,
+                "temp-build-residual",
+                "test",
+            ),
+        )
         t = filesystem_mod.FsTruncateTool()
-        argv = _argv(t, {"path": "/tmp/myapp.log"})
-        assert argv == ["kyagent-log-clean", "/tmp/myapp.log"]
+        argv = _argv(t, {"path": "/tmp/build-myapp/output.tmp"})
+        assert argv == ["kyagent-log-clean", "/tmp/build-myapp/output.tmp"]
 
     def test_fs_truncate_rejects_out_of_bounds_path(self):
         t = filesystem_mod.FsTruncateTool()
@@ -1086,6 +1109,25 @@ class TestWriteOperationTools:
         with pytest.raises(ToolError):
             t.validate({"path": "/var/log/app;rm"})
 
+    def test_fs_truncate_rejects_active_log(self):
+        t = filesystem_mod.FsTruncateTool()
+        with pytest.raises(ToolError, match="active-log"):
+            t.validate({"path": "/var/log/app.log"})
+
+    def test_fs_truncate_rejects_unclassified_log_name(self, monkeypatch):
+        monkeypatch.setattr(
+            filesystem_mod,
+            "classify_write_preflight",
+            lambda path, *, operation: WritePreflightResult(
+                WritePreflightDecision.DENY,
+                "unclassified-cleanup-target",
+                "test",
+            ),
+        )
+        t = filesystem_mod.FsTruncateTool()
+        with pytest.raises(ToolError, match="unclassified-cleanup-target"):
+            t.validate({"path": "/var/log/messages"})
+
     def test_fs_truncate_read_only_is_false(self):
         assert filesystem_mod.FsTruncateTool().read_only is False
 
@@ -1094,15 +1136,33 @@ class TestWriteOperationTools:
 
     # ---- FsDeleteFileTool ----
 
-    def test_fs_delete_file_argv(self):
+    def test_fs_delete_file_argv(self, monkeypatch):
+        monkeypatch.setattr(
+            filesystem_mod,
+            "classify_write_preflight",
+            lambda path, *, operation: WritePreflightResult(
+                WritePreflightDecision.ALLOW_CONFIRM,
+                "cache-target",
+                "test",
+            ),
+        )
         t = filesystem_mod.FsDeleteFileTool()
         argv = _argv(t, {"path": "/var/cache/app.tmp"})
         assert argv == ["kyagent-file-delete", "/var/cache/app.tmp"]
 
-    def test_fs_delete_file_argv_tmp(self):
+    def test_fs_delete_file_argv_tmp(self, monkeypatch):
+        monkeypatch.setattr(
+            filesystem_mod,
+            "classify_write_preflight",
+            lambda path, *, operation: WritePreflightResult(
+                WritePreflightDecision.ALLOW_CONFIRM,
+                "temp-build-residual",
+                "test",
+            ),
+        )
         t = filesystem_mod.FsDeleteFileTool()
-        argv = _argv(t, {"path": "/tmp/kyagent-old.log"})
-        assert argv == ["kyagent-file-delete", "/tmp/kyagent-old.log"]
+        argv = _argv(t, {"path": "/tmp/kyagent-build/output.tmp"})
+        assert argv == ["kyagent-file-delete", "/tmp/kyagent-build/output.tmp"]
 
     def test_fs_delete_file_rejects_out_of_bounds_path(self):
         t = filesystem_mod.FsDeleteFileTool()
@@ -1114,6 +1174,11 @@ class TestWriteOperationTools:
         with pytest.raises(ToolError):
             t.validate({"path": "/var/log/app;rm"})
 
+    def test_fs_delete_file_rejects_audit_log(self):
+        t = filesystem_mod.FsDeleteFileTool()
+        with pytest.raises(ToolError, match="audit-log"):
+            t.validate({"path": "/var/log/audit/audit.log.1"})
+
     def test_fs_delete_file_read_only_is_false(self):
         assert filesystem_mod.FsDeleteFileTool().read_only is False
 
@@ -1122,15 +1187,34 @@ class TestWriteOperationTools:
 
     # ---- LogDeleteFileTool ----
 
-    def test_log_delete_file_argv(self):
+    def test_log_delete_file_argv(self, monkeypatch):
+        monkeypatch.setattr(
+            logs_mod,
+            "classify_write_preflight",
+            lambda path, *, operation: WritePreflightResult(
+                WritePreflightDecision.ALLOW_CONFIRM,
+                "old-rotated-log",
+                "test",
+            ),
+        )
         t = logs_mod.LogDeleteFileTool()
-        argv = _argv(t, {"path": "/var/log/messages.1"})
-        assert argv == ["kyagent-file-delete", "/var/log/messages.1"]
+        argv = _argv(t, {"path": "/var/log/kyagent-test-old.1"})
+        assert argv == ["kyagent-file-delete", "/var/log/kyagent-test-old.1"]
 
-    def test_log_delete_file_allows_plain_log(self):
+    def test_log_delete_file_rejects_plain_active_log(self):
         t = logs_mod.LogDeleteFileTool()
-        argv = _argv(t, {"path": "/var/log/myapp.log"})
-        assert argv == ["kyagent-file-delete", "/var/log/myapp.log"]
+        with pytest.raises(ToolError, match="active-log"):
+            t.validate({"path": "/var/log/myapp.log"})
+
+    def test_log_delete_file_rejects_auth_log(self):
+        t = logs_mod.LogDeleteFileTool()
+        with pytest.raises(ToolError, match="auth-log"):
+            t.validate({"path": "/var/log/auth.log.1"})
+
+    def test_log_delete_file_rejects_database_log(self):
+        t = logs_mod.LogDeleteFileTool()
+        with pytest.raises(ToolError, match="database-log"):
+            t.validate({"path": "/var/log/mysql-bin.000001"})
 
     def test_log_delete_file_rejects_non_log_suffix(self):
         t = logs_mod.LogDeleteFileTool()

@@ -6,6 +6,7 @@ from typing import Any
 from kyagent.mcp.tools.base import Tool, ToolRegistry
 from kyagent.mcp.tools.filesystem import _safe_path
 from kyagent.safety.patterns import RiskLevel
+from kyagent.safety.write_preflight import classify_write_preflight
 
 
 _PRIORITIES = {"emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"}
@@ -412,6 +413,12 @@ class LogDeleteFileTool(Tool):
         p = _safe_path(cleaned["path"])
         if not p.startswith("/var/log/"):
             raise ToolError("log_delete_file 仅允许删除 /var/log 下的单个日志文件")
+        preflight = classify_write_preflight(p, operation="delete")
+        if not preflight.allowed:
+            raise ToolError(
+                f"log_delete_file preflight denied ({preflight.rule_id}): "
+                f"{preflight.reason}"
+            )
         if not p.endswith(_LOG_DELETE_SUFFIXES):
             raise ToolError(
                 "log_delete_file 仅允许删除常见日志/轮转日志后缀: "

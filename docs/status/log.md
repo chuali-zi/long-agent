@@ -1,5 +1,12 @@
 # 工作日志
 
+## 2026-06-08
+
+- 按用户要求派出 4 个并行子agent侦察仓库，分别覆盖赛题/交付物、Agent架构、测试运行链路、冲榜性能与鲁棒性；主线程同步读取 AGENT.md、README、docs/status、Agent 主循环、LLM backend、工具 pipeline、ExecutionProxy、Web/MCP/审计实现和 benchmark。
+- 本轮为严苛缺陷审查，未修改实现代码。关键结论：当前短板集中在比赛交付闭环缺失、真实 LoongArch/Kylin 证据不足、默认工具面过宽、上下文/预算无界、TODO 正则门控脆弱、写操作安全 preflight 不够确定、Web/MCP 审批链路不完整、pytest 当前存在失败用例、性能 benchmark 不能代表目标环境。
+- 本机验证：`python -m pytest -q` 当前结果为 `701 passed, 13 skipped, 1 failed`，失败项为 `tests/test_web_security.py::test_choice_broker_api_roundtrip`；`python -m kyagent ask "which process used the most cpu" --mock` 失败，因为 `ask` 子命令没有 `--mock` 选项；通过 `KYAGENT_LLM_BACKEND=mock` 可运行离线 ask，但 Windows 下返回 mock 执行占位，不代表 Kylin/LoongArch 真机能力。
+- 高危提交风险：本地 ignored 文件 `kyagent.json` 被子agent确认含明文 DeepSeek key，虽然不在 Git 跟踪中，但 README/脚本中的裸 `rsync ./` 或手工打包整个目录会把它复制进 `/opt/kyagent` 或交付包；后续必须先清理密钥并改用受控 release 打包清单。
+
 ## 2026-06-07
 
 - 开出实验分支 `experimental/p0-agent-runtime`，保留 main 上既有未提交改动不回退，进入激进 P0 runtime 更新。

@@ -10,6 +10,7 @@ from kyagent.agent.llm import AssistantMessage, LlmBackend, TextBlock, ToolUseBl
 from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import Config
+from kyagent.executor.proxy import ExecutionResult
 
 
 class _NoPlanToolBackend(LlmBackend):
@@ -41,6 +42,40 @@ class _PlannedToolBackend(LlmBackend):
                 ToolUseBlock(id="planned-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
             ],
             stop_reason="tool_use",
+        )
+
+
+class _FinalThenSummaryBackend(LlmBackend):
+    name = "final_then_summary"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, system, messages, tools):  # noqa: ANN001
+        self.calls += 1
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="基于感知证据回答。")])
+        return AssistantMessage(blocks=[TextBlock(text="没有感知也直接回答。")])
+
+
+class _RecordingExecutor:
+    supports_parallel_tool_execution = False
+
+    def __init__(self) -> None:
+        self.argvs: list[list[str]] = []
+
+    def run(self, argv, *, requires_root=False, **kwargs):  # noqa: ANN001, ARG002
+        self.argvs.append(list(argv))
+        return ExecutionResult(
+            argv=list(argv),
+            returncode=0,
+            stdout="system observed\n",
+            stderr="",
+            truncated=False,
+            duration=0.0,
+            sudo_used=requires_root,
+            run_as="test",
         )
 
 
@@ -116,6 +151,82 @@ def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
         "根据结果返回关键证据。",
     ]
     assert plan.todos[0].status == "in_progress"
+
+
+def test_os_question_final_without_evidence_forces_read_only_perception(agent):
+    backend = _FinalThenSummaryBackend()
+    executor = _RecordingExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.cfg.agent.max_iterations = 3
+
+    result = agent.ask("系统现在负载怎么样")
+
+    assert result.final_text == "基于感知证据回答。"
+    assert backend.calls == 2
+    assert executor.argvs == [["uptime"]]
+    perceptions = [e for e in result.trace.events if e.kind is EventKind.PERCEPTION]
+    assert len(perceptions) == 1
+    assert perceptions[0].payload["evidence_id"].startswith("evidence-")
+    gate_events = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE
+        and e.payload.get("event") == "evidence_gate_forced_perception"
+    ]
+    assert gate_events
+    assert gate_events[0].payload["tool"] == "sys_uptime"
+    kinds = [e.kind for e in result.trace.events]
+    assert kinds.index(EventKind.PERCEPTION) < kinds.index(EventKind.AGENT_REPLY)
+
+
+def test_evidence_gate_gets_one_summary_turn_after_iteration_limit(agent):
+    backend = _FinalThenSummaryBackend()
+    executor = _RecordingExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.cfg.agent.max_iterations = 1
+
+    result = agent.ask("系统现在负载怎么样")
+
+    assert result.final_text == "基于感知证据回答。"
+    assert backend.calls == 2
+    assert executor.argvs == [["uptime"]]
+    assert any(e.kind is EventKind.PERCEPTION for e in result.trace.events)
+    budget_reasons = [
+        e.payload.get("reason")
+        for e in result.trace.events
+        if e.kind is EventKind.BUDGET
+    ]
+    assert budget_reasons == ["loop", "evidence_gate_summary"]
+
+
+def test_non_os_final_without_evidence_is_allowed(agent):
+    backend = _FinalThenSummaryBackend()
+    executor = _RecordingExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.cfg.agent.max_iterations = 3
+
+    result = agent.ask("帮我写一首五言绝句")
+
+    assert result.final_text == "没有感知也直接回答。"
+    assert backend.calls == 1
+    assert executor.argvs == []
+    assert not any(e.kind is EventKind.PERCEPTION for e in result.trace.events)
+
+
+def test_english_non_os_substrings_do_not_trigger_evidence_gate(agent):
+    backend = _FinalThenSummaryBackend()
+    executor = _RecordingExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.cfg.agent.max_iterations = 3
+
+    result = agent.ask("compose a short post about those ideas")
+
+    assert result.final_text == "没有感知也直接回答。"
+    assert backend.calls == 1
+    assert executor.argvs == []
 
 
 def test_nl_intent_blocks_destructive_request(agent):

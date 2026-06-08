@@ -6,6 +6,7 @@ from typing import Any
 
 from kyagent.mcp.tools.base import Tool, ToolError, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
+from kyagent.safety.write_preflight import WriteOperation, classify_write_preflight
 
 
 _PROTECTED_READ = {"/etc/shadow", "/etc/gshadow", "/etc/sudoers"}
@@ -114,6 +115,14 @@ _MUTATION_ALLOWED_PREFIXES = (
 )
 
 
+def _enforce_write_preflight(path: str, operation: WriteOperation, tool_name: str) -> None:
+    result = classify_write_preflight(path, operation=operation)
+    if not result.allowed:
+        raise ToolError(
+            f"{tool_name} preflight denied ({result.rule_id}): {result.reason}"
+        )
+
+
 class FsTruncateTool(Tool):
     name = "fs_truncate"
     description = (
@@ -142,6 +151,7 @@ class FsTruncateTool(Tool):
             raise ToolError(
                 "fs_truncate 仅允许清空 /var/log、/var/cache、/var/tmp、/tmp 下的文件"
             )
+        _enforce_write_preflight(p, "truncate", self.name)
         cleaned["path"] = p
         return cleaned
 
@@ -179,6 +189,7 @@ class FsDeleteFileTool(Tool):
             raise ToolError(
                 "fs_delete_file 仅允许删除 /var/log、/var/cache、/var/tmp、/tmp 下的单个文件"
             )
+        _enforce_write_preflight(p, "delete", self.name)
         cleaned["path"] = p
         return cleaned
 

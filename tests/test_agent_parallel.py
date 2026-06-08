@@ -126,7 +126,10 @@ def test_confirm_required_tools_do_not_enter_parallel_path(
 
     assert result.denied
     assert confirm_threads == ["MainThread", "MainThread"]
-    assert executor.thread_names == []
+    # The denied service reloads must not run; the OS evidence gate may still
+    # force one low-risk read-only perception before final, and it must remain
+    # on the owning run thread.
+    assert executor.thread_names == ["MainThread"]
 
 
 def test_is_parallel_safe_rejects_when_llm_reviewer_enabled(tmp_path):
