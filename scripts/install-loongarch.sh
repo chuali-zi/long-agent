@@ -472,6 +472,7 @@ write_env_file() {
     write_shell_assignment KYAGENT_EXECUTOR_ACCOUNT "$KYAGENT_USER"
     write_shell_assignment KYAGENT_AUDIT_DB /var/lib/kyagent/audit.db
     write_shell_assignment KYAGENT_AUDIT_JSONL /var/log/kyagent/audit.jsonl
+    write_shell_assignment KYAGENT_PLAN_DB /var/lib/kyagent/plans.db
     write_shell_assignment KYAGENT_AUDIT_INTEGRITY_ENABLED 1
     write_shell_assignment KYAGENT_AUDIT_HMAC_KEY_FILE "$AUDIT_HMAC_KEY_FILE"
     write_shell_assignment KYAGENT_AUDIT_HMAC_KEY_ID local-v1
@@ -518,7 +519,7 @@ PY
   if [[ "$SKIP_SUDOERS" != "1" ]]; then
     log "runtime-account selfcheck"
     sudo -u "$KYAGENT_USER" \
-      --preserve-env=PATH,KYAGENT_CONFIG,KYAGENT_DEEPSEEK_TRANSPORT,KYAGENT_EXECUTOR_ACCOUNT,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL \
+      --preserve-env=PATH,KYAGENT_CONFIG,KYAGENT_DEEPSEEK_TRANSPORT,KYAGENT_EXECUTOR_ACCOUNT,KYAGENT_AUDIT_DB,KYAGENT_AUDIT_JSONL,KYAGENT_PLAN_DB \
       "$ky" tools list >/dev/null
   fi
 
@@ -532,6 +533,7 @@ PY
       KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx \
       KYAGENT_AUDIT_DB=/tmp/kyagent-audit.db \
       KYAGENT_AUDIT_JSONL=/tmp/kyagent-audit.jsonl \
+      KYAGENT_PLAN_DB=/tmp/kyagent-plans.db \
       DEEPSEEK_API_KEY="${DEEPSEEK_KEY:-${DEEPSEEK_API_KEY:-}}" \
       "$ky" ask "ping" >/dev/null
     else

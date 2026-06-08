@@ -127,7 +127,7 @@ def test_default_config_executor_account_can_follow_runtime_env(monkeypatch):
     assert cfg.executor.account == "opsagent"
 
 
-def test_opt_install_defaults_audit_paths_to_runtime_dirs(tmp_path, monkeypatch):
+def test_opt_install_defaults_runtime_state_paths_to_runtime_dirs(tmp_path, monkeypatch):
     install_prefix = tmp_path / "opt" / "kyagent"
     config_dir = install_prefix / "configs"
     config_dir.mkdir(parents=True)
@@ -141,14 +141,16 @@ def test_opt_install_defaults_audit_paths_to_runtime_dirs(tmp_path, monkeypatch)
     monkeypatch.setenv("KYAGENT_INSTALL_PREFIX", str(install_prefix))
     monkeypatch.delenv("KYAGENT_AUDIT_DB", raising=False)
     monkeypatch.delenv("KYAGENT_AUDIT_JSONL", raising=False)
+    monkeypatch.delenv("KYAGENT_PLAN_DB", raising=False)
 
     cfg = load_config(config_path)
 
     assert cfg.audit.database == "/var/lib/kyagent/audit.db"
     assert cfg.audit.jsonl_file == "/var/log/kyagent/audit.jsonl"
+    assert cfg.planning.database == "/var/lib/kyagent/plans.db"
 
 
-def test_opt_install_runtime_env_audit_paths_take_precedence(tmp_path, monkeypatch):
+def test_opt_install_runtime_env_state_paths_take_precedence(tmp_path, monkeypatch):
     install_prefix = tmp_path / "opt" / "kyagent"
     config_dir = install_prefix / "configs"
     config_dir.mkdir(parents=True)
@@ -162,8 +164,10 @@ def test_opt_install_runtime_env_audit_paths_take_precedence(tmp_path, monkeypat
     monkeypatch.setenv("KYAGENT_INSTALL_PREFIX", str(install_prefix))
     monkeypatch.setenv("KYAGENT_AUDIT_DB", "/srv/kyagent/audit.db")
     monkeypatch.setenv("KYAGENT_AUDIT_JSONL", "/srv/kyagent/audit.jsonl")
+    monkeypatch.setenv("KYAGENT_PLAN_DB", "/srv/kyagent/plans.db")
 
     cfg = load_config(config_path)
 
     assert cfg.audit.database == "/srv/kyagent/audit.db"
     assert cfg.audit.jsonl_file == "/srv/kyagent/audit.jsonl"
+    assert cfg.planning.database == "/srv/kyagent/plans.db"

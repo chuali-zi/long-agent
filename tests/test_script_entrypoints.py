@@ -110,6 +110,8 @@ def test_prod_env_script_writes_only_the_minimal_runtime_env() -> None:
         "/var/lib/kyagent/audit.db",
         "KYAGENT_AUDIT_JSONL",
         "/var/log/kyagent/audit.jsonl",
+        "KYAGENT_PLAN_DB",
+        "/var/lib/kyagent/plans.db",
         "KYAGENT_AUDIT_INTEGRITY_ENABLED",
         "KYAGENT_AUDIT_HMAC_KEY_FILE",
         "KYAGENT_AUDIT_HMAC_KEY_ID",

@@ -73,6 +73,10 @@ audit:
 rca:
   playbooks_file: configs/rca-playbooks.yaml
 
+planning:
+  enabled: true
+  database: ${KYAGENT_PLAN_DB:-./var/plans.db}
+
 mcp:
   enable_tools: []
   plugin_entry_points: []

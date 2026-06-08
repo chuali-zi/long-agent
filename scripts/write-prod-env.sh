@@ -142,6 +142,7 @@ chmod 0600 "$tmp"
   write_shell_assignment KYAGENT_EXECUTOR_ACCOUNT "$KYAGENT_USER"
   write_shell_assignment KYAGENT_AUDIT_DB /var/lib/kyagent/audit.db
   write_shell_assignment KYAGENT_AUDIT_JSONL /var/log/kyagent/audit.jsonl
+  write_shell_assignment KYAGENT_PLAN_DB /var/lib/kyagent/plans.db
   write_shell_assignment KYAGENT_AUDIT_INTEGRITY_ENABLED 1
   if [[ "$GENERATE_HMAC_KEY" == "1" ]]; then
     write_shell_assignment KYAGENT_AUDIT_HMAC_KEY_FILE "$AUDIT_HMAC_KEY_FILE"

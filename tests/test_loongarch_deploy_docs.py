@@ -72,6 +72,7 @@ def test_loongarch_install_script_exists_and_has_safety_gates() -> None:
         "KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx",
         "write_shell_assignment KYAGENT_AUDIT_DB /var/lib/kyagent/audit.db",
         "write_shell_assignment KYAGENT_AUDIT_JSONL /var/log/kyagent/audit.jsonl",
+        "write_shell_assignment KYAGENT_PLAN_DB /var/lib/kyagent/plans.db",
         "visudo -cf",
         "--dry-run",
         "--yes",

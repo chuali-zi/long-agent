@@ -242,10 +242,15 @@ def _apply_project_json_overrides(raw: dict[str, Any], project_root: Path) -> di
     return raw
 
 
-def _is_default_audit_path(value: str | None, default_name: str) -> bool:
+def _is_default_var_path(value: str | None, default_name: str) -> bool:
     if value is None:
         return False
     return Path(value).as_posix() in {f"var/{default_name}", f"./var/{default_name}"}
+
+
+def _apply_env_overrides(cfg: Config) -> None:
+    if "KYAGENT_PLAN_DB" in os.environ:
+        cfg.planning.database = os.environ["KYAGENT_PLAN_DB"]
 
 
 def _apply_opt_runtime_defaults(cfg: Config) -> None:
@@ -262,14 +267,19 @@ def _apply_opt_runtime_defaults(cfg: Config) -> None:
 
     if (
         "KYAGENT_AUDIT_DB" not in os.environ
-        and _is_default_audit_path(cfg.audit.database, "audit.db")
+        and _is_default_var_path(cfg.audit.database, "audit.db")
     ):
         cfg.audit.database = "/var/lib/kyagent/audit.db"
     if (
         "KYAGENT_AUDIT_JSONL" not in os.environ
-        and _is_default_audit_path(cfg.audit.jsonl_file, "audit.jsonl")
+        and _is_default_var_path(cfg.audit.jsonl_file, "audit.jsonl")
     ):
         cfg.audit.jsonl_file = "/var/log/kyagent/audit.jsonl"
+    if (
+        "KYAGENT_PLAN_DB" not in os.environ
+        and _is_default_var_path(cfg.planning.database, "plans.db")
+    ):
+        cfg.planning.database = "/var/lib/kyagent/plans.db"
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -277,7 +287,10 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg_path = Path(path) if path else find_default_config()
     if cfg_path is None or not cfg_path.exists():
         # 没有配置文件时使用全默认
-        return Config(base_dir=Path.cwd())
+        cfg = Config(base_dir=Path.cwd())
+        _apply_env_overrides(cfg)
+        _apply_opt_runtime_defaults(cfg)
+        return cfg
 
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     raw = _expand_env(raw)
@@ -286,5 +299,6 @@ def load_config(path: str | Path | None = None) -> Config:
     # pydantic v1 API（v2 等价为 model_validate）；锁 v1 是为了在龙芯老世界绕开 pydantic-core Rust 编译
     cfg = Config.parse_obj(raw)
     cfg.base_dir = project_root
+    _apply_env_overrides(cfg)
     _apply_opt_runtime_defaults(cfg)
     return cfg

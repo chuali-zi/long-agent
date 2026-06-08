@@ -72,6 +72,7 @@ KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
 KYAGENT_EXECUTOR_ACCOUNT=kyagent
 KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
 KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
+KYAGENT_PLAN_DB=/var/lib/kyagent/plans.db
 DEEPSEEK_API_KEY=sk-...
 ```
 
@@ -304,6 +305,7 @@ sudo -l -U kyagent
 ```bash
 KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
 KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
+KYAGENT_PLAN_DB=/var/lib/kyagent/plans.db
 ```
 
 确认目录归属：
