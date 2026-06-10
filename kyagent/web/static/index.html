@@ -1252,10 +1252,19 @@ function planEmptyHtml() {
     </div>`;
 }
 function normalizePlanStatus(status) {
-  if (status === 'complete' || status === 'done' || status === 'skipped') return 'done';
+  if (status === 'complete' || status === 'completed' || status === 'done'
+      || status === 'skipped' || status === 'cancelled') return 'done';
   if (status === 'failed') return 'failed';
-  if (status === 'running') return 'running';
+  if (status === 'running' || status === 'in_progress') return 'running';
   return 'pending';
+}
+function normalizePlanTodos(todos) {
+  return (todos || []).map((t, i) => {
+    if (typeof t === 'string') return { id: 'todo-' + i, text: t, status: 'pending' };
+    const id = t.todo_id ?? t.id ?? ('todo-' + i);
+    const text = t.content ?? t.text ?? String(t);
+    return { id, text, status: normalizePlanStatus(t.status) };
+  });
 }
 function normalizePlanSteps(steps) {
   return (steps || []).map((s, i) => {
@@ -1309,6 +1318,14 @@ function setPlanStep(id, status) {
 }
 function renderBackendPlan(plan) {
   if (!plan) return;
+  // 优先展示模型每轮自动生成的动态 todo 计划（每次都不一样）；
+  // 仅在尚无 todo 时回退到固定的阶段性 steps 占位。
+  if (Array.isArray(plan.todos) && plan.todos.length) {
+    planState.steps = normalizePlanTodos(plan.todos);
+    if (plan.plan_id) planState.planId = plan.plan_id;
+    drawPlan();
+    return;
+  }
   renderPlan(plan.steps || [], plan.plan_id || planState.planId);
 }
 function handlePlanProgress(p) {
