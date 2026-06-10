@@ -122,6 +122,7 @@ def _agent_for_choice(
     *,
     on_user_choice,
     on_progress=None,
+    auto_approve_safe_remediation: bool = False,
 ) -> Agent:
     cfg = Config(base_dir=Path(__file__).parent.parent)
     cfg.audit.database = str(tmp_path / "audit.db")
@@ -134,6 +135,7 @@ def _agent_for_choice(
         confirm=lambda *a, **k: False,
         on_progress=on_progress,
         on_user_choice=on_user_choice,
+        auto_approve_safe_remediation=auto_approve_safe_remediation,
     )
     agent.llm = backend
     agent.executor = _NeverRunExecutor()
@@ -186,6 +188,36 @@ def test_agent_user_choice_refusal_returns_is_error(tmp_path: Path):
     refusal = tool_results[0]
     assert refusal["is_error"] is True
     assert "未做出选择" in refusal["content"]
+
+
+def test_agent_user_choice_auto_remediation_does_not_call_callback(tmp_path: Path):
+    backend = _ChoiceBackend()
+    callback_called = False
+
+    def choose(_choice):
+        nonlocal callback_called
+        callback_called = True
+        raise AssertionError("auto remediation mode must not wait for user choice")
+
+    agent = _agent_for_choice(
+        tmp_path,
+        backend,
+        on_user_choice=choose,
+        auto_approve_safe_remediation=True,
+    )
+
+    agent.ask("please decide")
+
+    assert callback_called is False
+    tool_result = next(
+        item
+        for message in agent.messages
+        if message["role"] == "user" and isinstance(message["content"], list)
+        for item in message["content"]
+        if isinstance(item, dict) and item.get("type") == "tool_result"
+    )
+    assert tool_result["is_error"] is True
+    assert "非交互安全修复模式" in tool_result["content"]
 
 
 def test_agent_user_choice_rejects_invalid_value(tmp_path: Path):

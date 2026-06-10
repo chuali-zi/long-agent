@@ -101,6 +101,7 @@ def classify_write_preflight(
     if (
         _is_active_log_name(basename)
         and not _is_dated_log_name(basename)
+        and not _is_stale_named_log(lower_path, basename)
         and not _is_temp_build_residual(lower_path, basename, segments)
         and not _is_core_dump_residual(lower_path, basename, segments)
     ):
@@ -109,7 +110,10 @@ def classify_write_preflight(
     if not meta.exists:
         return _deny("target-not-found", "target does not exist for preflight inspection")
 
-    if _is_recent(meta, now=now, recent_window_seconds=recent_window_seconds):
+    if (
+        _is_recent(meta, now=now, recent_window_seconds=recent_window_seconds)
+        and not _allows_recent_cleanup(lower_path, basename, segments)
+    ):
         minutes = max(0.0, ((now if now is not None else time.time()) - (meta.mtime or 0)) / 60.0)
         return _deny(
             "recently-modified",
@@ -122,6 +126,9 @@ def classify_write_preflight(
 
     if lower_path.startswith("/var/cache/"):
         return _allow("cache-target", "cache file under /var/cache")
+
+    if _is_stale_named_log(lower_path, basename):
+        return _allow("stale-named-log", "stale-named log target")
 
     if _is_temp_build_residual(lower_path, basename, segments):
         return _allow("temp-build-residual", "temporary build/cache residual")
@@ -159,6 +166,17 @@ def _is_recent(
         return False
     reference = time.time() if now is None else now
     return reference - metadata.mtime < recent_window_seconds
+
+
+def _allows_recent_cleanup(
+    lower_path: str,
+    basename: str,
+    segments: tuple[str, ...],
+) -> bool:
+    """Recent files are normally protected; only disposable scopes bypass it."""
+    return lower_path.startswith("/var/cache/") or _is_temp_build_residual(
+        lower_path, basename, segments
+    )
 
 
 def _sensitive_log_rule(
@@ -232,6 +250,14 @@ def _is_rotated_log_name(basename: str) -> bool:
     return suffix.isdigit()
 
 
+def _is_stale_named_log(lower_path: str, basename: str) -> bool:
+    if not basename.endswith(".log"):
+        return False
+    if not lower_path.startswith(("/var/log/", "/tmp/", "/var/tmp/")):
+        return False
+    return any(marker in basename for marker in ("stale", "old", "archive"))
+
+
 def _is_temp_build_residual(
     lower_path: str,
     basename: str,
@@ -242,6 +268,8 @@ def _is_temp_build_residual(
     if basename.endswith((".tmp", ".temp", ".bak", ".part", ".cache")):
         return True
     if basename.startswith(("tmp", "temp", "build-")):
+        return True
+    if "spool" in basename:
         return True
     residual_segments = {
         ".cache",

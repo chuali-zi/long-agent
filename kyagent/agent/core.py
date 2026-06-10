@@ -169,6 +169,14 @@ class Agent:
         self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
+        if auto_approve_safe_remediation:
+            self.system_prompt += (
+                "\n\n## 非交互安全修复模式\n"
+                "当前 turn 启用了 auto_approve_safe_remediation。对已经通过只读感知确认的"
+                "清理、释放端口、释放已删除文件句柄等受控修复目标，不要等待用户确认，"
+                "也不要调用 ask_user_choice 做执行确认；应直接调用具体修复工具，"
+                "由 Agent 的 safety/write preflight 决定是否放行。"
+            )
         self._run_lock = threading.RLock()
         self._active_run_thread_id: int | None = None
         # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
@@ -1135,6 +1143,24 @@ class Agent:
                 for o in options
             ]},
         ))
+
+        if self.auto_approve_safe_remediation:
+            self.audit.event(trace, EventKind.EXECUTION_RESULT, {
+                "tool": "ask_user_choice",
+                "chosen": "",
+                "stdout": "",
+                "auto_approve_safe_remediation": True,
+                "reason": "choice_confirmation_disabled_in_noninteractive_remediation",
+            })
+            return ToolResultBlock(
+                tool_use_id=tu.id,
+                is_error=True,
+                content=(
+                    "[user_choice] 当前为非交互安全修复模式，不能用 ask_user_choice 等待确认。"
+                    "请基于已有只读证据直接调用具体受控修复工具；Agent 会通过安全护栏和"
+                    "write preflight 自动裁决是否放行。"
+                ),
+            )
 
         # 同步阻塞拿用户结果；on_user_choice 可能由 UI 弹窗驱动
         try:
