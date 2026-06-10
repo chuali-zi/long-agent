@@ -99,9 +99,11 @@ class AuditStore:
         _chmod(self.db_path.parent, 0o700)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
+        self._tail_hash_cache: dict[str, str] = {}
         _chmod(self.db_path, 0o600)
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._secure_database_files()
@@ -130,16 +132,23 @@ class AuditStore:
                 "INSERT OR REPLACE INTO traces(trace_id,user,started_at,metadata) VALUES(?,?,?,?)",
                 (trace.trace_id, trace.user, trace.started_at, json.dumps(trace.metadata)),
             )
+            row = self._conn.execute(
+                "SELECT event_hash FROM events WHERE trace_id=? ORDER BY seq DESC LIMIT 1",
+                (trace.trace_id,),
+            ).fetchone()
+            self._tail_hash_cache[trace.trace_id] = row[0] if row and row[0] else ""
             self._secure_database_files()
 
     def append_event(self, trace_id: str, event: TraceEvent) -> None:
         payload = json.dumps(event.payload, ensure_ascii=False, default=str)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT event_hash FROM events WHERE trace_id=? ORDER BY seq DESC LIMIT 1",
-                (trace_id,),
-            ).fetchone()
-            prev_hash = row[0] if row and row[0] else ""
+            prev_hash = self._tail_hash_cache.get(trace_id)
+            if prev_hash is None:
+                row = self._conn.execute(
+                    "SELECT event_hash FROM events WHERE trace_id=? ORDER BY seq DESC LIMIT 1",
+                    (trace_id,),
+                ).fetchone()
+                prev_hash = row[0] if row and row[0] else ""
             event_hash = hashlib.sha256(
                 _canonical_event(trace_id, event.seq, event.kind.value, event.ts, payload, prev_hash)
             ).hexdigest()
@@ -163,7 +172,7 @@ class AuditStore:
             event.event_hash = event_hash
             event.event_hmac = event_hmac
             event.key_id = self.key_id
-            self._secure_database_files()
+            self._tail_hash_cache[trace_id] = event_hash
 
     def close_trace(self, trace: Trace) -> None:
         with self._lock:
@@ -187,6 +196,7 @@ class AuditStore:
                 "UPDATE traces SET metadata=? WHERE trace_id=?",
                 (json.dumps(trace.metadata, ensure_ascii=False, default=str), trace.trace_id),
             )
+            self._tail_hash_cache.pop(trace.trace_id, None)
             self._secure_database_files()
 
     def list_traces(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -301,6 +311,8 @@ class AuditStore:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+            for trace_id in trace_ids:
+                self._tail_hash_cache.pop(trace_id, None)
             return len(trace_ids)
 
     def find_events_by_kind(self, kind: EventKind, limit: int = 100) -> Iterable[dict[str, Any]]:
@@ -313,4 +325,5 @@ class AuditStore:
 
     def close(self) -> None:
         with self._lock:
+            self._tail_hash_cache.clear()
             self._conn.close()

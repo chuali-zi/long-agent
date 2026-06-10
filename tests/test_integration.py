@@ -59,6 +59,50 @@ class _FinalThenSummaryBackend(LlmBackend):
         return AssistantMessage(blocks=[TextBlock(text="没有感知也直接回答。")])
 
 
+class _KillAfterEvidenceBackend(LlmBackend):
+    name = "kill_after_evidence"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, system, messages, tools):  # noqa: ANN001
+        self.calls += 1
+        last = messages[-1] if messages else {}
+        if self.calls == 1:
+            return AssistantMessage(
+                blocks=[
+                    TextBlock(text=(
+                        "TODO 1: 调用只读工具确认高 CPU 进程。\n"
+                        "TODO 2: 仅在确认是测试脚本后结束目标 PID。"
+                    )),
+                    ToolUseBlock(
+                        id="ps-1",
+                        name="process_list",
+                        input={"sort_by": "cpu", "limit": 5},
+                    ),
+                ],
+                stop_reason="tool_use",
+            )
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            if self.calls == 2:
+                return AssistantMessage(
+                    blocks=[
+                        TextBlock(text=(
+                            "TODO 1: 终止已确认的 ab-smoke-load 测试脚本。\n"
+                            "TODO 2: 返回释放结果。"
+                        )),
+                        ToolUseBlock(
+                            id="kill-1",
+                            name="process_kill",
+                            input={"pid": 2976, "signal": "TERM"},
+                        ),
+                    ],
+                    stop_reason="tool_use",
+                )
+            return AssistantMessage(blocks=[TextBlock(text="已释放测试脚本。")])
+        return AssistantMessage(blocks=[TextBlock(text="未执行。")])
+
+
 class _RecordingExecutor:
     supports_parallel_tool_execution = False
 
@@ -71,6 +115,29 @@ class _RecordingExecutor:
             argv=list(argv),
             returncode=0,
             stdout="system observed\n",
+            stderr="",
+            truncated=False,
+            duration=0.0,
+            sudo_used=requires_root,
+            run_as="test",
+        )
+
+
+class _ProcessEvidenceExecutor(_RecordingExecutor):
+    def run(self, argv, *, requires_root=False, **kwargs):  # noqa: ANN001, ARG002
+        self.argvs.append(list(argv))
+        if argv and argv[0] == "ps":
+            stdout = (
+                "USER PID %CPU %MEM ELAPSED STAT COMMAND COMMAND\n"
+                "kyagent 2976 99.0 0.1 00:01 R python /tmp/loadtest-ops/bin/ab-smoke-load.py\n"
+                "kyagent 2977 0.1 0.1 00:01 S python /tmp/loadtest-ops/inventory-api\n"
+            )
+        else:
+            stdout = "terminated\n"
+        return ExecutionResult(
+            argv=list(argv),
+            returncode=0,
+            stdout=stdout,
             stderr="",
             truncated=False,
             duration=0.0,
@@ -122,20 +189,23 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
-def test_tool_use_without_todo_plan_is_blocked(agent):
+def test_tool_use_without_todo_plan_is_auto_repaired(agent):
     agent.llm = _NoPlanToolBackend()
-    agent.cfg.agent.max_iterations = 1
+    agent.cfg.agent.max_iterations = 2
     result = agent.ask("查下 CPU 占用最高的进程")
     kinds = [e.kind.value for e in result.trace.events]
     assert EventKind.LLM_THOUGHT.value in kinds
     assert EventKind.PLAN_UPDATE.value in kinds
-    assert EventKind.TOOL_REQUEST.value not in kinds
-    assert EventKind.EXECUTION.value not in kinds
-    plan_required = [
+    assert EventKind.TOOL_REQUEST.value in kinds
+    assert EventKind.EXECUTION.value in kinds
+    repaired = [
         e for e in result.trace.events
-        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
     ]
-    assert plan_required
+    assert repaired
+    assert result.plan_id is not None
+    plan = agent.plan_store.get(result.plan_id)
+    assert plan.todos[0].content.startswith("调用只读工具 process_list")
 
 
 def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
@@ -275,6 +345,37 @@ def test_high_risk_tool_denied_in_oneshot(agent):
     # 第一次 verdict 应为 confirm（或更严）
     first_verdict = safety_events[0].payload
     assert first_verdict["decision"] in ("confirm", "deny")
+
+
+def test_safe_remediation_auto_approval_is_opt_in_for_process_kill(agent):
+    backend = _KillAfterEvidenceBackend()
+    executor = _ProcessEvidenceExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.cfg.agent.max_iterations = 3
+
+    result = agent.ask("loadtest CPU 被 ab-smoke-load 打满了，确认后结束它")
+
+    assert result.denied
+    assert ["kill", "-TERM", "2976"] not in executor.argvs
+
+
+def test_safe_remediation_auto_approval_kills_pid_with_matching_evidence(agent):
+    backend = _KillAfterEvidenceBackend()
+    executor = _ProcessEvidenceExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.auto_approve_safe_remediation = True
+    agent.cfg.agent.max_iterations = 3
+
+    result = agent.ask("loadtest CPU 被 ab-smoke-load 打满了，确认后结束它")
+
+    assert not result.denied
+    assert ["kill", "-TERM", "2976"] in executor.argvs
+    assert any(
+        e.kind is EventKind.SAFETY_CHECK and e.payload.get("auto_confirmed") is True
+        for e in result.trace.events
+    )
 
 
 def test_agent_audit_persistence(agent):

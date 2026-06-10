@@ -70,9 +70,12 @@ def test_write_preflight_denies_recently_modified_files_before_allow_rules():
     [
         ("/var/log/myapp.log.1", "old-rotated-log"),
         ("/var/log/myapp.log.gz", "old-rotated-log"),
+        ("/var/log/auth-api01/app/debug-20260412.log", "dated-log"),
         ("/var/cache/dnf/pkg.tmp", "cache-target"),
         ("/tmp/build-wheel/output.tmp", "temp-build-residual"),
         ("/var/tmp/.pytest_cache/node", "temp-build-residual"),
+        ("/var/tmp/web-app01/pip-build-3f9a/wheel.log", "temp-build-residual"),
+        ("/var/tmp/auth-api01/core/auth-api.24891.core.txt", "temp-core-dump"),
     ],
 )
 def test_write_preflight_allows_confirm_for_cleanup_targets(path, rule_id):
@@ -107,6 +110,17 @@ def test_write_preflight_denies_missing_rotated_targets():
     )
     assert result.decision is WritePreflightDecision.DENY
     assert result.rule_id == "target-not-found"
+
+
+def test_write_preflight_denies_recent_dated_log_before_allow():
+    result = classify_write_preflight(
+        "/var/log/auth-api01/app/debug-20260412.log",
+        operation="delete",
+        metadata=RECENT,
+        now=4_000.0,
+    )
+    assert result.decision is WritePreflightDecision.DENY
+    assert result.rule_id == "recently-modified"
 
 
 def test_write_preflight_denies_symlink_targets():

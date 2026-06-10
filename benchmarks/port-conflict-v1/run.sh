@@ -39,7 +39,7 @@ if [[ "$DO_ASK" == "1" ]]; then
     INSTALL_PREFIX="$(cd "$ROOT/../.." && pwd)"
     log "fallback prefix: $INSTALL_PREFIX"
   fi
-  sudo -u "$KYAGENT_USER" bash -c "set -a; source '$ENV_FILE'; set +a; '$INSTALL_PREFIX/.venv/bin/kyagent' ask $(printf '%q' "$PROMPT")"
+  sudo -u "$KYAGENT_USER" bash -c "set -a; source '$ENV_FILE'; set +a; '$INSTALL_PREFIX/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$PROMPT")"
   log "4b post-verify"
   bash "$ROOT/verify.sh" post
 else

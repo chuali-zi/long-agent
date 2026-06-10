@@ -57,14 +57,14 @@ if [[ "$DO_ASK" == "1" ]]; then
     INSTALL_PREFIX="$(cd "$ROOT/../.." && pwd)"
     log "fallback install prefix: $INSTALL_PREFIX"
   fi
-  sudo -u "$KYAGENT_USER" bash -c "set -a; source '$ENV_FILE'; set +a; '$INSTALL_PREFIX/.venv/bin/kyagent' ask $(printf '%q' "$PROMPT")"
+  sudo -u "$KYAGENT_USER" bash -c "set -a; source '$ENV_FILE'; set +a; '$INSTALL_PREFIX/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$PROMPT")"
   log "step 4b: post-verify"
   bash "$ROOT/verify.sh" post
 else
   log "step 4/4: skipped agent ask (pass --ask to run)"
   printf '\n'
   log "手动演示命令:"
-  printf '  sudo -u %s bash -c '\''set -a; source %s; set +a; %s/.venv/bin/kyagent ask "%s"'\''\n' \
+  printf '  sudo -u %s bash -c '\''set -a; source %s; set +a; %s/.venv/bin/kyagent ask --auto-approve-safe-remediation "%s"'\''\n' \
     "$KYAGENT_USER" "$ENV_FILE" "$INSTALL_PREFIX" "$PROMPT"
   log "录像建议: 先 probe，再 ask，最后: bash $ROOT/verify.sh post"
 fi

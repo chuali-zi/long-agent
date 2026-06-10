@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import stat
 import time
 from dataclasses import dataclass
@@ -97,7 +98,12 @@ def classify_write_preflight(
         rule_id, reason = sensitive_rule
         return _deny(rule_id, reason)
 
-    if _is_active_log_name(basename):
+    if (
+        _is_active_log_name(basename)
+        and not _is_dated_log_name(basename)
+        and not _is_temp_build_residual(lower_path, basename, segments)
+        and not _is_core_dump_residual(lower_path, basename, segments)
+    ):
         return _deny("active-log", "active .log files are not cleanup targets")
 
     if not meta.exists:
@@ -119,6 +125,15 @@ def classify_write_preflight(
 
     if _is_temp_build_residual(lower_path, basename, segments):
         return _allow("temp-build-residual", "temporary build/cache residual")
+
+    if _is_core_dump_residual(lower_path, basename, segments):
+        return _allow("temp-core-dump", "temporary core/dump residual")
+
+    if _is_dated_log_name(basename):
+        return _allow("dated-log", "dated log target")
+
+    if _is_active_log_name(basename):
+        return _deny("active-log", "active .log files are not cleanup targets")
 
     return _deny(
         "unclassified-cleanup-target",
@@ -201,6 +216,15 @@ def _is_active_log_name(basename: str) -> bool:
     return basename.endswith(".log")
 
 
+_DATED_LOG_RE = re.compile(
+    r"(?:^|[-_.])(?:20\d{2}(?:[-_.]?\d{2}){0,2}|\d{8})(?:[-_.]|$)"
+)
+
+
+def _is_dated_log_name(basename: str) -> bool:
+    return basename.endswith(".log") and bool(_DATED_LOG_RE.search(basename))
+
+
 def _is_rotated_log_name(basename: str) -> bool:
     if basename.endswith((".gz", ".xz", ".zst", ".old")):
         return True
@@ -231,4 +255,34 @@ def _is_temp_build_residual(
         "tmp",
         "temp",
     }
-    return any(seg in residual_segments for seg in segments)
+    app_segments = _app_path_segments(lower_path, segments)
+    if any(seg in residual_segments for seg in app_segments):
+        return True
+    return any(
+        seg.startswith(("pip-build", "build-", "tmp-", "temp-"))
+        for seg in app_segments
+    )
+
+
+def _is_core_dump_residual(
+    lower_path: str,
+    basename: str,
+    segments: tuple[str, ...],
+) -> bool:
+    if not (lower_path.startswith("/tmp/") or lower_path.startswith("/var/tmp/")):
+        return False
+    if "core" in segments or "dump" in segments:
+        return True
+    return (
+        ".core" in basename
+        or basename.startswith(("core.", "dump."))
+        or basename.endswith((".core", ".dump", ".core.txt", ".dump.txt"))
+    )
+
+
+def _app_path_segments(lower_path: str, segments: tuple[str, ...]) -> tuple[str, ...]:
+    if lower_path.startswith("/var/tmp/"):
+        return segments[2:]
+    if lower_path.startswith("/tmp/"):
+        return segments[1:]
+    return segments

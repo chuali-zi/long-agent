@@ -972,6 +972,7 @@ class MockBackend(LlmBackend):
         以便 TUI 看见动画。tool_use 块不切，最终 AssistantMessage 与 chat() 同。
         """
         result = self.chat(system, messages, tools)
+        delay = 0.0 if os.environ.get("KYAGENT_BENCH") == "1" else self._STREAM_CHUNK_DELAY
         for blk in result.blocks:
             if not isinstance(blk, TextBlock):
                 continue
@@ -999,8 +1000,8 @@ class MockBackend(LlmBackend):
                     on_delta(c)
                 except Exception:  # noqa: BLE001
                     logger.debug("on_delta raised in MockBackend", exc_info=True)
-                if self._STREAM_CHUNK_DELAY > 0:
-                    time.sleep(self._STREAM_CHUNK_DELAY)
+                if delay > 0:
+                    time.sleep(delay)
         return result
 
     def chat(self, system, messages, tools):

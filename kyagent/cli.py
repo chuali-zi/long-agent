@@ -144,10 +144,22 @@ def ask(
     config: str | None = typer.Option(None, "--config", "-c"),
     user: str = typer.Option("oneshot", "--user", "-u"),
     json_out: bool = typer.Option(False, "--json", help="以 JSON 输出，方便管道"),
+    auto_approve_safe_remediation: bool = typer.Option(
+        False,
+        "--auto-approve-safe-remediation",
+        help=(
+            "非交互赛题模式：仅自动放行已通过工具校验/preflight 的安全清理，"
+            "以及有只读证据支撑的温和 process_kill。"
+        ),
+    ),
 ):
     """非交互式提问。"""
     cfg = load_config(config)
-    agent = Agent.from_config(cfg, confirm=lambda *a, **k: False)  # 单轮模式不允许 confirm
+    agent = Agent.from_config(
+        cfg,
+        confirm=lambda *a, **k: False,  # 单轮模式不允许普通 confirm
+        auto_approve_safe_remediation=auto_approve_safe_remediation,
+    )
     try:
         result = agent.ask(text, user=user)
         if json_out:

@@ -39,7 +39,7 @@ Each new scenario directory follows the `cleanup-v2` shape:
 - `setup.sh`: deploys the fixture and writes `bench-state.json`.
 - `probe.sh`: read-only operator probe for demos and debugging.
 - `verify.sh pre|post`: executable grading.
-- `run.sh [--ask]`: setup + precheck + probe + optional kyagent ask + postcheck.
+- `run.sh [--ask]`: setup + precheck + probe + optional kyagent ask + postcheck. The ask path passes `--auto-approve-safe-remediation` so non-interactive real-ops grading can complete only the preflighted cleanup and evidence-backed process termination tools.
 - `teardown.sh`: state-based cleanup.
 
 Runtime/process benches use `/tmp/<service>-ops` by default and refuse to

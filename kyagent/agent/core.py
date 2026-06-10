@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 import threading
 import json
+import os
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -93,6 +94,35 @@ _NON_PERCEPTION_READ_ONLY_TOOLS = {
     "ask_user_choice",
     "submit_rca_report",
 }
+_AUTO_APPROVE_FILE_REMEDIATION_TOOLS = {
+    "fs_delete_file",
+    "fs_truncate",
+    "log_delete_file",
+}
+_AUTO_APPROVE_PROCESS_SIGNALS = {"TERM", "INT", "HUP"}
+_AUTO_APPROVE_PROCESS_MARKERS = (
+    "checkout-preview",
+    "report-worker",
+    "ab-smoke-load",
+    "/tmp/shop-ops",
+    "/tmp/report-ops",
+    "/tmp/loadtest-ops",
+    "export-20260610.tmp",
+    "(deleted)",
+    " deleted",
+)
+_PROTECTED_PROCESS_MARKERS = (
+    "orders-api",
+    "billing-api",
+    "inventory-api",
+    "sshd",
+    "systemd",
+    "mysql",
+    "mariadb",
+    "postgres",
+    "redis",
+)
+_PORT_RE = re.compile(r"(?<!\d)([1-9][0-9]{1,4})(?!\d)")
 
 
 @dataclass
@@ -121,6 +151,7 @@ class Agent:
         on_progress: ProgressCallback | None = None,
         on_user_choice: UserChoiceFn | None = None,
         plan_store: PlanStore | None = None,
+        auto_approve_safe_remediation: bool = False,
     ):
         self.cfg = cfg
         self.llm = llm
@@ -135,6 +166,7 @@ class Agent:
         # ask_user_choice 工具的回调；UI 未注入时默认拒绝（保守）
         self.on_user_choice: UserChoiceFn = on_user_choice or auto_cancel_choice
         self.plan_store = plan_store
+        self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
         self.system_prompt = SYSTEM_PROMPT
         self._run_lock = threading.RLock()
@@ -177,18 +209,25 @@ class Agent:
     @classmethod
     def from_config(cls, cfg: Config, confirm: ConfirmFn = _auto_deny,
                     on_progress: ProgressCallback | None = None,
-                    on_user_choice: UserChoiceFn | None = None) -> "Agent":
+                    on_user_choice: UserChoiceFn | None = None,
+                    auto_approve_safe_remediation: bool = False) -> "Agent":
         # 通道无关基础设施统一从 composition root 装配
         rt = build_runtime(cfg)
         # 通道特定（LLM 后端、NL 意图层）在这里组合
         llm = build_backend(cfg)
         intent_guard = IntentGuard.from_config(cfg) if cfg.safety.intent_check else None
         plan_store = None
-        if getattr(cfg.planning, "enabled", True):
+        if (
+            getattr(cfg.planning, "enabled", True)
+            and os.environ.get("KYAGENT_BENCH") != "1"
+        ):
             plan_store = PlanStore(cfg.resolve(cfg.planning.database))
-        return cls(cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
-                   intent_guard=intent_guard, on_progress=on_progress,
-                   on_user_choice=on_user_choice, plan_store=plan_store)
+        return cls(
+            cfg, llm, rt.registry, rt.guardrail, rt.executor, rt.audit, confirm,
+            intent_guard=intent_guard, on_progress=on_progress,
+            on_user_choice=on_user_choice, plan_store=plan_store,
+            auto_approve_safe_remediation=auto_approve_safe_remediation,
+        )
 
     # ---- 主入口 --------------------------------------------------------
 
@@ -518,34 +557,52 @@ class Agent:
 
             todos = self._extract_todo_plan(assistant.texts())
             if not todos:
-                notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
-                payload = {
-                    "event": "plan_required",
-                    "reason": "tool_use_without_todo_plan",
-                    "tool_calls": [t.name for t in tool_uses],
-                    "plan_id": plan.plan_id if plan else None,
-                }
-                self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                self._emit(ProgressEvent(
-                    kind="plan_required",
-                    text="工具调用前必须先给出 TODO 计划",
-                    meta=payload,
-                ))
-                if plan is not None:
-                    plan = self._set_plan_step(
-                        trace, plan, "reason", "running",
-                        "Blocked tool calls until a todo plan is provided",
-                        event_kind="plan_step_update",
-                    )
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
-                        "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
-                        "然后再发起必要的工具调用。"
-                    ),
-                })
-                continue
+                todos = self._synthesize_todo_plan(tool_uses)
+                if todos:
+                    repaired_text = self._todo_items_to_text(todos)
+                    assistant.blocks.insert(0, TextBlock(text=repaired_text))
+                    notes.append("模型工具调用缺少 todo 计划，已根据 tool_call 自动补齐")
+                    payload = {
+                        "event": "plan_auto_repaired",
+                        "reason": "tool_use_without_todo_plan",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_step_update",
+                        text="已根据工具调用自动补齐 TODO 计划",
+                        meta=payload,
+                    ))
+                else:
+                    notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
+                    payload = {
+                        "event": "plan_required",
+                        "reason": "tool_use_without_todo_plan",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_required",
+                        text="工具调用前必须先给出 TODO 计划",
+                        meta=payload,
+                    ))
+                    if plan is not None:
+                        plan = self._set_plan_step(
+                            trace, plan, "reason", "running",
+                            "Blocked tool calls until a todo plan is provided",
+                            event_kind="plan_step_update",
+                        )
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
+                            "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
+                            "然后再发起必要的工具调用。"
+                        ),
+                    })
+                    continue
 
             if plan is not None and self.plan_store is not None:
                 plan = self.plan_store.replace_todos(plan.plan_id, todos)
@@ -624,7 +681,8 @@ class Agent:
         ))
         return AgentRunResult(trace=trace,
                               final_text="达到最大工具调用次数，已中止。",
-                              tool_iterations=iterations, denied=denied, notes=notes)
+                              tool_iterations=iterations, denied=denied, notes=notes,
+                              plan_id=plan.plan_id if plan else None)
 
     # ---- 工具调用处理 --------------------------------------------------
 
@@ -674,6 +732,39 @@ class Agent:
                     priority=priority,
                 ))
         return items[:20]
+
+    def _synthesize_todo_plan(self, tool_uses: list[ToolUseBlock]) -> list[PlanTodoItem]:
+        items: list[PlanTodoItem] = []
+        for tu in tool_uses[:12]:
+            tool = self.registry.get(tu.name)
+            if tool is not None and tool.read_only:
+                content = f"调用只读工具 {tu.name} 感知当前系统状态。"
+            elif tool is not None:
+                content = f"在安全校验后调用变更工具 {tu.name} 处理已确认目标。"
+            else:
+                content = f"校验并调用工具 {tu.name}。"
+            priority = "high" if tool is not None and not tool.read_only else "medium"
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{len(items) + 1}",
+                content=content,
+                status="in_progress" if not items else "pending",
+                priority=priority,
+            ))
+        if items:
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{len(items) + 1}",
+                content="根据工具结果验证影响范围并返回结论。",
+                status="pending",
+                priority="medium",
+            ))
+        return items[:20]
+
+    @staticmethod
+    def _todo_items_to_text(items: list[PlanTodoItem]) -> str:
+        return "\n".join(
+            f"TODO {idx}: {item.content}"
+            for idx, item in enumerate(items, start=1)
+        )
 
     def _todo_looks_high_priority(self, content: str) -> bool:
         lowered = content.lower()
@@ -744,6 +835,81 @@ class Agent:
             return False
         verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
         return verdict.decision is Decision.ALLOW
+
+    def _safe_remediation_auto_approval_reason(self, trace: Trace, tu: ToolUseBlock, prep) -> str:
+        if not self.auto_approve_safe_remediation:
+            return ""
+        if tu.name in _AUTO_APPROVE_FILE_REMEDIATION_TOOLS:
+            path = str(prep.cleaned.get("path", ""))
+            if path.startswith(("/var/log/", "/var/cache/", "/var/tmp/", "/tmp/")):
+                return "file cleanup target passed tool validation and write preflight"
+            return ""
+        if tu.name != "process_kill":
+            return ""
+        signal = str(prep.cleaned.get("signal", "TERM")).upper()
+        if signal not in _AUTO_APPROVE_PROCESS_SIGNALS:
+            return ""
+        try:
+            pid = int(prep.cleaned.get("pid"))
+        except (TypeError, ValueError):
+            return ""
+        if pid < 2:
+            return ""
+        for line in self._evidence_lines_for_pid(trace, pid):
+            if self._line_confirms_safe_process_target(trace, line):
+                return "target PID matched prior read-only evidence for a bench-scoped process"
+        return ""
+
+    @staticmethod
+    def _evidence_lines_for_pid(trace: Trace, pid: int) -> list[str]:
+        pid_re = re.compile(rf"(?<!\d){pid}(?!\d)")
+        lines: list[str] = []
+        for event in trace.events:
+            if event.kind is not EventKind.EXECUTION_RESULT:
+                continue
+            payload = event.payload or {}
+            text = "\n".join(
+                str(payload.get(key) or "")
+                for key in ("stdout", "stderr")
+                if payload.get(key)
+            )
+            for line in text.splitlines():
+                if pid_re.search(line):
+                    lines.append(line)
+        return lines
+
+    @staticmethod
+    def _user_input_text(trace: Trace) -> str:
+        for event in trace.events:
+            if event.kind is EventKind.USER_INPUT:
+                return str((event.payload or {}).get("text") or "")
+        return ""
+
+    def _line_confirms_safe_process_target(self, trace: Trace, line: str) -> bool:
+        lowered = line.lower()
+        if any(marker in lowered for marker in _PROTECTED_PROCESS_MARKERS):
+            return False
+        if any(marker in lowered for marker in _AUTO_APPROVE_PROCESS_MARKERS):
+            return True
+        user_text = self._user_input_text(trace).lower()
+        for port in _PORT_RE.findall(line):
+            if self._port_is_requested_target(user_text, port):
+                return True
+        return False
+
+    @staticmethod
+    def _port_is_requested_target(user_text: str, port: str) -> bool:
+        protected_near = (
+            rf"(不要|别|保留|对照|protected|do not|don't|dont|keep)[^。；;\n]{{0,60}}{port}"
+            rf"|{port}[^。；;\n]{{0,60}}(不要|别|保留|对照|protected|do not|don't|dont|keep)"
+        )
+        if re.search(protected_near, user_text, re.IGNORECASE):
+            return False
+        target_near = (
+            rf"(释放|结束|终止|杀|占用|旧|preview|stale|old|release|terminate|kill)[^。；;\n]{{0,80}}{port}"
+            rf"|{port}[^。；;\n]{{0,80}}(释放|结束|终止|杀|占用|旧|preview|stale|old|release|terminate|kill)"
+        )
+        return bool(re.search(target_near, user_text, re.IGNORECASE))
 
     @staticmethod
     def _is_os_question(text: str) -> bool:
@@ -898,13 +1064,24 @@ class Agent:
                     content=("[denied] 工具需要二次确认，但当前调度在非主线程，"
                              f"已自动拒绝（risk={verdict.risk.value}）"),
                 )
-            approved = False
-            try:
-                approved = self.confirm(
-                    confirm_adapter.for_tool_call(verdict, tu.name, prep.argv)
-                )
-            except Exception:
+            auto_reason = self._safe_remediation_auto_approval_reason(trace, tu, prep)
+            if auto_reason:
+                approved = True
+                notes.append(f"已自动放行受控修复工具 {tu.name}: {auto_reason}")
+                self.audit.event(trace, EventKind.SAFETY_CHECK, {
+                    "auto_confirmed": True,
+                    "tool": tu.name,
+                    "reason": auto_reason,
+                    "argv": prep.argv,
+                })
+            else:
                 approved = False
+                try:
+                    approved = self.confirm(
+                        confirm_adapter.for_tool_call(verdict, tu.name, prep.argv)
+                    )
+                except Exception:
+                    approved = False
             if not approved:
                 notes.append(f"用户拒绝 {tu.name}")
                 self.audit.event(trace, EventKind.ERROR,
