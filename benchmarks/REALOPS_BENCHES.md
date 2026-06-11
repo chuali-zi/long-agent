@@ -32,15 +32,40 @@ The local interpretation is:
 
 ## Common Contract
 
-Each new scenario directory follows the `cleanup-v2` shape:
+Each scenario directory follows the same shape:
 
-- `manifest.yaml`: human-readable task, answer key, and scoring intent.
+- `manifest.yaml`: operator ticket prompt, answer key (operators only), grading intent.
 - `gen_artifacts.py`: deterministic fixture generator.
 - `setup.sh`: deploys the fixture and writes `bench-state.json`.
-- `probe.sh`: read-only operator probe for demos and debugging.
-- `verify.sh pre|post`: executable grading.
-- `run.sh [--ask]`: setup + precheck + probe + optional kyagent ask + postcheck. The ask path passes `--auto-approve-safe-remediation` so non-interactive real-ops grading can complete only the preflighted cleanup and evidence-backed process termination tools.
+- `probe.sh`: read-only operator probe (may include answer key for humans only).
+- `verify.sh pre|post`: executable grading → writes `score.json`, strict exit codes.
+- `run.sh [--ask]`: setup + precheck + probe + optional kyagent ask + postcheck.
 - `teardown.sh`: state-based cleanup.
+
+### Strict grading (VM / opencode loop)
+
+Post-verify exit codes (`benchmarks/lib/grade.py`):
+
+| Code | Verdict | automation_pass |
+|-----:|---------|-----------------|
+| 0 | PERFECT | yes |
+| 1 | FAIL | no |
+| 2 | PARTIAL | no |
+| 3 | INCONCLUSIVE | no |
+
+Only **PERFECT** counts as pass for `run-suite.sh`. INCONCLUSIVE means the agent did not remediate—fix kyagent, not the bench.
+
+Run the suite:
+
+```bash
+sudo bash benchmarks/run-suite.sh --setup-permissions-prod --teardown-each
+```
+
+Opencode harness: `benchmarks/opencode/SKILL.md`
+
+`run-real-llm.sh` is a thin wrapper around `run-suite.sh`.
+
+Removed: `demo-cleanup` (v1 with file-header answer keys—invalid for ability testing).
 
 Runtime/process benches use `/tmp/<service>-ops` by default and refuse to
 overwrite a non-empty runtime root without an existing `bench-state.json`.

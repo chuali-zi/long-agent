@@ -90,10 +90,10 @@ def main() -> int:
     if port_open(args.protected_port):
         raise SystemExit(f"protected port already in use: {args.protected_port}")
 
-    script = root / "bin" / "report-worker.py"
+    script = root / "bin" / "export-hold.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(HOLDER_CODE, encoding="utf-8")
-    held_path = root / "spool" / "export-20260610.tmp"
+    held_path = root / "spool" / "export-a8f3c2.tmp"
     holder = subprocess.Popen(
         [sys.executable, str(script), str(held_path), str(args.held_size_mb)],
         stdout=open(root / "report-worker.out.log", "ab"),

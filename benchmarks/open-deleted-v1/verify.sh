@@ -12,11 +12,14 @@ die() { printf '[open-deleted-v1:verify][ERROR] %s\n' "$*" >&2; exit 1; }
 PY="$(command -v python3 || command -v python || true)"
 [[ -n "$PY" ]] || die "python is required"
 
-"$PY" - "$STATE_FILE" "$MODE" <<'PY'
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+"$PY" - "$STATE_FILE" "$MODE" "$LIB_DIR" <<'PY'
 import json, os, socket, sys
 from pathlib import Path
 
-state_path, mode = sys.argv[1], sys.argv[2]
+state_path, mode, lib_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, lib_dir)
+from grade import write_score
 data = json.loads(Path(state_path).read_text(encoding="utf-8"))
 
 def alive(pid: int) -> bool:
@@ -78,14 +81,25 @@ elif released == target_total:
 else:
     verdict = "INCONCLUSIVE (open-deleted holder still alive)"
 print(f"verdict:           {verdict}")
-Path(state_path).with_name(".verify-exit").write_text(str(failures), encoding="utf-8")
+score_path = write_score(
+    bench_id="open-deleted-v1",
+    mode=mode,
+    verdict=verdict,
+    hard_failures=failures,
+    metrics={
+        "holders_released": released,
+        "holders_total": target_total,
+        "protected_alive": protected_ok,
+        "protected_total": protected_total,
+    },
+    state_dir=Path(state_path).parent,
+    verdict_detail=verdict,
+    state_file=state_path,
+    verify_script="benchmarks/open-deleted-v1/verify.sh",
+)
+print(f"score.json:        {score_path}")
 PY
 
-EXIT_MARK="$(dirname "$STATE_FILE")/.verify-exit"
-EXIT_CODE=0
-if [[ -f "$EXIT_MARK" ]]; then
-  EXIT_CODE="$(cat "$EXIT_MARK")"
-  rm -f "$EXIT_MARK"
-fi
-[[ "$EXIT_CODE" == "0" ]] || exit 1
-log "verify ok (mode=$MODE)"
+# shellcheck source=/dev/null
+source "$LIB_DIR/common.sh"
+kybench_finalize_exit "$STATE_FILE"

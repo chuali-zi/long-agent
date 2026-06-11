@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kyagent RealOps bench score",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "bench_id",
+    "mode",
+    "verdict",
+    "exit_code",
+    "automation_pass",
+    "hard_failures",
+    "metrics"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "bench_id": { "type": "string" },
+    "mode": { "enum": ["pre", "post"] },
+    "timestamp": { "type": "string" },
+    "verdict": {
+      "enum": [
+        "PERFECT",
+        "PARTIAL",
+        "INCONCLUSIVE",
+        "FAIL",
+        "SETUP_OK",
+        "SETUP_BROKEN"
+      ]
+    },
+    "verdict_detail": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "automation_pass": { "type": "boolean" },
+    "hard_failures": { "type": "integer" },
+    "metrics": { "type": "object" },
+    "checks": { "type": "array" },
+    "state_file": { "type": "string" },
+    "verify_script": { "type": "string" }
+  }
+}

@@ -100,16 +100,44 @@ _AUTO_APPROVE_FILE_REMEDIATION_TOOLS = {
     "log_delete_file",
 }
 _AUTO_APPROVE_PROCESS_SIGNALS = {"TERM", "INT", "HUP"}
-_AUTO_APPROVE_PROCESS_MARKERS = (
-    "checkout-preview",
-    "report-worker",
-    "ab-smoke-load",
-    "/tmp/shop-ops",
-    "/tmp/report-ops",
-    "/tmp/loadtest-ops",
-    "export-20260610.tmp",
-    "(deleted)",
-    " deleted",
+_DELETED_FILE_EVIDENCE_MARKERS = ("(deleted)", " deleted")
+_AUTO_APPROVE_RUNTIME_ROOTS = tuple(
+    p.strip()
+    for p in os.environ.get("KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS", "").split(":")
+    if p.strip()
+)
+_ACTION_INTENT_RE = re.compile(
+    r"(结束|终止|杀|释放|stop|kill|terminate|release|确认后结束|确认后终止)",
+    re.IGNORECASE,
+)
+_SKIP_USER_TOKENS = frozenset(
+    {
+        "loadtest",
+        "cpu",
+        "report",
+        "worker",
+        "checkout",
+        "预发",
+        "测试",
+        "机器",
+        "盒子",
+        "确认",
+        "后",
+        "结束",
+        "它",
+        "进程",
+        "脚本",
+        "异常",
+        "高",
+        "占用",
+        "端口",
+        "api",
+        "http",
+        "python",
+        "bash",
+        "sudo",
+        "kyagent",
+    }
 )
 _PROTECTED_PROCESS_MARKERS = (
     "orders-api",
@@ -849,8 +877,12 @@ class Agent:
             return ""
         if tu.name in _AUTO_APPROVE_FILE_REMEDIATION_TOOLS:
             path = str(prep.cleaned.get("path", ""))
-            if path.startswith(("/var/log/", "/var/cache/", "/var/tmp/", "/tmp/")):
-                return "file cleanup target passed tool validation and write preflight"
+            op = "delete" if tu.name in {"fs_delete_file", "log_delete_file"} else "truncate"
+            from kyagent.safety.write_preflight import classify_write_preflight
+
+            result = classify_write_preflight(path, operation=op)
+            if result.allowed:
+                return f"write preflight allowed ({result.rule_id})"
             return ""
         if tu.name != "process_kill":
             return ""
@@ -865,7 +897,7 @@ class Agent:
             return ""
         for line in self._evidence_lines_for_pid(trace, pid):
             if self._line_confirms_safe_process_target(trace, line):
-                return "target PID matched prior read-only evidence for a bench-scoped process"
+                return "target PID matched prior read-only evidence and user intent"
         return ""
 
     @staticmethod
@@ -895,15 +927,84 @@ class Agent:
 
     def _line_confirms_safe_process_target(self, trace: Trace, line: str) -> bool:
         lowered = line.lower()
+        user_text = self._user_input_text(trace)
+
         if any(marker in lowered for marker in _PROTECTED_PROCESS_MARKERS):
             return False
-        if any(marker in lowered for marker in _AUTO_APPROVE_PROCESS_MARKERS):
+        if self._process_named_as_protected_in_user_text(user_text, line):
+            return False
+        if self._deleted_open_file_release_confirmed(user_text, line):
             return True
-        user_text = self._user_input_text(trace).lower()
         for port in _PORT_RE.findall(line):
             if self._port_is_requested_target(user_text, port):
                 return True
+        if self._evidence_matches_user_named_target(user_text, line):
+            return True
+        if self._evidence_in_configured_runtime_root(user_text, line):
+            return True
         return False
+
+    @staticmethod
+    def _process_named_as_protected_in_user_text(user_text: str, line: str) -> bool:
+        lowered_line = line.lower()
+        for marker in _PROTECTED_PROCESS_MARKERS:
+            if marker not in lowered_line:
+                continue
+            protected_near = (
+                rf"(不要|别|保留|对照|必须|保持|protected|do not|don't|dont|keep|"
+                rf"不要动|别动|不要杀|别杀)[^。；;\n]{{0,80}}{re.escape(marker)}"
+                rf"|{re.escape(marker)}[^。；;\n]{{0,80}}"
+                rf"(不要|别|保留|对照|必须|保持|protected|do not|don't|dont|keep|"
+                rf"不要动|别动|不要杀|别杀)"
+            )
+            if re.search(protected_near, user_text, re.IGNORECASE):
+                return True
+        return False
+
+    @staticmethod
+    def _deleted_open_file_release_confirmed(user_text: str, line: str) -> bool:
+        lowered = line.lower()
+        if not any(marker in lowered for marker in _DELETED_FILE_EVIDENCE_MARKERS):
+            return False
+        return bool(
+            re.search(
+                r"(deleted|unlinked|句柄|df|du|临时|temp|export|释放|reclaim|"
+                r"deleted-but-open|已删|unlink)",
+                user_text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _evidence_matches_user_named_target(user_text: str, line: str) -> bool:
+        if not _ACTION_INTENT_RE.search(user_text):
+            return False
+        lowered_line = line.lower()
+        for token in re.findall(r"[\w][\w.-]{2,}", user_text):
+            tl = token.lower()
+            if tl in _SKIP_USER_TOKENS or len(tl) < 4:
+                continue
+            protected_near = (
+                rf"(不要|别|保留|对照|必须|保持|protected|do not|don't|dont|keep|"
+                rf"不要动|别动|不要杀|别杀)[^。；;\n]{{0,80}}{re.escape(tl)}"
+                rf"|{re.escape(tl)}[^。；;\n]{{0,80}}"
+                rf"(不要|别|保留|对照|必须|保持|protected|do not|don't|dont|keep|"
+                rf"不要动|别动|不要杀|别杀)"
+            )
+            if re.search(protected_near, user_text, re.IGNORECASE):
+                continue
+            if tl in lowered_line:
+                return True
+        return False
+
+    @staticmethod
+    def _evidence_in_configured_runtime_root(user_text: str, line: str) -> bool:
+        if not _AUTO_APPROVE_RUNTIME_ROOTS:
+            return False
+        if not _ACTION_INTENT_RE.search(user_text):
+            return False
+        lowered = line.lower()
+        return any(root.lower() in lowered for root in _AUTO_APPROVE_RUNTIME_ROOTS)
 
     @staticmethod
     def _port_is_requested_target(user_text: str, port: str) -> bool:

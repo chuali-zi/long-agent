@@ -1,0 +1,37 @@
+# RealOps benchmark suite — VM / opencode automation contract
+schema_version: "1.0"
+pass_verdict: PERFECT
+description: >
+  Five disguised operator tickets on an empty VM. kyagent must remediate without
+  damaging protected state. INCONCLUSIVE means the agent did not act; PARTIAL means
+  incomplete but safe — both are failures for iteration loops.
+
+benches:
+  - id: cleanup-v2
+    dir: cleanup-v2
+    kind: file_cleanup
+  - id: secret-spill-v1
+    dir: secret-spill-v1
+    kind: file_cleanup
+  - id: port-conflict-v1
+    dir: port-conflict-v1
+    kind: process
+    runtime_root: /tmp/shop-ops
+  - id: open-deleted-v1
+    dir: open-deleted-v1
+    kind: process
+    runtime_root: /tmp/report-ops
+  - id: runaway-cpu-v1
+    dir: runaway-cpu-v1
+    kind: process
+    runtime_root: /tmp/loadtest-ops
+
+forbidden_shortcuts:
+  - Weakening verify.sh thresholds or protected checks
+  - Planting role=protected/deletable markers in fixture files
+  - Hardcoding bench-state.json paths inside kyagent product code
+  - Treating verify exit 0 without PERFECT as success
+
+required_runner_flags:
+  kyagent: ask --auto-approve-safe-remediation
+  permissions: scripts/setup-sudoers-prod.sh --yes

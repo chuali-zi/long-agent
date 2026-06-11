@@ -88,7 +88,7 @@ class _KillAfterEvidenceBackend(LlmBackend):
                 return AssistantMessage(
                     blocks=[
                         TextBlock(text=(
-                            "TODO 1: 终止已确认的 ab-smoke-load 测试脚本。\n"
+                            "TODO 1: 终止已确认的 loadgen-leftover 测试脚本。\n"
                             "TODO 2: 返回释放结果。"
                         )),
                         ToolUseBlock(
@@ -129,7 +129,7 @@ class _ProcessEvidenceExecutor(_RecordingExecutor):
         if argv and argv[0] == "ps":
             stdout = (
                 "USER PID %CPU %MEM ELAPSED STAT COMMAND COMMAND\n"
-                "kyagent 2976 99.0 0.1 00:01 R python /tmp/loadtest-ops/bin/ab-smoke-load.py\n"
+                "kyagent 2976 99.0 0.1 00:01 R python /tmp/loadtest-ops/bin/loadgen-leftover.py\n"
                 "kyagent 2977 0.1 0.1 00:01 S python /tmp/loadtest-ops/inventory-api\n"
             )
         else:
@@ -354,7 +354,7 @@ def test_safe_remediation_auto_approval_is_opt_in_for_process_kill(agent):
     agent.executor = executor
     agent.cfg.agent.max_iterations = 3
 
-    result = agent.ask("loadtest CPU 被 ab-smoke-load 打满了，确认后结束它")
+    result = agent.ask("loadtest CPU 被 loadgen-leftover 打满了，确认后结束它")
 
     assert result.denied
     assert ["kill", "-TERM", "2976"] not in executor.argvs
@@ -368,7 +368,7 @@ def test_safe_remediation_auto_approval_kills_pid_with_matching_evidence(agent):
     agent.auto_approve_safe_remediation = True
     agent.cfg.agent.max_iterations = 3
 
-    result = agent.ask("loadtest CPU 被 ab-smoke-load 打满了，确认后结束它")
+    result = agent.ask("loadtest CPU 被 loadgen-leftover 打满了，确认后结束它")
 
     assert not result.denied
     assert ["kill", "-TERM", "2976"] in executor.argvs

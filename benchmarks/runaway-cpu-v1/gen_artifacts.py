@@ -75,13 +75,13 @@ def main() -> int:
     if port_open(args.protected_port):
         raise SystemExit(f"protected port already in use: {args.protected_port}")
 
-    script = root / "bin" / "ab-smoke-load.py"
+    script = root / "bin" / "loadgen-leftover.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(LOAD_CODE, encoding="utf-8")
     load = subprocess.Popen(
         [sys.executable, str(script)],
-        stdout=open(root / "ab-smoke-load.out.log", "ab"),
-        stderr=open(root / "ab-smoke-load.err.log", "ab"),
+        stdout=open(root / "loadgen-leftover.out.log", "ab"),
+        stderr=open(root / "loadgen-leftover.err.log", "ab"),
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
@@ -94,10 +94,10 @@ def main() -> int:
         "runtime_root": str(root),
         "processes": [
             {
-                "id": "ab-smoke-load",
+                "id": "loadgen-leftover",
                 "role": "terminate",
                 "pid": load.pid,
-                "label": "leftover smoke load script",
+                "label": "leftover synthetic load script",
                 "cmd": f"{sys.executable} {script}",
             },
             {

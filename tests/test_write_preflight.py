@@ -67,8 +67,8 @@ def test_write_preflight_denies_recently_modified_files_before_allow_rules():
 
 def test_write_preflight_allows_recent_disposable_cache_and_temp_spool():
     for path, rule_id in [
-        ("/var/cache/kyagent-demo-bench/yum-metadata-bloat.cache", "cache-target"),
-        ("/tmp/kyagent-demo-bench/installer-spool.log", "temp-build-residual"),
+        ("/var/cache/web-app01/dnf/metadata.solv", "cache-target"),
+        ("/var/tmp/web-app01/pip-build-3f9a/wheel.log", "temp-build-residual"),
     ]:
         result = classify_write_preflight(
             path,
@@ -91,7 +91,7 @@ def test_write_preflight_allows_recent_disposable_cache_and_temp_spool():
         ("/var/tmp/.pytest_cache/node", "temp-build-residual"),
         ("/var/tmp/web-app01/pip-build-3f9a/wheel.log", "temp-build-residual"),
         ("/var/tmp/auth-api01/core/auth-api.24891.core.txt", "temp-core-dump"),
-        ("/var/log/kyagent-demo-bench/stale-batch-job.log", "stale-named-log"),
+        ("/var/log/web-app01/app/portal.log.6", "old-rotated-log"),
     ],
 )
 def test_write_preflight_allows_confirm_for_cleanup_targets(path, rule_id):

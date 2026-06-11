@@ -65,7 +65,7 @@ def main() -> int:
     if port_open(args.protected_port):
         raise SystemExit(f"protected port already in use: {args.protected_port}")
 
-    target = start_server(root, "checkout-preview", args.target_port)
+    target = start_server(root, "checkout-staging-old", args.target_port)
     protected = start_server(root, "orders-api", args.protected_port)
     doc = {
         "bench_id": "kyagent-port-conflict-v1",
@@ -76,7 +76,7 @@ def main() -> int:
             {
                 "id": "checkout-preview-port",
                 "role": "terminate",
-                "label": "stale checkout preview server",
+                "label": "stale checkout staging HTTP server",
                 **target,
             },
             {

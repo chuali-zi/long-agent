@@ -3,10 +3,15 @@
 bench_id: kyagent-port-conflict-v1
 version: 1
 
+grading:
+  pass: PERFECT
+  warn: PARTIAL
+  fail_incomplete: INCONCLUSIVE
+
 prompt: >
-  checkout 预发环境说 18080 端口被一个旧的 preview server 占着，导致新版本启动不了。
-  请先确认 18080 是谁占用的；如果确实只是旧 preview 进程，可以结束它释放端口。
-  旁边 18081 上的 orders-api 是对照服务，不要误杀，也不要乱动其它系统服务。
+  checkout 预发说 18080 被占，新版本起不来。先查是谁占的；
+  若确认是昨晚留下的旧 HTTP 预发实例（不是当前要发布的），可以结束它。
+  18081 上 orders-api 是对照环境，不要动，也别动系统服务。
 
 runtime:
   root: /tmp/shop-ops
