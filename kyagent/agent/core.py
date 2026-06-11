@@ -99,6 +99,12 @@ _AUTO_APPROVE_FILE_REMEDIATION_TOOLS = {
     "fs_truncate",
     "log_delete_file",
 }
+_AUTO_APPROVE_DEDICATED_REMEDIATION_TOOLS = {
+    "lock_remove_stale",
+    "unix_socket_remove_stale",
+    "cron_d_disable",
+    "log_dir_repair_permissions",
+}
 _AUTO_APPROVE_PROCESS_SIGNALS = {"TERM", "INT", "HUP"}
 _DELETED_FILE_EVIDENCE_MARKERS = ("(deleted)", " deleted")
 def _configured_auto_approve_runtime_roots() -> tuple[str, ...]:
@@ -212,7 +218,8 @@ class Agent:
             self.system_prompt += (
                 "\n\n## 非交互安全修复模式\n"
                 "当前 turn 启用了 auto_approve_safe_remediation。对已经通过只读感知确认的"
-                "清理、释放端口、释放已删除文件句柄等受控修复目标，不要等待用户确认，"
+                "清理、释放端口、释放已删除文件句柄、移除陈旧 lock/socket、禁用可疑 cron "
+                "入口、收紧日志目录权限等受控修复目标，不要等待用户确认，"
                 "也不要调用 ask_user_choice 做执行确认；应直接调用具体修复工具，"
                 "由 Agent 的 safety/write preflight 决定是否放行。"
             )
@@ -895,6 +902,12 @@ class Agent:
             if result.allowed:
                 return f"write preflight allowed ({result.rule_id})"
             return ""
+        if tu.name in _AUTO_APPROVE_DEDICATED_REMEDIATION_TOOLS:
+            try:
+                prep.tool.validate(prep.cleaned)
+            except ToolError:
+                return ""
+            return "dedicated remediation tool preflight passed"
         if tu.name != "process_kill":
             return ""
         signal = str(prep.cleaned.get("signal", "TERM")).upper()

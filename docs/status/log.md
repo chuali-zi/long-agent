@@ -1,5 +1,15 @@
 # 工作日志
 
+## 2026-06-11 21:18:12 +08:00
+
+- 根据 `fail_analysis` 完成 RealOps 修复能力补齐，未修改 `benchmarks/`：新增 stale lock、stale Unix socket、cron.d 禁用、日志目录权限收紧四类专用工具，保持“不开放通用 rm/chmod/mv”的安全边界。
+- 新增运行态修复工具 `lock_inspect` / `lock_remove_stale` / `unix_socket_inspect` / `unix_socket_remove_stale` 及 `kyagent-lock-stale`、`kyagent-unix-socket-stale` wrapper；wrapper 负责路径根、类型、PID/listener、关键 socket、inode 复检。
+- 新增 cron 专用工具 `cron_d_list` / `cron_d_read` / `cron_entry_trace` / `cron_d_disable` 及 `kyagent-cron-trace`、`kyagent-cron-disable` wrapper；禁用方式为 rename 保留证据，拒绝保护名和未命中可疑指标的 cron。
+- 新增 `log_dir_repair_permissions` 和 `kyagent-log-dir-perms` wrapper，仅允许 `/var/log/<service>` 或一层子目录从 group/world writable 收紧到 `0750`/`0755`，不递归、不 chown、不增加写权限。
+- 更新 `setup-sudoers.sh` 与 `setup-sudoers-prod.sh`：生产预设默认启用 runtime stale、cron disable、log directory permissions 三类专用授权；默认 `configs/sudoers.kyagent` 仍不包含写操作授权。
+- 更新 Agent auto-approve 逻辑：非交互安全修复模式下，仅对专用 deterministic preflight 通过的修复工具自动确认；prompt 补充旧 access log 归档、cron 证据保留和权限收紧策略。
+- 验证：新增/修改核心文件 `ruff check` 通过；focused pytest `278 passed, 15 skipped`；全量 pytest `789 passed, 18 skipped`；全仓库 ruff 仍有既有测试 lint 债（未做无关清理）。
+
 ## 2026-06-11 18:06:32 +08:00
 
 - 按用户要求扩展 RealOps benchmark，从 5 个真实运维工单扩展到 9 个，并同步 `benchmarks/suite.yaml`、`benchmarks/run-suite.sh`、`benchmarks/REALOPS_BENCHES.md` 和 `benchmarks/opencode/SKILL.md`。

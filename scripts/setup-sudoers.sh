@@ -12,6 +12,16 @@ LOG_CLEAN_WRAPPER_SRC="$SCRIPT_DIR/kyagent-log-clean"
 LOG_CLEAN_WRAPPER_DST="/usr/local/bin/kyagent-log-clean"
 FILE_DELETE_WRAPPER_SRC="$SCRIPT_DIR/kyagent-file-delete"
 FILE_DELETE_WRAPPER_DST="/usr/local/bin/kyagent-file-delete"
+LOCK_STALE_WRAPPER_SRC="$SCRIPT_DIR/kyagent-lock-stale"
+LOCK_STALE_WRAPPER_DST="/usr/local/bin/kyagent-lock-stale"
+SOCKET_STALE_WRAPPER_SRC="$SCRIPT_DIR/kyagent-unix-socket-stale"
+SOCKET_STALE_WRAPPER_DST="/usr/local/bin/kyagent-unix-socket-stale"
+CRON_TRACE_WRAPPER_SRC="$SCRIPT_DIR/kyagent-cron-trace"
+CRON_TRACE_WRAPPER_DST="/usr/local/bin/kyagent-cron-trace"
+CRON_DISABLE_WRAPPER_SRC="$SCRIPT_DIR/kyagent-cron-disable"
+CRON_DISABLE_WRAPPER_DST="/usr/local/bin/kyagent-cron-disable"
+LOG_DIR_PERMS_WRAPPER_SRC="$SCRIPT_DIR/kyagent-log-dir-perms"
+LOG_DIR_PERMS_WRAPPER_DST="/usr/local/bin/kyagent-log-dir-perms"
 BACKUP=""
 TMP_SUDOERS=""
 
@@ -158,6 +168,70 @@ install_log_clean_wrapper() {
   echo "[+] 已安装 file-delete 包装器：$FILE_DELETE_WRAPPER_DST"
 }
 
+render_runtime_stale() {
+  local user_name="$1"
+  [[ "${KYAGENT_ENABLE_RUNTIME_STALE:-}" != "1" ]] && return 0
+  printf '\n# Explicit stale runtime mutations generated when KYAGENT_ENABLE_RUNTIME_STALE=1.\n'
+  printf '# lock/socket 删除不授权通用 rm；只授权专用包装器的 remove 子命令，\n'
+  printf '# wrapper 内部负责类型、PID/listener、关键路径和 inode 复检。\n'
+  printf 'Cmnd_Alias KY_RUNTIME_STALE = \\\n'
+  printf '    /usr/local/bin/kyagent-lock-stale ^remove /[A-Za-z0-9._/@-]+( --expected-pid [2-9][0-9]*)?$, \\\n'
+  printf '    /usr/local/bin/kyagent-unix-socket-stale ^remove /[A-Za-z0-9._/@-]+$\n'
+  printf '%s  ALL=(root)  NOPASSWD: KY_RUNTIME_STALE\n' "$user_name"
+}
+
+install_runtime_stale_wrappers() {
+  [[ "${KYAGENT_ENABLE_RUNTIME_STALE:-}" != "1" ]] && return 0
+  [[ -f "$LOCK_STALE_WRAPPER_SRC" ]] || die "找不到 stale-lock 包装器源：$LOCK_STALE_WRAPPER_SRC"
+  [[ -f "$SOCKET_STALE_WRAPPER_SRC" ]] || die "找不到 stale-socket 包装器源：$SOCKET_STALE_WRAPPER_SRC"
+  command -v python3 >/dev/null 2>&1 || die "runtime stale 包装器需要 python3，请先安装"
+  install -m 0755 -o root -g root "$LOCK_STALE_WRAPPER_SRC" "$LOCK_STALE_WRAPPER_DST"
+  install -m 0755 -o root -g root "$SOCKET_STALE_WRAPPER_SRC" "$SOCKET_STALE_WRAPPER_DST"
+  echo "[+] 已安装 stale-lock 包装器：$LOCK_STALE_WRAPPER_DST"
+  echo "[+] 已安装 stale-socket 包装器：$SOCKET_STALE_WRAPPER_DST"
+}
+
+render_cron_disable() {
+  local user_name="$1"
+  [[ "${KYAGENT_ENABLE_CRON_DISABLE:-}" != "1" ]] && return 0
+  printf '\n# Dedicated cron.d disable helper generated when KYAGENT_ENABLE_CRON_DISABLE=1.\n'
+  printf '# 不授权通用 rm/mv/chmod；wrapper 只 rename 单个 /etc/cron.d basename，\n'
+  printf '# 且会复检 regular file、非 symlink、保护名和可疑指标。\n'
+  printf 'Cmnd_Alias KY_CRON_DISABLE = \\\n'
+  printf '    /usr/local/bin/kyagent-cron-disable ^[A-Za-z0-9_.-]{1,120} rename$\n'
+  printf '%s  ALL=(root)  NOPASSWD: KY_CRON_DISABLE\n' "$user_name"
+}
+
+install_cron_wrappers() {
+  [[ -f "$CRON_TRACE_WRAPPER_SRC" ]] || die "找不到 cron trace 包装器源：$CRON_TRACE_WRAPPER_SRC"
+  command -v python3 >/dev/null 2>&1 || die "cron 包装器需要 python3，请先安装"
+  install -m 0755 -o root -g root "$CRON_TRACE_WRAPPER_SRC" "$CRON_TRACE_WRAPPER_DST"
+  echo "[+] 已安装 cron trace 包装器：$CRON_TRACE_WRAPPER_DST"
+
+  [[ "${KYAGENT_ENABLE_CRON_DISABLE:-}" != "1" ]] && return 0
+  [[ -f "$CRON_DISABLE_WRAPPER_SRC" ]] || die "找不到 cron disable 包装器源：$CRON_DISABLE_WRAPPER_SRC"
+  install -m 0755 -o root -g root "$CRON_DISABLE_WRAPPER_SRC" "$CRON_DISABLE_WRAPPER_DST"
+  echo "[+] 已安装 cron disable 包装器：$CRON_DISABLE_WRAPPER_DST"
+}
+
+render_log_dir_permissions() {
+  local user_name="$1"
+  [[ "${KYAGENT_ENABLE_LOG_PERMISSIONS:-}" != "1" ]] && return 0
+  printf '\n# Dedicated log directory permission repair generated when KYAGENT_ENABLE_LOG_PERMISSIONS=1.\n'
+  printf '# 不授权通用 chmod；wrapper 只收紧 /var/log/<service> 或一层子目录到 0750/0755。\n'
+  printf 'Cmnd_Alias KY_LOG_DIR_PERMS = \\\n'
+  printf '    /usr/local/bin/kyagent-log-dir-perms ^/var/log/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)? (0750|0755)$\n'
+  printf '%s  ALL=(root)  NOPASSWD: KY_LOG_DIR_PERMS\n' "$user_name"
+}
+
+install_log_dir_permissions_wrapper() {
+  [[ "${KYAGENT_ENABLE_LOG_PERMISSIONS:-}" != "1" ]] && return 0
+  [[ -f "$LOG_DIR_PERMS_WRAPPER_SRC" ]] || die "找不到 log-dir-perms 包装器源：$LOG_DIR_PERMS_WRAPPER_SRC"
+  command -v python3 >/dev/null 2>&1 || die "log-dir-perms 包装器需要 python3，请先安装"
+  install -m 0755 -o root -g root "$LOG_DIR_PERMS_WRAPPER_SRC" "$LOG_DIR_PERMS_WRAPPER_DST"
+  echo "[+] 已安装 log-dir-perms 包装器：$LOG_DIR_PERMS_WRAPPER_DST"
+}
+
 render_proc_kill() {
   local user_name="$1"
   [[ "${KYAGENT_ENABLE_PROC_KILL:-}" != "1" ]] && return 0
@@ -222,6 +296,9 @@ main() {
   render_pkg_mgmt "$USER_NAME" >>"$TMP_SUDOERS"
   render_pkg_remove_allowlist "$USER_NAME" >>"$TMP_SUDOERS"
   render_proc_kill "$USER_NAME" >>"$TMP_SUDOERS"
+  render_runtime_stale "$USER_NAME" >>"$TMP_SUDOERS"
+  render_cron_disable "$USER_NAME" >>"$TMP_SUDOERS"
+  render_log_dir_permissions "$USER_NAME" >>"$TMP_SUDOERS"
   chmod 0440 "$TMP_SUDOERS"
 
   if ! visudo -cf "$TMP_SUDOERS"; then
@@ -247,6 +324,9 @@ main() {
   [[ -n "$BACKUP" ]] && rm -f "$BACKUP"
 
   install_log_clean_wrapper
+  install_runtime_stale_wrappers
+  install_cron_wrappers
+  install_log_dir_permissions_wrapper
 
   mkdir -p /var/log/sudo-io
   chmod 0700 /var/log/sudo-io

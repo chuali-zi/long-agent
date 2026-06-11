@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Tighten one log directory's permissions without granting generic chmod."""
+from __future__ import annotations
+
+import os
+import re
+import stat
+import sys
+
+SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ALLOWED_MODES = {"0750", "0755"}
+
+
+def die(msg: str, code: int = 2) -> None:
+    sys.stderr.write(f"kyagent-log-dir-perms: {msg}\n")
+    raise SystemExit(code)
+
+
+def validate_log_dir(raw: str) -> str:
+    if not raw.startswith("/"):
+        die(f"必须是绝对路径: {raw!r}")
+    if "\0" in raw:
+        die("路径含 NUL 字节")
+    normalized = os.path.normpath(raw)
+    parts = [part for part in normalized.split(os.sep) if part]
+    if len(parts) not in {3, 4} or parts[:2] != ["var", "log"]:
+        die("仅允许 /var/log/<service> 或其一层子目录")
+    for part in parts[2:]:
+        if not SEGMENT_RE.fullmatch(part):
+            die(f"非法日志目录片段: {part!r}")
+    return normalized
+
+
+def validate_mode(raw: str) -> int:
+    if raw not in ALLOWED_MODES:
+        die("目标权限只允许 0750 或 0755")
+    mode = int(raw, 8)
+    if mode & stat.S_IWOTH:
+        die("目标权限不能 world-writable")
+    return mode
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) != 3:
+        die("用法: kyagent-log-dir-perms <绝对日志目录> <0750|0755>")
+    path = validate_log_dir(argv[1])
+    target_mode = validate_mode(argv[2])
+
+    pre = os.path.realpath(path)
+    validate_log_dir(pre)
+
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        die(f"打开失败（不存在、非目录或末端 symlink）: {exc}")
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            die("目标必须是目录")
+        current_mode = stat.S_IMODE(st.st_mode)
+        if current_mode & (stat.S_IWGRP | stat.S_IWOTH) == 0:
+            die("当前目录并非 group/world writable，无需权限修复")
+        if (target_mode & 0o222) & ~(current_mode & 0o222):
+            die("目标权限不能增加任何写权限")
+
+        try:
+            resolved = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            resolved = os.path.realpath(path)
+        validate_log_dir(resolved)
+
+        current = os.lstat(path)
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+            die("修改前类型复检失败：目标不再是目录")
+        if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+            die("修改前目标 inode 已变化，拒绝修改")
+
+        os.fchmod(fd, target_mode)
+        after = os.fstat(fd)
+        if stat.S_IMODE(after.st_mode) != target_mode:
+            die("修改后复检失败：目录权限未达到目标", code=3)
+    finally:
+        os.close(fd)
+
+    sys.stdout.write(
+        f"tightened log dir permissions: {resolved} "
+        f"{oct(current_mode & 0o777)} -> {argv[2]}\n"
+    )
+
+
+if __name__ == "__main__":
+    main(sys.argv)

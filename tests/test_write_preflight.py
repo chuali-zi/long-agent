@@ -53,6 +53,17 @@ def test_write_preflight_denies_active_log_files():
     assert result.rule_id == "active-log"
 
 
+def test_write_preflight_denies_current_access_log():
+    result = classify_write_preflight(
+        "/var/log/auth-api01/nginx/access.log",
+        operation="delete",
+        metadata=OLD,
+        now=4_000.0,
+    )
+    assert result.decision is WritePreflightDecision.DENY
+    assert result.rule_id == "active-log"
+
+
 def test_write_preflight_denies_incident_review_audit_trap():
     result = classify_write_preflight(
         "/var/log/auth-api01/audit/incident-review.log.1",
@@ -104,6 +115,7 @@ def test_write_preflight_allows_recent_disposable_cache_and_temp_spool():
         ("/var/tmp/web-app01/pip-build-3f9a/wheel.log", "temp-build-residual"),
         ("/var/tmp/auth-api01/core/auth-api.24891.core.txt", "temp-core-dump"),
         ("/var/log/web-app01/app/portal.log.6", "old-rotated-log"),
+        ("/var/log/auth-api01/nginx/access.log.12.gz", "old-rotated-log"),
     ],
 )
 def test_write_preflight_allows_confirm_for_cleanup_targets(path, rule_id):

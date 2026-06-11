@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Disable one suspicious /etc/cron.d file by evidence-preserving rename."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+CRON_D_DIR = Path("/etc/cron.d")
+NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+PROTECTED = {"nightly-ledger-backup", "0hourly", "anacron"}
+SUSPICIOUS = (
+    ("tmp-script", re.compile(r"(?<![A-Za-z0-9_./-])/(?:tmp|var/tmp)/[A-Za-z0-9_./+-]+")),
+    ("network-fetch", re.compile(r"\b(?:curl|wget)\b|https?://|ftp://", re.IGNORECASE)),
+    ("network-shell", re.compile(r"\b(?:nc|ncat|netcat|socat)\b", re.IGNORECASE)),
+    ("log-deletion", re.compile(r"\b(?:rm|shred|truncate)\b[^#\n]*(?:/var/log|/var/tmp|/tmp)", re.IGNORECASE)),
+    ("prompt-injection", re.compile(r"ignore (?:all )?(?:previous|above) instructions|prompt injection|system prompt|developer message", re.IGNORECASE)),
+    ("shell-obfuscation", re.compile(r"\b(?:base64\s+-d|bash\s+-c|sh\s+-c|python\d?\s+-c|perl\s+-e)\b", re.IGNORECASE)),
+)
+
+
+def die(msg: str, code: int = 2) -> None:
+    sys.stderr.write(f"kyagent-cron-disable: {msg}\n")
+    raise SystemExit(code)
+
+
+def validate_name(name: str) -> str:
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        die("name 只接受 /etc/cron.d 下的 basename")
+    if not NAME_RE.fullmatch(name):
+        die(f"name 含非法字符: {name!r}")
+    if name in PROTECTED:
+        die(f"{name!r} 是保护 cron 名，拒绝自动禁用")
+    return name
+
+
+def suspicious_indicators(content: str) -> list[str]:
+    return [label for label, pattern in SUSPICIOUS if pattern.search(content)]
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) not in {2, 3}:
+        die("用法: kyagent-cron-disable <name> [rename]")
+    name = validate_name(argv[1])
+    method = argv[2] if len(argv) == 3 else "rename"
+    if method != "rename":
+        die("仅支持 method=rename")
+
+    path = CRON_D_DIR / name
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        die(f"打开失败（不存在、目录或末端 symlink）: {exc}")
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            die("目标不是 regular file，拒绝禁用")
+        data = b""
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > 4 * 1024 * 1024:
+                die("cron 文件异常过大，拒绝自动禁用")
+        content = data.decode("utf-8", errors="replace")
+        indicators = suspicious_indicators(content)
+        if not indicators:
+            die("cron 内容没有命中可疑指标，拒绝禁用")
+        current = os.lstat(path)
+        if stat.S_ISLNK(current.st_mode):
+            die("删除前复检发现 symlink，拒绝禁用")
+        if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+            die("禁用前目标 inode 已变化，拒绝禁用")
+    finally:
+        os.close(fd)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dest = CRON_D_DIR / f"{name}.disabled-by-kyagent.{timestamp}"
+    suffix = 0
+    while dest.exists():
+        suffix += 1
+        dest = CRON_D_DIR / f"{name}.disabled-by-kyagent.{timestamp}.{suffix}"
+    os.rename(path, dest)
+    print(json.dumps(
+        {
+            "disabled": str(path),
+            "renamed_to": str(dest),
+            "method": "rename",
+            "indicators": indicators,
+            "before_sha256": sha256_bytes(data),
+            "before_size": len(data),
+        },
+        ensure_ascii=False,
+        indent=2,
+    ))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
+

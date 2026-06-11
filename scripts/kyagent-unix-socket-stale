@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Inspect/remove stale Unix socket files under runtime roots."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+
+ALLOWED_ROOTS = ("/tmp", "/var/tmp", "/run", "/var/run")
+CRITICAL_COMPONENTS = {
+    "systemd",
+    "dbus",
+    "docker",
+    "containerd",
+    "sshd",
+    "podman",
+    "crio",
+    "kubelet",
+}
+CRITICAL_NAMES = {
+    "docker.sock",
+    "containerd.sock",
+    "dbus.sock",
+    "sshd.sock",
+    "podman.sock",
+    "crio.sock",
+}
+
+
+def die(msg: str, code: int = 2) -> None:
+    sys.stderr.write(f"kyagent-unix-socket-stale: {msg}\n")
+    raise SystemExit(code)
+
+
+def within_allowed(path: str) -> bool:
+    return any(path.startswith(root + os.sep) for root in ALLOWED_ROOTS)
+
+
+def normalize(raw: str) -> str:
+    if not raw.startswith("/"):
+        die(f"必须是绝对路径: {raw!r}")
+    if "\0" in raw:
+        die("路径含 NUL 字节")
+    real = os.path.realpath(raw)
+    if not within_allowed(real):
+        die(f"解析后路径越界，仅允许 {', '.join(ALLOWED_ROOTS)} 下: {real}")
+    parts = {part.lower() for part in real.split(os.sep) if part}
+    base = os.path.basename(real).lower()
+    if base in CRITICAL_NAMES or parts & CRITICAL_COMPONENTS:
+        die("拒绝处理 systemd/dbus/docker/containerd/sshd 等关键 socket")
+    return real
+
+
+def lstat_socket(path: str) -> tuple[os.stat_result, str]:
+    resolved = normalize(path)
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        die(f"lstat 失败: {exc}")
+    if stat.S_ISLNK(st.st_mode):
+        die("末端是符号链接，拒绝处理")
+    if not stat.S_ISSOCK(st.st_mode):
+        die("目标不是 Unix socket，拒绝处理")
+    if not within_allowed(resolved):
+        die(f"真实路径越界，仅允许 {', '.join(ALLOWED_ROOTS)} 下: {resolved}")
+    return st, resolved
+
+
+def run_tool(argv: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode not in (0, 1):
+        return ""
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def listener_evidence(path: str) -> list[str]:
+    evidence: list[str] = []
+    try:
+        with open("/proc/net/unix", "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if path in line:
+                    evidence.append(line.strip())
+    except OSError:
+        pass
+    commands = (
+        ["ss", "-xlpn"],
+        ["ss", "-xapn"],
+        ["lsof", "-nP", "-U", "--", path],
+        ["fuser", "-v", "--", path],
+    )
+    for argv in commands:
+        out = run_tool(argv)
+        for line in out.splitlines():
+            if path in line:
+                evidence.append(line)
+    return evidence
+
+
+def line_has_listener(line: str) -> bool:
+    lowered = line.lower()
+    if re.match(r"^[0-9a-fA-F]+:", line.strip()):
+        return True
+    if "listen" in lowered or "u_str" in lowered:
+        return True
+    return bool(re.search(r"\bpid=\d+\b|\b[1-9][0-9]*/", line))
+
+
+def has_listener(path: str) -> tuple[bool, list[str]]:
+    evidence = listener_evidence(path)
+    return any(line_has_listener(line) for line in evidence), evidence
+
+
+def inspect(path: str) -> int:
+    st, resolved = lstat_socket(path)
+    live, evidence = has_listener(resolved)
+    payload = {
+        "path": resolved,
+        "dev": st.st_dev,
+        "inode": st.st_ino,
+        "is_socket": True,
+        "listener_detected": live,
+        "stale": not live,
+        "listener_evidence": evidence[:20],
+    }
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def remove(path: str) -> int:
+    st, resolved = lstat_socket(path)
+    live, evidence = has_listener(resolved)
+    if live:
+        die("发现 live listener，拒绝删除: " + " | ".join(evidence[:3]))
+    try:
+        current = os.lstat(path)
+    except OSError as exc:
+        die(f"删除前复检失败: {exc}")
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISSOCK(current.st_mode):
+        die("删除前类型复检失败：目标不再是 socket")
+    if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+        die("删除前目标 inode 已变化，拒绝删除")
+    os.unlink(path)
+    if os.path.lexists(path):
+        die("删除后复检失败：路径仍存在", code=3)
+    print(f"removed stale unix socket: {resolved}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="kyagent-unix-socket-stale")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_inspect = sub.add_parser("inspect")
+    p_inspect.add_argument("path")
+    p_remove = sub.add_parser("remove")
+    p_remove.add_argument("path")
+    args = parser.parse_args(argv[1:])
+
+    if args.cmd == "inspect":
+        return inspect(args.path)
+    return remove(args.path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

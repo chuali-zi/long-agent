@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Static /etc/cron.d inspection helper for kyagent.
+
+It lists, reads, and traces cron.d entries without executing any referenced
+command. Trace output hashes referenced absolute paths when they are readable
+regular files.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import stat
+import sys
+from pathlib import Path
+from typing import Any
+
+CRON_D_DIR = Path("/etc/cron.d")
+NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+HASH_LIMIT = 16 * 1024 * 1024
+
+
+def die(msg: str, code: int = 2) -> None:
+    sys.stderr.write(f"kyagent-cron-trace: {msg}\n")
+    raise SystemExit(code)
+
+
+def validate_name(name: str) -> str:
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        die("name 只接受 /etc/cron.d 下的 basename")
+    if not NAME_RE.fullmatch(name):
+        die(f"name 含非法字符: {name!r}")
+    return name
+
+
+def cron_path(name: str) -> Path:
+    return CRON_D_DIR / validate_name(name)
+
+
+def file_meta(path: Path, *, include_hash: bool = True) -> dict[str, Any]:
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        return {"path": str(path), "exists": False, "error": str(exc)}
+    meta: dict[str, Any] = {
+        "path": str(path),
+        "exists": True,
+        "mode": oct(stat.S_IMODE(st.st_mode)),
+        "uid": st.st_uid,
+        "gid": st.st_gid,
+        "size": st.st_size,
+        "mtime": int(st.st_mtime),
+        "type": file_type(st.st_mode),
+        "sha256": None,
+    }
+    if include_hash and stat.S_ISREG(st.st_mode) and st.st_size <= HASH_LIMIT:
+        try:
+            h = hashlib.sha256()
+            with path.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            meta["sha256"] = h.hexdigest()
+        except OSError as exc:
+            meta["hash_error"] = str(exc)
+    elif include_hash and stat.S_ISREG(st.st_mode):
+        meta["hash_error"] = f"file too large for trace hash limit: {st.st_size}"
+    return meta
+
+
+def file_type(mode: int) -> str:
+    if stat.S_ISREG(mode):
+        return "regular"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    return "other"
+
+
+def command_from_cron_line(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if "=" in stripped and not stripped.split(None, 1)[0].startswith(("*", "@")):
+        key = stripped.split("=", 1)[0].strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            return None
+    parts = stripped.split(None, 6)
+    if stripped.startswith("@"):
+        return parts[2] if len(parts) >= 3 else None
+    return parts[6] if len(parts) >= 7 else None
+
+
+def referenced_paths(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = command.split()
+    paths: list[str] = []
+    for token in tokens:
+        if token.startswith("/") and "\0" not in token:
+            paths.append(token.rstrip(";,"))
+    for idx, token in enumerate(tokens[:-1]):
+        base = os.path.basename(token)
+        if base in {"bash", "sh", "python", "python3", "perl"} and tokens[idx + 1].startswith("/"):
+            paths.append(tokens[idx + 1].rstrip(";,"))
+    return sorted(set(paths))
+
+
+def list_cron_d() -> None:
+    rows = []
+    try:
+        entries = sorted(CRON_D_DIR.iterdir(), key=lambda p: p.name)
+    except OSError as exc:
+        die(f"无法列出 {CRON_D_DIR}: {exc}")
+    for path in entries:
+        if path.name in {".", ".."}:
+            continue
+        rows.append(file_meta(path, include_hash=False))
+    print(json.dumps({"cron_dir": str(CRON_D_DIR), "entries": rows}, ensure_ascii=False, indent=2))
+
+
+def read_cron(name: str) -> None:
+    path = cron_path(name)
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        die(f"无法读取元数据: {exc}")
+    if stat.S_ISLNK(st.st_mode):
+        die("目标是 symlink，拒绝读取")
+    if not stat.S_ISREG(st.st_mode):
+        die("目标不是 regular file，拒绝读取")
+    try:
+        sys.stdout.write(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError as exc:
+        die(f"读取失败: {exc}")
+
+
+def trace_cron(name: str) -> None:
+    path = cron_path(name)
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        die(f"读取失败: {exc}")
+    lines = []
+    refs: dict[str, dict[str, Any]] = {}
+    for lineno, line in enumerate(content.splitlines(), 1):
+        command = command_from_cron_line(line)
+        if not command:
+            continue
+        paths = referenced_paths(command)
+        for raw in paths:
+            refs[raw] = file_meta(Path(raw), include_hash=True)
+        lines.append({"line": lineno, "command": command, "referenced_paths": paths})
+    print(json.dumps(
+        {"cron_file": file_meta(path, include_hash=True), "entries": lines, "referenced_files": refs},
+        ensure_ascii=False,
+        indent=2,
+    ))
+
+
+def main(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--list", action="store_true")
+    group.add_argument("--read")
+    group.add_argument("--trace")
+    args = parser.parse_args(argv[1:])
+    if args.list:
+        list_cron_d()
+    elif args.read:
+        read_cron(args.read)
+    else:
+        trace_cron(args.trace)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
+

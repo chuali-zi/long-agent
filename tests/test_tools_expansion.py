@@ -653,8 +653,8 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_124_tools(self, registry):
-        assert len(registry.names()) == 124
+    def test_default_registry_has_133_tools(self, registry):
+        assert len(registry.names()) == 133
 
     def test_all_tools_have_description(self, registry):
         bad = [
@@ -721,6 +721,10 @@ class TestRegistry:
             "verify_pytest", "verify_ruff", "verify_script_syntax",
             "docx_extract_text", "xlsx_list_sheets", "pdf_extract_text", "ocr_image_text",
             "plan_list", "plan_get",
+            "lock_inspect", "lock_remove_stale",
+            "unix_socket_inspect", "unix_socket_remove_stale",
+            "cron_d_list", "cron_d_read", "cron_entry_trace", "cron_d_disable",
+            "log_dir_repair_permissions",
         }
         missing = expected - set(registry.names())
         assert not missing, f"missing tools: {missing}"

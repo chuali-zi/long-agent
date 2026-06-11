@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键写入「生产预设」最小权限 sudoers。
 #
-# 这是 setup-sudoers.sh 的薄封装：它预先打开三个写操作开关，并给出一份
+# 这是 setup-sudoers.sh 的薄封装：它预先打开常用写操作开关，并给出一份
 # 贴近真实运维的「常见可重启服务」白名单，然后把控制权交给被审计的核心脚本
 # setup-sudoers.sh（由它负责 visudo 校验 / 安装后复检 / 失败回滚）。
 #
@@ -28,10 +28,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- 生产预设默认值（均可被已存在的环境变量覆盖） -------------------------
-# 三个写操作开关：默认全开，覆盖最常见的运维动作。
+# 写操作开关：默认全开，覆盖最常见的运维动作。
 export KYAGENT_ENABLE_LOG_CLEAN="${KYAGENT_ENABLE_LOG_CLEAN:-1}"
 export KYAGENT_ENABLE_PKG_MGMT="${KYAGENT_ENABLE_PKG_MGMT:-1}"
 export KYAGENT_ENABLE_PROC_KILL="${KYAGENT_ENABLE_PROC_KILL:-1}"
+export KYAGENT_ENABLE_RUNTIME_STALE="${KYAGENT_ENABLE_RUNTIME_STALE:-1}"
+export KYAGENT_ENABLE_CRON_DISABLE="${KYAGENT_ENABLE_CRON_DISABLE:-1}"
+export KYAGENT_ENABLE_LOG_PERMISSIONS="${KYAGENT_ENABLE_LOG_PERMISSIONS:-1}"
 export KYAGENT_PKG_REMOVE_ALLOWLIST="${KYAGENT_PKG_REMOVE_ALLOWLIST:-}"
 
 # 常见可重启服务白名单（教育/医疗数据中心节点上最可能出现的一组）。
@@ -73,6 +76,9 @@ echo "  日志清理:        $([[ "$KYAGENT_ENABLE_LOG_CLEAN" == 1 ]] && echo '�
 echo "  包管理:          $([[ "$KYAGENT_ENABLE_PKG_MGMT" == 1 ]] && echo '开 (dnf/yum install/update/reinstall/security/clean-cache + rpm rebuilddb)' || echo '关')"
 echo "  包卸载 allowlist: ${KYAGENT_PKG_REMOVE_ALLOWLIST:-<empty>}"
 echo "  进程终止:        $([[ "$KYAGENT_ENABLE_PROC_KILL" == 1 ]] && echo '开 (kill -TERM|KILL|HUP|INT <pid>)' || echo '关')"
+echo "  stale runtime:   $([[ "$KYAGENT_ENABLE_RUNTIME_STALE" == 1 ]] && echo '开 (stale lock/socket 专用 wrapper)' || echo '关')"
+echo "  cron 禁用:       $([[ "$KYAGENT_ENABLE_CRON_DISABLE" == 1 ]] && echo '开 (/etc/cron.d 单入口 rename 禁用)' || echo '关')"
+echo "  日志目录权限:    $([[ "$KYAGENT_ENABLE_LOG_PERMISSIONS" == 1 ]] && echo '开 (/var/log/<service> 目录权限收紧)' || echo '关')"
 echo "  可重启服务白名单:"
 IFS=',' read -r -a _units <<<"$KYAGENT_SERVICE_ALLOWLIST"
 for u in "${_units[@]}"; do

@@ -18,6 +18,9 @@ from kyagent.mcp.tools import (
     webfacts,
     docintake,
     planstate,
+    runtime_state,
+    permissions,
+    cron,
 )
 
 
@@ -42,6 +45,9 @@ def register_builtin(registry: ToolRegistry) -> ToolRegistry:
     webfacts.register(registry)
     docintake.register(registry)
     planstate.register(registry)
+    runtime_state.register(registry)
+    permissions.register(registry)
+    cron.register(registry)
     # ask_user_choice 是纯逻辑工具（不走 ExecutionProxy），默认就注册——
     # LLM 不会主动叫，没用到时零成本。
     interactive.register(registry)

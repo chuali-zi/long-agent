@@ -442,6 +442,180 @@ def test_setup_proc_kill_sudoers_excludes_pid_zero_and_one() -> None:
 
 
 # ---------------------------------------------------------------------------
+# opt-in write operations: render_runtime_stale
+# ---------------------------------------------------------------------------
+
+def test_render_runtime_stale_enabled_outputs_wrapper_only_rules() -> None:
+    require_usable_bash()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "KYAGENT_ENABLE_RUNTIME_STALE=1 render_runtime_stale kyagent",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "Cmnd_Alias KY_RUNTIME_STALE" in out
+    assert "/usr/local/bin/kyagent-lock-stale ^remove /[A-Za-z0-9._/@-]+" in out
+    assert "/usr/local/bin/kyagent-unix-socket-stale ^remove /[A-Za-z0-9._/@-]+$" in out
+    assert "kyagent  ALL=(root)  NOPASSWD: KY_RUNTIME_STALE" in out
+    assert "/bin/rm" not in out
+    assert "/usr/bin/rm" not in out
+
+
+def test_render_runtime_stale_disabled_by_default_outputs_nothing() -> None:
+    require_usable_bash()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "render_runtime_stale kyagent",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+
+
+def test_setup_installs_runtime_stale_wrappers_root_owned_when_enabled() -> None:
+    script = SETUP_SUDOERS.read_text(encoding="utf-8")
+    assert 'LOCK_STALE_WRAPPER_DST="/usr/local/bin/kyagent-lock-stale"' in script
+    assert 'SOCKET_STALE_WRAPPER_DST="/usr/local/bin/kyagent-unix-socket-stale"' in script
+    assert '[[ "${KYAGENT_ENABLE_RUNTIME_STALE:-}" != "1" ]] && return 0' in script
+    assert 'install -m 0755 -o root -g root "$LOCK_STALE_WRAPPER_SRC" "$LOCK_STALE_WRAPPER_DST"' in script
+    assert 'install -m 0755 -o root -g root "$SOCKET_STALE_WRAPPER_SRC" "$SOCKET_STALE_WRAPPER_DST"' in script
+
+
+# ---------------------------------------------------------------------------
+# opt-in write operations: render_cron_disable
+# ---------------------------------------------------------------------------
+
+def test_render_cron_disable_enabled_outputs_wrapper_only_rules() -> None:
+    require_usable_bash()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "KYAGENT_ENABLE_CRON_DISABLE=1 render_cron_disable kyagent",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "Cmnd_Alias KY_CRON_DISABLE" in out
+    assert "/usr/local/bin/kyagent-cron-disable ^[A-Za-z0-9_.-]{1,120} rename$" in out
+    assert "kyagent  ALL=(root)  NOPASSWD: KY_CRON_DISABLE" in out
+    assert "/usr/bin/rm" not in out
+    assert "/usr/bin/mv" not in out
+
+
+def test_render_cron_disable_disabled_by_default_outputs_nothing() -> None:
+    require_usable_bash()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "render_cron_disable kyagent",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+
+
+def test_setup_installs_cron_wrappers_root_owned() -> None:
+    script = SETUP_SUDOERS.read_text(encoding="utf-8")
+    assert 'CRON_TRACE_WRAPPER_DST="/usr/local/bin/kyagent-cron-trace"' in script
+    assert 'CRON_DISABLE_WRAPPER_DST="/usr/local/bin/kyagent-cron-disable"' in script
+    assert 'install -m 0755 -o root -g root "$CRON_TRACE_WRAPPER_SRC" "$CRON_TRACE_WRAPPER_DST"' in script
+    assert 'install -m 0755 -o root -g root "$CRON_DISABLE_WRAPPER_SRC" "$CRON_DISABLE_WRAPPER_DST"' in script
+
+
+# ---------------------------------------------------------------------------
+# opt-in write operations: render_log_dir_permissions
+# ---------------------------------------------------------------------------
+
+def test_render_log_dir_permissions_enabled_outputs_wrapper_only_rules() -> None:
+    require_usable_bash()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "KYAGENT_ENABLE_LOG_PERMISSIONS=1 render_log_dir_permissions kyagent",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "Cmnd_Alias KY_LOG_DIR_PERMS" in out
+    assert "/usr/local/bin/kyagent-log-dir-perms ^/var/log/[A-Za-z0-9._-]+" in out
+    assert "kyagent  ALL=(root)  NOPASSWD: KY_LOG_DIR_PERMS" in out
+    assert "/usr/bin/chmod" not in out
+
+
+def test_render_log_dir_permissions_disabled_by_default_outputs_nothing() -> None:
+    require_usable_bash()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/setup-sudoers.sh; "
+            "render_log_dir_permissions kyagent",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+
+
+def test_setup_installs_log_dir_permissions_wrapper_root_owned_when_enabled() -> None:
+    script = SETUP_SUDOERS.read_text(encoding="utf-8")
+    assert 'LOG_DIR_PERMS_WRAPPER_DST="/usr/local/bin/kyagent-log-dir-perms"' in script
+    assert '[[ "${KYAGENT_ENABLE_LOG_PERMISSIONS:-}" != "1" ]] && return 0' in script
+    assert (
+        'install -m 0755 -o root -g root "$LOG_DIR_PERMS_WRAPPER_SRC" '
+        '"$LOG_DIR_PERMS_WRAPPER_DST"'
+    ) in script
+
+
+# ---------------------------------------------------------------------------
 # default sudoers template must not contain any write-operation aliases
 # ---------------------------------------------------------------------------
 
@@ -458,6 +632,13 @@ def test_default_sudoers_does_not_grant_write_operations() -> None:
         "yum -y update",
         "rpm --rebuilddb",
         "kyagent-file-delete",
+        "KY_RUNTIME_STALE",
+        "kyagent-lock-stale",
+        "kyagent-unix-socket-stale",
+        "KY_CRON_DISABLE",
+        "kyagent-cron-disable",
+        "KY_LOG_DIR_PERMS",
+        "kyagent-log-dir-perms",
         "/usr/bin/kill",
     ]
     for s in forbidden_strings:
@@ -474,10 +655,13 @@ KYAGENT_SH = Path(__file__).parents[1] / "scripts" / "kyagent.sh"
 
 def test_prod_wrapper_defaults_enable_all_write_switches() -> None:
     text = PROD_WRAPPER.read_text(encoding="utf-8")
-    # 三个开关默认开（:-1），但允许已存在的环境变量覆盖
+    # 写操作开关默认开（:-1），但允许已存在的环境变量覆盖
     assert 'KYAGENT_ENABLE_LOG_CLEAN="${KYAGENT_ENABLE_LOG_CLEAN:-1}"' in text
     assert 'KYAGENT_ENABLE_PKG_MGMT="${KYAGENT_ENABLE_PKG_MGMT:-1}"' in text
     assert 'KYAGENT_ENABLE_PROC_KILL="${KYAGENT_ENABLE_PROC_KILL:-1}"' in text
+    assert 'KYAGENT_ENABLE_RUNTIME_STALE="${KYAGENT_ENABLE_RUNTIME_STALE:-1}"' in text
+    assert 'KYAGENT_ENABLE_CRON_DISABLE="${KYAGENT_ENABLE_CRON_DISABLE:-1}"' in text
+    assert 'KYAGENT_ENABLE_LOG_PERMISSIONS="${KYAGENT_ENABLE_LOG_PERMISSIONS:-1}"' in text
     assert 'KYAGENT_PKG_REMOVE_ALLOWLIST="${KYAGENT_PKG_REMOVE_ALLOWLIST:-}"' in text
     # 服务白名单默认值可被覆盖
     assert 'KYAGENT_SERVICE_ALLOWLIST="${KYAGENT_SERVICE_ALLOWLIST:-$DEFAULT_SERVICE_ALLOWLIST}"' in text
