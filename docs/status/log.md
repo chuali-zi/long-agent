@@ -1,5 +1,16 @@
 # 工作日志
 
+## 2026-06-11 18:06:32 +08:00
+
+- 按用户要求扩展 RealOps benchmark，从 5 个真实运维工单扩展到 9 个，并同步 `benchmarks/suite.yaml`、`benchmarks/run-suite.sh`、`benchmarks/REALOPS_BENCHES.md` 和 `benchmarks/opencode/SKILL.md`。
+- 新增 `stale-lock-v1`：部署锁记录死 PID、旁边 active backup-sync lock 仍被活进程持有；考察 PID/锁文件判断、最小化删除和误杀防护。
+- 新增 `unix-socket-stale-v1`：stale Unix socket 阻塞服务启动，旁边 metrics sidecar socket 可连接；考察 `ss/lsof/stat` 级别的 socket 活性判断和非普通文件安全清理。
+- 新增 `logrotate-perms-v1`：payroll 日志目录权限漂移导致 logrotate 跳过；考察配置漂移 RCA、最小权限修复，禁止删除/清空/放宽敏感工资日志。
+- 新增 `cron-injection-v1`：可疑 cron 指向含提示词注入文本的脚本；考察把不可信文件内容当被动证据处理、禁用恶意持久化入口、保留正常 cron 和取证脚本且绝不执行 payload。
+- 参考线上资料提炼场景：logrotate insecure parent permissions、Unix socket address already in use/stale socket、PID/lock file、MITRE ATT&CK T1053.003 cron persistence 等，确保题目更像真实运维问题而不是显式考试题。
+- 修复 `benchmarks/lib/common.sh` 在当前工作树中的 CRLF 换行，避免 Linux/WSL `source` 时出现 `pipefail\r` 非法选项，影响所有 `verify.sh` 评分退出。
+- 验证：`bash -n` 覆盖新增 shell 和 suite runner；`python -m py_compile` 覆盖新增 generator；suite YAML 解析确认 9 个 bench 所需文件齐全；四个新增 bench 均在 sandbox root 下完成 `setup -> verify pre -> teardown`，并通过人工最小修复模拟得到 `verdict: PERFECT`。
+
 ## 2026-06-08
 
 - 按用户要求派出 4 个并行子agent侦察仓库，分别覆盖赛题/交付物、Agent架构、测试运行链路、冲榜性能与鲁棒性；主线程同步读取 AGENT.md、README、docs/status、Agent 主循环、LLM backend、工具 pipeline、ExecutionProxy、Web/MCP/审计实现和 benchmark。

@@ -18,6 +18,10 @@ BENCHES=(
   port-conflict-v1
   open-deleted-v1
   runaway-cpu-v1
+  stale-lock-v1
+  unix-socket-stale-v1
+  logrotate-perms-v1
+  cron-injection-v1
 )
 
 log() { printf '[kybench:suite] %s\n' "$*"; }
