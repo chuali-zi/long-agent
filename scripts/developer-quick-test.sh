@@ -140,7 +140,7 @@ copy_to_prefix() {
 
   command -v rsync >/dev/null 2>&1 || die "rsync is required to copy the repo to $INSTALL_PREFIX"
   run_step "copying repo to $INSTALL_PREFIX" install -d -m 0755 "$INSTALL_PREFIX"
-  run_step "syncing source tree" rsync -a --delete "$SOURCE_ROOT/" "$INSTALL_PREFIX/"
+  run_step "syncing source tree" rsync -a --delete --exclude '.venv/' "$SOURCE_ROOT/" "$INSTALL_PREFIX/"
 }
 
 write_admin_token_to_env() {

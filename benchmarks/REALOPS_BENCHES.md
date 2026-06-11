@@ -39,7 +39,7 @@ Each scenario directory follows the same shape:
 - `setup.sh`: deploys the fixture and writes `bench-state.json`.
 - `probe.sh`: read-only operator probe (may include answer key for humans only).
 - `verify.sh pre|post`: executable grading → writes `score.json`, strict exit codes.
-- `run.sh [--ask]`: setup + precheck + probe + optional kyagent ask + postcheck.
+- `run.sh [--ask]`: setup + precheck + probe + optional kyagent ask + postcheck. Use `sudo` for `--ask` so `/etc/kyagent/env` is reachable; fixture `setup.sh` stays non-root.
 - `teardown.sh`: state-based cleanup.
 
 ### Strict grading (VM / opencode loop)

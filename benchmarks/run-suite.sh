@@ -112,7 +112,8 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8")).get("verdict", "?"))
 PY
 )"
-    exit_code="$("$py" "$ROOT/lib/grade.py" exit "$score_copy")"
+    "$py" "$ROOT/lib/grade.py" exit "$score_copy"
+    exit_code=$?
   fi
 
   if [[ "$rc" -eq 0 && "$verdict" == "PERFECT" ]]; then

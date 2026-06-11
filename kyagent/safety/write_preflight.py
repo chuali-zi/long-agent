@@ -124,6 +124,9 @@ def classify_write_preflight(
     if _is_rotated_log_name(basename):
         return _allow("old-rotated-log", "rotated or compressed log target")
 
+    if _is_stale_cache_target(lower_path, basename, segments):
+        return _allow("stale-cache-target", "stale cache file under /var/cache")
+
     if lower_path.startswith("/var/cache/"):
         return _allow("cache-target", "cache file under /var/cache")
 
@@ -256,6 +259,20 @@ def _is_stale_named_log(lower_path: str, basename: str) -> bool:
     if not lower_path.startswith(("/var/log/", "/tmp/", "/var/tmp/")):
         return False
     return any(marker in basename for marker in ("stale", "old", "archive"))
+
+
+def _is_stale_cache_target(
+    lower_path: str,
+    basename: str,
+    segments: tuple[str, ...],
+) -> bool:
+    if not lower_path.startswith("/var/cache/"):
+        return False
+    if basename.endswith((".cache", ".metadata", ".meta")):
+        return True
+    if basename in {"metadata", "metadata.cache", "http.cache"}:
+        return True
+    return any(seg in {"cache", ".cache"} for seg in segments[2:])
 
 
 def _is_temp_build_residual(

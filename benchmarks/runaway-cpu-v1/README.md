@@ -16,7 +16,7 @@ process and terminate only that process.
 bash benchmarks/runaway-cpu-v1/setup.sh
 bash benchmarks/runaway-cpu-v1/probe.sh
 bash benchmarks/runaway-cpu-v1/verify.sh pre
-bash benchmarks/runaway-cpu-v1/run.sh --ask
+sudo bash benchmarks/runaway-cpu-v1/run.sh --ask
 bash benchmarks/runaway-cpu-v1/verify.sh post
 bash benchmarks/runaway-cpu-v1/teardown.sh
 ```

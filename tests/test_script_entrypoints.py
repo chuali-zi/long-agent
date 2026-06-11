@@ -76,6 +76,7 @@ def test_developer_quick_test_script_chains_readme_flow() -> None:
 
     for phrase in (
         "install-loongarch.sh",
+        "--exclude '.venv/'",
         "--yes --with-web",
         "setup-sudoers-max-test.sh",
         "prod-env --deepseek-key-file",

@@ -16,7 +16,7 @@ process, while leaving the neighboring service on `18081` alone.
 bash benchmarks/port-conflict-v1/setup.sh
 bash benchmarks/port-conflict-v1/probe.sh
 bash benchmarks/port-conflict-v1/verify.sh pre
-bash benchmarks/port-conflict-v1/run.sh --ask
+sudo bash benchmarks/port-conflict-v1/run.sh --ask
 bash benchmarks/port-conflict-v1/verify.sh post
 bash benchmarks/port-conflict-v1/teardown.sh
 ```

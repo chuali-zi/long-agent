@@ -378,6 +378,42 @@ def test_safe_remediation_auto_approval_kills_pid_with_matching_evidence(agent):
     )
 
 
+def test_safe_remediation_auto_approval_uses_runtime_root_evidence(agent, monkeypatch):
+    backend = _KillAfterEvidenceBackend()
+    executor = _ProcessEvidenceExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.auto_approve_safe_remediation = True
+    agent.cfg.agent.max_iterations = 3
+    monkeypatch.setenv("KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS", "/tmp/loadtest-ops")
+
+    result = agent.ask("runaway-cpu-v1 压测残留进程占满 CPU，请处理")
+
+    assert not result.denied
+    assert ["kill", "-TERM", "2976"] in executor.argvs
+    auto_events = [
+        e.payload for e in result.trace.events
+        if e.kind is EventKind.SAFETY_CHECK and e.payload.get("auto_confirmed") is True
+    ]
+    assert auto_events
+    assert "prior read-only evidence" in auto_events[0]["reason"]
+
+
+def test_safe_remediation_auto_approval_runtime_root_is_required_when_target_unnamed(agent, monkeypatch):
+    backend = _KillAfterEvidenceBackend()
+    executor = _ProcessEvidenceExecutor()
+    agent.llm = backend
+    agent.executor = executor
+    agent.auto_approve_safe_remediation = True
+    agent.cfg.agent.max_iterations = 3
+    monkeypatch.delenv("KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS", raising=False)
+
+    result = agent.ask("runaway-cpu-v1 压测残留进程占满 CPU，请处理")
+
+    assert result.denied
+    assert ["kill", "-TERM", "2976"] not in executor.argvs
+
+
 def test_agent_audit_persistence(agent):
     """跑完 ask 后能从 SQLite 取回完整事件流。"""
     result = agent.ask("查 22 端口")

@@ -53,7 +53,8 @@ kybench_run_ask() {
   local env_file="${KYAGENT_ENV_FILE:-/etc/kyagent/env}"
   local kyagent_user="${KYAGENT_USER:-kyagent}"
 
-  [[ -f "$env_file" ]] || { echo "env not found: $env_file" >&2; exit 1; }
+  # /etc/kyagent is root:kyagent 0750 — non-root callers cannot stat the env file directly.
+  sudo test -f "$env_file" || { echo "env not found: $env_file" >&2; exit 1; }
   if [[ ! -x "$install_prefix/.venv/bin/kyagent" ]]; then
     install_prefix="$(kybench_repo_root "$bench_dir")"
   fi
@@ -68,9 +69,11 @@ kybench_run_ask() {
   if [[ -n "$runtime_root" && -z "$auto_roots" ]]; then
     export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS="$runtime_root"
   fi
+  local auto_roots_q
+  printf -v auto_roots_q '%q' "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}"
 
   sudo -u "$kyagent_user" bash -c \
-    "set -a; source '$env_file'; set +a; '$install_prefix/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$prompt")"
+    "set -a; source '$env_file'; set +a; export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS=$auto_roots_q; '$install_prefix/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$prompt")"
 }
 
 kybench_finalize_exit() {
@@ -82,5 +85,6 @@ kybench_finalize_exit() {
   py="$(command -v python3 || command -v python || true)"
   [[ -n "$py" ]] || { echo "python required for grading" >&2; exit 10; }
   [[ -f "$score" ]] || { echo "missing score file: $score" >&2; exit 10; }
-  exit "$("$py" "$lib_dir/grade.py" exit "$score")"
+  "$py" "$lib_dir/grade.py" exit "$score"
+  exit $?
 }

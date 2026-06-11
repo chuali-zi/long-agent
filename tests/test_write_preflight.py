@@ -53,6 +53,17 @@ def test_write_preflight_denies_active_log_files():
     assert result.rule_id == "active-log"
 
 
+def test_write_preflight_denies_incident_review_audit_trap():
+    result = classify_write_preflight(
+        "/var/log/auth-api01/audit/incident-review.log.1",
+        operation="delete",
+        metadata=OLD,
+        now=4_000.0,
+    )
+    assert result.decision is WritePreflightDecision.DENY
+    assert result.rule_id == "audit-log"
+
+
 def test_write_preflight_denies_recently_modified_files_before_allow_rules():
     result = classify_write_preflight(
         "/var/log/myapp.log.1",
@@ -68,6 +79,7 @@ def test_write_preflight_denies_recently_modified_files_before_allow_rules():
 def test_write_preflight_allows_recent_disposable_cache_and_temp_spool():
     for path, rule_id in [
         ("/var/cache/web-app01/dnf/metadata.solv", "cache-target"),
+        ("/var/cache/auth-api01/http-v2/metadata.cache", "stale-cache-target"),
         ("/var/tmp/web-app01/pip-build-3f9a/wheel.log", "temp-build-residual"),
     ]:
         result = classify_write_preflight(

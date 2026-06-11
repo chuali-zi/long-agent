@@ -101,13 +101,24 @@ _AUTO_APPROVE_FILE_REMEDIATION_TOOLS = {
 }
 _AUTO_APPROVE_PROCESS_SIGNALS = {"TERM", "INT", "HUP"}
 _DELETED_FILE_EVIDENCE_MARKERS = ("(deleted)", " deleted")
-_AUTO_APPROVE_RUNTIME_ROOTS = tuple(
-    p.strip()
-    for p in os.environ.get("KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS", "").split(":")
-    if p.strip()
-)
+def _configured_auto_approve_runtime_roots() -> tuple[str, ...]:
+    raw = os.environ.get("KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS", "")
+    if not raw.strip():
+        return ()
+    parts: list[str] = []
+    for chunk in raw.split(os.pathsep):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if os.pathsep != ":" and ":" in chunk and not re.match(r"^[A-Za-z]:[\\/]", chunk):
+            parts.extend(p.strip() for p in chunk.split(":") if p.strip())
+        else:
+            parts.append(chunk)
+    return tuple(dict.fromkeys(parts))
 _ACTION_INTENT_RE = re.compile(
-    r"(结束|终止|杀|释放|stop|kill|terminate|release|确认后结束|确认后终止)",
+    r"(结束|终止|杀|释放|处理|处置|清理|修复|"
+    r"stop|kill|terminate|release|remediate|cleanup|clean up|resolve|"
+    r"确认后结束|确认后终止)",
     re.IGNORECASE,
 )
 _SKIP_USER_TOKENS = frozenset(
@@ -903,9 +914,17 @@ class Agent:
     @staticmethod
     def _evidence_lines_for_pid(trace: Trace, pid: int) -> list[str]:
         pid_re = re.compile(rf"(?<!\d){pid}(?!\d)")
+        read_only_result_seqs = {
+            (event.payload or {}).get("execution_result_seq")
+            for event in trace.events
+            if event.kind is EventKind.PERCEPTION
+            and (event.payload or {}).get("execution_result_seq") is not None
+        }
         lines: list[str] = []
         for event in trace.events:
             if event.kind is not EventKind.EXECUTION_RESULT:
+                continue
+            if event.seq not in read_only_result_seqs:
                 continue
             payload = event.payload or {}
             text = "\n".join(
@@ -999,12 +1018,20 @@ class Agent:
 
     @staticmethod
     def _evidence_in_configured_runtime_root(user_text: str, line: str) -> bool:
-        if not _AUTO_APPROVE_RUNTIME_ROOTS:
+        roots = _configured_auto_approve_runtime_roots()
+        if not roots:
             return False
         if not _ACTION_INTENT_RE.search(user_text):
             return False
         lowered = line.lower()
-        return any(root.lower() in lowered for root in _AUTO_APPROVE_RUNTIME_ROOTS)
+        for root in roots:
+            normalized = root.strip().rstrip("/\\").lower()
+            if not normalized:
+                continue
+            pattern = rf"(?<![\w.-]){re.escape(normalized)}(?=$|[\s/\\:;,'\")\]])"
+            if re.search(pattern, lowered):
+                return True
+        return False
 
     @staticmethod
     def _port_is_requested_target(user_text: str, port: str) -> bool:

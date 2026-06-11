@@ -432,7 +432,7 @@ class TestDiskTools:
 
     def test_disk_open_deleted_argv(self):
         argv = _argv(disk_mod.DiskOpenDeletedTool(), {})
-        assert argv == ["lsof", "+L1"]
+        assert argv == ["lsof", "-nP", "+L1"]
 
     def test_disk_mount_argv_default(self):
         argv = _argv(disk_mod.DiskMountTool(), {})

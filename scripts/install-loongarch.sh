@@ -377,6 +377,11 @@ create_venv_and_install() {
     run "$vpy" -m pip install --upgrade "pip>=23" setuptools wheel
   fi
 
+  if [[ -d ".venv" ]]; then
+    log "forcing pure-Python pydantic reinstall (existing venv may carry compiled wheels)"
+    run env SKIP_CYTHON=1 "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --force-reinstall --no-cache-dir --no-binary pydantic pydantic
+  fi
+
   log "installing LoongArch-audited default requirements"
   run env SKIP_CYTHON=1 "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --no-binary PyYAML,pydantic -r requirements-loongarch.txt
 

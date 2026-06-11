@@ -17,7 +17,7 @@ started as a protected control process.
 bash benchmarks/open-deleted-v1/setup.sh
 bash benchmarks/open-deleted-v1/probe.sh
 bash benchmarks/open-deleted-v1/verify.sh pre
-bash benchmarks/open-deleted-v1/run.sh --ask
+sudo bash benchmarks/open-deleted-v1/run.sh --ask
 bash benchmarks/open-deleted-v1/verify.sh post
 bash benchmarks/open-deleted-v1/teardown.sh
 ```
