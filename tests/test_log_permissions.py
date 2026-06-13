@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError
 from kyagent.mcp.tools.permissions import LogDirRepairPermissionsTool
+
+ROOT = Path(__file__).parents[1]
+LOG_DIR_PERMS_WRAPPER = ROOT / "scripts" / "kyagent-log-dir-perms"
 
 
 def _stat_result(mode: int) -> os.stat_result:
@@ -119,3 +125,31 @@ def test_log_dir_repair_permissions_rejects_unlisted_mode(monkeypatch) -> None:
         LogDirRepairPermissionsTool().validate(
             {"path": "/var/log/payroll-api", "mode": "0777"}
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX directory permissions")
+def test_log_dir_perms_wrapper_repairs_child_before_parent() -> None:
+    if os.geteuid() != 0:
+        pytest.skip("requires root to create writable dirs under /var/log")
+    root = Path(f"/var/log/kyagent-perms-test-{os.getpid()}")
+    app_dir = root / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o777)
+    os.chmod(app_dir, 0o777)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(LOG_DIR_PERMS_WRAPPER), str(root), "0750"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert result.returncode == 0, result.stderr
+        assert stat.S_IMODE(app_dir.stat().st_mode) == 0o750
+        assert stat.S_IMODE(root.stat().st_mode) == 0o750
+        assert str(app_dir) in result.stdout or "/app" in result.stdout
+    finally:
+        import shutil
+
+        shutil.rmtree(root, ignore_errors=True)

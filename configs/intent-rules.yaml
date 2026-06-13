@@ -80,7 +80,6 @@ rules:
     description: 不安全权限 / 提权意图
     keywords:
       - "chmod 777 /"
-      - "chmod -r 777"
       - "777 /etc"
       - "777 /usr"
       - "把权限改成 777"

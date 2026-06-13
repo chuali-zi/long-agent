@@ -10,6 +10,8 @@
 set -euo pipefail
 
 USER_NAME=${KYAGENT_USER:-kyagent}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETUP_SUDOERS="$SCRIPT_DIR/setup-sudoers.sh"
 SUDOERS_DST="/etc/sudoers.d/kyagent"
 BACKUP=""
 TMP_SUDOERS=""
@@ -128,6 +130,12 @@ main() {
   chmod 0700 /var/log/sudo-io
   install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" "/var/lib/kyagent"
   install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" /var/log/kyagent
+
+  if [[ -f "$SETUP_SUDOERS" ]]; then
+    # shellcheck source=/dev/null
+    source "$SETUP_SUDOERS"
+    install_all_kyagent_wrappers
+  fi
 
   echo "[OK] kyagent 最大测试 sudoers 已安装。"
   echo "    账户:        $USER_NAME"

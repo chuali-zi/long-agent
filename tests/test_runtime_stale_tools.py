@@ -86,6 +86,26 @@ def test_socket_tools_argv_and_critical_denies() -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX file/socket semantics")
+def test_lock_wrapper_parses_multiline_lock_first_line_pid() -> None:
+    lock_dir = Path("/tmp") / f"kyagent_lock_meta_{os.getpid()}"
+    lock_dir.mkdir(exist_ok=True)
+    path = lock_dir / "release.lock"
+    path.write_text(
+        "pid=4194303\nowner=deploy-ops\nstarted=2026-05-01T12:00:00Z\n",
+        encoding="ascii",
+    )
+    try:
+        inspect = _run(LOCK_WRAPPER, "inspect", str(path))
+        assert inspect.returncode == 0, inspect.stderr
+        payload = json.loads(inspect.stdout)
+        assert payload["pid"] == 4194303
+        assert payload["stale"] is True
+    finally:
+        path.unlink(missing_ok=True)
+        lock_dir.rmdir()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX file/socket semantics")
 def test_lock_wrapper_removes_dead_pid_lock() -> None:
     lock_dir = Path("/tmp") / f"kyagent_lock_test_{os.getpid()}"
     lock_dir.mkdir(exist_ok=True)

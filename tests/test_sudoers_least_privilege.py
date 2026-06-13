@@ -495,9 +495,15 @@ def test_setup_installs_runtime_stale_wrappers_root_owned_when_enabled() -> None
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
     assert 'LOCK_STALE_WRAPPER_DST="/usr/local/bin/kyagent-lock-stale"' in script
     assert 'SOCKET_STALE_WRAPPER_DST="/usr/local/bin/kyagent-unix-socket-stale"' in script
-    assert '[[ "${KYAGENT_ENABLE_RUNTIME_STALE:-}" != "1" ]] && return 0' in script
-    assert 'install -m 0755 -o root -g root "$LOCK_STALE_WRAPPER_SRC" "$LOCK_STALE_WRAPPER_DST"' in script
-    assert 'install -m 0755 -o root -g root "$SOCKET_STALE_WRAPPER_SRC" "$SOCKET_STALE_WRAPPER_DST"' in script
+    assert "install_all_kyagent_wrappers" in script
+    assert (
+        'install_kyagent_wrapper "$LOCK_STALE_WRAPPER_SRC" "$LOCK_STALE_WRAPPER_DST"'
+        in script
+    )
+    assert (
+        'install_kyagent_wrapper "$SOCKET_STALE_WRAPPER_SRC" "$SOCKET_STALE_WRAPPER_DST"'
+        in script
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -553,8 +559,14 @@ def test_setup_installs_cron_wrappers_root_owned() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
     assert 'CRON_TRACE_WRAPPER_DST="/usr/local/bin/kyagent-cron-trace"' in script
     assert 'CRON_DISABLE_WRAPPER_DST="/usr/local/bin/kyagent-cron-disable"' in script
-    assert 'install -m 0755 -o root -g root "$CRON_TRACE_WRAPPER_SRC" "$CRON_TRACE_WRAPPER_DST"' in script
-    assert 'install -m 0755 -o root -g root "$CRON_DISABLE_WRAPPER_SRC" "$CRON_DISABLE_WRAPPER_DST"' in script
+    assert (
+        'install_kyagent_wrapper "$CRON_TRACE_WRAPPER_SRC" "$CRON_TRACE_WRAPPER_DST"'
+        in script
+    )
+    assert (
+        'install_kyagent_wrapper "$CRON_DISABLE_WRAPPER_SRC" "$CRON_DISABLE_WRAPPER_DST"'
+        in script
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -608,11 +620,10 @@ def test_render_log_dir_permissions_disabled_by_default_outputs_nothing() -> Non
 def test_setup_installs_log_dir_permissions_wrapper_root_owned_when_enabled() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
     assert 'LOG_DIR_PERMS_WRAPPER_DST="/usr/local/bin/kyagent-log-dir-perms"' in script
-    assert '[[ "${KYAGENT_ENABLE_LOG_PERMISSIONS:-}" != "1" ]] && return 0' in script
     assert (
-        'install -m 0755 -o root -g root "$LOG_DIR_PERMS_WRAPPER_SRC" '
-        '"$LOG_DIR_PERMS_WRAPPER_DST"'
-    ) in script
+        'install_kyagent_wrapper "$LOG_DIR_PERMS_WRAPPER_SRC" "$LOG_DIR_PERMS_WRAPPER_DST"'
+        in script
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -751,12 +762,18 @@ def _run_wrapper(path: str):
 def test_setup_installs_log_clean_wrapper_root_owned() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
     # 包装器以 root:root 0755 安装到 PATH 白名单内的 /usr/local/bin。
-    assert 'install -m 0755 -o root -g root "$LOG_CLEAN_WRAPPER_SRC" "$LOG_CLEAN_WRAPPER_DST"' in script
-    assert 'install -m 0755 -o root -g root "$FILE_DELETE_WRAPPER_SRC" "$FILE_DELETE_WRAPPER_DST"' in script
+    assert (
+        'install_kyagent_wrapper "$LOG_CLEAN_WRAPPER_SRC" "$LOG_CLEAN_WRAPPER_DST"'
+        in script
+    )
+    assert (
+        'install_kyagent_wrapper "$FILE_DELETE_WRAPPER_SRC" "$FILE_DELETE_WRAPPER_DST"'
+        in script
+    )
     assert 'LOG_CLEAN_WRAPPER_DST="/usr/local/bin/kyagent-log-clean"' in script
     assert 'FILE_DELETE_WRAPPER_DST="/usr/local/bin/kyagent-file-delete"' in script
-    # 仅在日志清理开关打开时安装。
-    assert '[[ "${KYAGENT_ENABLE_LOG_CLEAN:-}" != "1" ]] && return 0' in script
+    # 所有包装器随 setup-sudoers 始终安装。
+    assert "install_all_kyagent_wrappers" in script
 
 
 FILE_DELETE_WRAPPER = Path(__file__).parents[1] / "scripts" / "kyagent-file-delete"

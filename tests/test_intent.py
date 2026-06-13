@@ -96,6 +96,14 @@ def test_zero_width_chars_flagged(guard: IntentGuard):
     assert "‌" not in v.sanitized_text
 
 
+def test_warning_against_chmod_r_777_not_flagged(guard: IntentGuard):
+    """Benchmark 提示语含“不要用 chmod -R 777”不应误触 intent 规则。"""
+    text = "也不要用 chmod -R 777"
+    v = guard.evaluate(text)
+    assert v.decision is Decision.ALLOW
+    assert not any(h.rule_id == "zh-priv-777" for h in v.hits)
+
+
 def test_normal_query_allowed(guard: IntentGuard):
     """普通运维问句应放行，不要误伤。"""
     for text in [

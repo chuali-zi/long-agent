@@ -83,7 +83,7 @@ def run_tool(argv: list[str]) -> str:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return ""
-    if result.returncode not in (0, 1):
+    if result.returncode != 0:
         return ""
     return (result.stdout or "") + (result.stderr or "")
 

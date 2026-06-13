@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tighten one log directory's permissions without granting generic chmod."""
+"""Tighten log directory permissions without granting generic chmod."""
 from __future__ import annotations
 
 import os
@@ -40,12 +40,58 @@ def validate_mode(raw: str) -> int:
     return mode
 
 
-def main(argv: list[str]) -> None:
-    if len(argv) != 3:
-        die("用法: kyagent-log-dir-perms <绝对日志目录> <0750|0755>")
-    path = validate_log_dir(argv[1])
-    target_mode = validate_mode(argv[2])
+def is_writable_dir(path: str) -> bool:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return False
+    current_mode = stat.S_IMODE(st.st_mode)
+    return bool(current_mode & (stat.S_IWGRP | stat.S_IWOTH))
 
+
+def try_validate_log_dir(raw: str) -> str | None:
+    if not raw.startswith("/") or "\0" in raw:
+        return None
+    normalized = os.path.normpath(raw)
+    parts = [part for part in normalized.split(os.sep) if part]
+    if len(parts) not in {3, 4} or parts[:2] != ["var", "log"]:
+        return None
+    for part in parts[2:]:
+        if not SEGMENT_RE.fullmatch(part):
+            return None
+    return normalized
+
+
+def build_repair_plan(path: str, mode_str: str) -> list[tuple[str, int]]:
+    validated = validate_log_dir(path)
+    target_mode = validate_mode(mode_str)
+    parts = [part for part in validated.split(os.sep) if part]
+    candidates: list[str] = []
+
+    def maybe_add(candidate: str) -> None:
+        normalized = try_validate_log_dir(candidate)
+        if normalized and is_writable_dir(normalized):
+            candidates.append(normalized)
+
+    maybe_add(validated)
+    if len(parts) == 3:
+        try:
+            for entry in os.scandir(validated):
+                if entry.is_dir(follow_symlinks=False):
+                    maybe_add(entry.path)
+        except OSError:
+            pass
+
+    if not candidates:
+        die("当前目录并非 group/world writable，无需权限修复")
+
+    candidates.sort(key=lambda item: len([part for part in item.split(os.sep) if part]), reverse=True)
+    return [(item, target_mode) for item in candidates]
+
+
+def repair_one_dir(path: str, target_mode: int, mode_label: str) -> str:
     pre = os.path.realpath(path)
     validate_log_dir(pre)
 
@@ -88,10 +134,18 @@ def main(argv: list[str]) -> None:
     finally:
         os.close(fd)
 
-    sys.stdout.write(
+    return (
         f"tightened log dir permissions: {resolved} "
-        f"{oct(current_mode & 0o777)} -> {argv[2]}\n"
+        f"{oct(current_mode & 0o777)} -> {mode_label}"
     )
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) != 3:
+        die("用法: kyagent-log-dir-perms <绝对日志目录> <0750|0755>")
+    plan = build_repair_plan(argv[1], argv[2])
+    for dir_path, target_mode in plan:
+        sys.stdout.write(repair_one_dir(dir_path, target_mode, argv[2]) + "\n")
 
 
 if __name__ == "__main__":
