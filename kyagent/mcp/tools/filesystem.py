@@ -11,6 +11,7 @@ from kyagent.safety.write_preflight import WriteOperation, classify_write_prefli
 
 _PROTECTED_READ = {"/etc/shadow", "/etc/gshadow", "/etc/sudoers"}
 _ABS_PATH_PATTERN = r"^/(?!.*[\x00-\x1f\x7f])"
+_GLOBAL_STORAGE_ROOTS = frozenset({"/var/log", "/var/cache", "/var/tmp", "/tmp"})
 
 
 def _safe_path(p: str) -> str:
@@ -25,6 +26,17 @@ def _safe_path(p: str) -> str:
     if p in _PROTECTED_READ:
         raise ToolError(f"路径 {p} 在工具层禁读名单内")
     return p
+
+
+def _require_scoped_storage_path(p: str, *, tool_name: str) -> str:
+    """Reject global /var/log|cache|tmp roots — scope to a service subdirectory."""
+    path = _safe_path(p)
+    if path in _GLOBAL_STORAGE_ROOTS:
+        raise ToolError(
+            f"{tool_name} 请指定服务子目录（如 /var/log/<service>），"
+            f"不要扫描全局根 {path}"
+        )
+    return path
 
 
 class DfTool(Tool):

@@ -40,6 +40,14 @@ def _disk_open_deleted_result(
     )
 
 
+def test_dir_largest_files_rejects_global_storage_roots() -> None:
+    tool = DirLargestFilesTool()
+
+    for path in ("/var/log", "/var/cache", "/var/tmp", "/tmp"):
+        with pytest.raises(ToolError, match="服务子目录"):
+            tool.validate({"path": path})
+
+
 def test_dir_largest_files_allows_reasonable_absolute_path() -> None:
     tool = DirLargestFilesTool()
 
@@ -67,7 +75,7 @@ def test_dir_largest_files_rejects_path_metacharacters(path: str) -> None:
 
 def test_dir_largest_files_limit_controls_formatted_output() -> None:
     tool = DirLargestFilesTool()
-    cleaned = tool.validate({"path": "/var/log", "limit": 2})
+    cleaned = tool.validate({"path": "/var/log/web-app01", "limit": 2})
 
     result = tool.format_result(
         ExecutionResult(
@@ -87,8 +95,8 @@ def test_dir_largest_files_limit_controls_formatted_output() -> None:
 
 def test_dir_largest_files_limit_does_not_leak_between_calls() -> None:
     tool = DirLargestFilesTool()
-    first_args = tool.validate({"path": "/var/log", "limit": 2})
-    tool.validate({"path": "/var/log", "limit": 1})
+    first_args = tool.validate({"path": "/var/log/web-app01", "limit": 2})
+    tool.validate({"path": "/var/log/web-app01", "limit": 1})
 
     result = tool.format_result(
         ExecutionResult(

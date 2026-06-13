@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from kyagent.agent.core import (
+    _FileRemediationChecklist,
+    _file_cleanup_required_roots,
+)
+
+
+def test_required_roots_from_service_name_cover_log_cache_tmp() -> None:
+    text = (
+        "auth-api01 这台机器前阵子把测试 token 打进了旧日志、缓存和 dump 里，"
+        "今天把已经泄漏的旧归档清理掉。"
+    )
+
+    roots = _file_cleanup_required_roots(text)
+
+    assert "/var/log/auth-api01" in roots
+    assert "/var/cache/auth-api01" in roots
+    assert "/var/tmp/auth-api01" in roots
+
+
+def test_pre_scan_error_lists_missing_roots() -> None:
+    checklist = _FileRemediationChecklist(
+        required_roots=("/var/log/auth-api01", "/var/cache/auth-api01"),
+    )
+
+    err = checklist.pre_scan_error()
+
+    assert "not yet enumerated" in err
+    assert "/var/log/auth-api01" in err
+    assert "/var/cache/auth-api01" in err
+
+
+def test_read_result_marks_scanned_root_from_path_arg() -> None:
+    checklist = _FileRemediationChecklist(
+        required_roots=("/var/log/auth-api01",),
+    )
+
+    checklist.record_read_result(
+        "fs_ls",
+        {"path": "/var/log/auth-api01"},
+        "total 0\n-rw-r--r-- 1 root root 0 app/debug-20260412.log\n",
+    )
+
+    assert checklist.pre_scan_error() == ""
+
+
+def test_write_blocked_until_root_scanned() -> None:
+    checklist = _FileRemediationChecklist(
+        required_roots=("/var/log/auth-api01",),
+    )
+    target = "/var/log/auth-api01/app/debug-20260412.log"
+
+    err = checklist.pre_write_error(target, "清理 auth-api01 泄漏文件")
+
+    assert "candidate roots are incomplete" in err
+    assert "/var/log/auth-api01" in err
+
+
+def test_final_error_requires_post_verify_after_delete() -> None:
+    checklist = _FileRemediationChecklist(
+        required_roots=("/var/log/auth-api01",),
+    )
+    target = "/var/log/auth-api01/app/debug-20260412.log"
+    checklist.scanned_roots.add("/var/log/auth-api01")
+    checklist.candidate_paths.add(target)
+    checklist.record_write_result(target, ok=True)
+
+    err = checklist.final_error()
+
+    assert "unverified changes" in err
+    assert "/var/log/auth-api01/app" in err

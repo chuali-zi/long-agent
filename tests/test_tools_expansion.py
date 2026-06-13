@@ -268,6 +268,16 @@ class TestLogsExtensions:
         argv = _argv(logs_mod.LogFilesTopTool(), {})
         assert argv[0] == "find" and "/var/log" in argv and "+1M" in argv
 
+    def test_log_files_top_scoped_path(self):
+        argv = _argv(
+            logs_mod.LogFilesTopTool(),
+            {"path": "/var/log/auth-api01", "limit": 5},
+        )
+        assert argv == [
+            "find", "/var/log/auth-api01", "-type", "f", "-size", "+1M",
+            "-printf", "%s\t%T@\t%p\n",
+        ]
+
     def test_log_size_sample_argv(self):
         argv = _argv(logs_mod.LogSizeSampleTool(), {"paths": ["/var/log/messages"]})
         assert argv[:3] == ["du", "-sb", "--"]

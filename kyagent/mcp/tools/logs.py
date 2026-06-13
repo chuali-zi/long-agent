@@ -128,10 +128,19 @@ def _validate_grep_pattern(p: str, *, allow_pipe: bool = False) -> None:
 
 class LogFilesTopTool(Tool):
     name = "log_files_top"
-    description = "扫描 /var/log 下 >1MB 的日志文件并按大小倒排（默认前 20）。用于发现异常增长。"
+    description = (
+        "扫描指定日志目录下 >1MB 的文件并按大小倒排（默认前 20）。"
+        "优先传入服务子目录（如 /var/log/auth-api01），避免扫描整个 /var/log。"
+    )
     input_schema = {
         "type": "object",
         "properties": {
+            "path": {
+                "type": "string",
+                "pattern": r"^/[A-Za-z0-9._/@-]+$",
+                "maxLength": 200,
+                "description": "日志目录，默认 /var/log；建议限定到 /var/log/<service>",
+            },
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "默认 20"},
         },
     }
@@ -140,8 +149,9 @@ class LogFilesTopTool(Tool):
     requires_root = False
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
+        path = args.get("path", "/var/log")
         return [
-            "find", "/var/log", "-type", "f", "-size", "+1M",
+            "find", path, "-type", "f", "-size", "+1M",
             "-printf", "%s\t%T@\t%p\n",
         ]
 
@@ -174,6 +184,8 @@ class LogFilesTopTool(Tool):
     def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
         cleaned = super().validate(args)
         self._limit = int(cleaned.get("limit", 20))
+        if "path" in cleaned:
+            cleaned["path"] = _safe_path(cleaned["path"])
         return cleaned
 
 

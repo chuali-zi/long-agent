@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from kyagent.mcp.tools.base import Tool, TrendTool, ToolRegistry
+from kyagent.mcp.tools.filesystem import _require_scoped_storage_path
 from kyagent.safety.patterns import RiskLevel
 
 
@@ -276,7 +277,10 @@ class DiskSmartTool(Tool):
 
 class DirLargestFilesTool(Tool):
     name = "dir_largest_files"
-    description = "在指定目录树下找占地最大的若干文件（find + size 排序）。"
+    description = (
+        "在指定目录树下找占地最大的若干文件（find + size 排序）。"
+        "必须传入服务子目录（如 /var/cache/auth-api01），不要扫描 /var/cache 等全局根。"
+    )
     input_schema = {
         "type": "object",
         "required": ["path"],
@@ -303,6 +307,13 @@ class DirLargestFilesTool(Tool):
     }
     risk_level = RiskLevel.LOW
     read_only = True
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        cleaned["path"] = _require_scoped_storage_path(
+            cleaned["path"], tool_name=self.name
+        )
+        return cleaned
 
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         path = args["path"]

@@ -8,6 +8,7 @@ import sys
 import threading
 import json
 import os
+import posixpath
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -168,6 +169,204 @@ _PROTECTED_PROCESS_MARKERS = (
     "redis",
 )
 _PORT_RE = re.compile(r"(?<!\d)([1-9][0-9]{1,4})(?!\d)")
+_ABS_FILE_PATH_RE = re.compile(r"/[A-Za-z0-9._@%+=:,~-]+(?:/[A-Za-z0-9._@%+=:,~-]+)*")
+_SERVICE_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9-]*[a-z][0-9]{2}\b", re.IGNORECASE)
+_FILE_REMEDIATION_READ_TOOLS = {
+    "fs_find",
+    "fs_ls",
+    "dir_largest_files",
+    "log_files_top",
+    "log_rotated_count",
+}
+_FILE_MUTATION_TOOLS = frozenset({
+    "fs_delete_file",
+    "fs_truncate",
+    "log_delete_file",
+})
+
+
+@dataclass
+class _FileRemediationChecklist:
+    """Internal candidate/execute/verify state for file cleanup turns."""
+
+    required_roots: tuple[str, ...] = ()
+    scanned_roots: set[str] = field(default_factory=set)
+    candidate_paths: set[str] = field(default_factory=set)
+    executed_paths: list[str] = field(default_factory=list)
+    verified_paths: set[str] = field(default_factory=set)
+
+    @classmethod
+    def from_user_text(cls, text: str) -> "_FileRemediationChecklist":
+        roots = _file_cleanup_required_roots(text)
+        return cls(required_roots=tuple(roots))
+
+    def record_read_result(self, tool_name: str, args: dict, content: str) -> None:
+        if tool_name not in _FILE_REMEDIATION_READ_TOOLS:
+            return
+        paths = _extract_absolute_paths(content)
+        path_arg = _normalize_abs_path(str(args.get("path") or ""))
+        if tool_name == "fs_ls" and path_arg:
+            paths.update(_extract_ls_children(path_arg, content))
+        self.candidate_paths.update(paths)
+
+        for root in self.required_roots:
+            if self._read_broadly_scans_root(tool_name, args, path_arg, paths, root):
+                self.scanned_roots.add(root)
+
+        if not self.executed_paths:
+            return
+        for target in self.executed_paths:
+            if self._read_verifies_target(tool_name, path_arg, paths, target):
+                self.verified_paths.add(target)
+
+    def pre_write_error(self, path: str, user_text: str) -> str:
+        target = _normalize_abs_path(path)
+        if not target:
+            return ""
+        relevant_roots = [
+            root for root in self.required_roots
+            if _path_is_within(target, root)
+        ]
+        missing_roots = [root for root in self.required_roots if root not in self.scanned_roots]
+        if relevant_roots and missing_roots:
+            return (
+                "file cleanup checklist blocked this write: candidate roots are incomplete. "
+                "Before deleting/truncating, enumerate these roots with read-only tools: "
+                + ", ".join(missing_roots)
+            )
+        if target in self.candidate_paths:
+            return ""
+        if target in _extract_absolute_paths(user_text):
+            return ""
+        return (
+            "file cleanup checklist blocked this write: target was not present in the "
+            "candidate list from prior read-only evidence. First enumerate the exact file "
+            f"with fs_ls/fs_find/dir_largest_files/log_files_top, then retry: {target}"
+        )
+
+    def record_write_result(self, path: str, ok: bool) -> None:
+        target = _normalize_abs_path(path)
+        if ok and target:
+            self.executed_paths.append(target)
+
+    def pre_scan_error(self) -> str:
+        if not self.required_roots:
+            return ""
+        missing = [root for root in self.required_roots if root not in self.scanned_roots]
+        if not missing:
+            return ""
+        return (
+            "file cleanup checklist blocked final response: required roots not yet enumerated. "
+            "Scan these directories with read-only tools before final response: "
+            + ", ".join(missing)
+        )
+
+    def final_error(self) -> str:
+        pending = [path for path in self.executed_paths if path not in self.verified_paths]
+        if not pending:
+            return ""
+        verify_dirs = sorted({_verify_dir_for_path(path) for path in pending})
+        return (
+            "file cleanup checklist blocked final response: execution list has unverified "
+            "changes. Re-scan these directories with read-only tools and confirm the cleanup "
+            "state before final response: "
+            + ", ".join(verify_dirs)
+        )
+
+    @staticmethod
+    def _read_verifies_target(tool_name: str, path_arg: str, paths: set[str], target: str) -> bool:
+        parent = posixpath.dirname(target)
+        if path_arg and (path_arg == parent or _path_is_within(path_arg, parent)):
+            return True
+        if tool_name in {"log_files_top", "log_rotated_count"} and target.startswith("/var/log/"):
+            return True
+        return any(_path_is_within(path, parent) for path in paths)
+
+    @staticmethod
+    def _read_broadly_scans_root(
+        tool_name: str,
+        args: dict,
+        path_arg: str,
+        paths: set[str],
+        root: str,
+    ) -> bool:
+        if tool_name == "fs_ls":
+            return path_arg == root
+        if tool_name == "fs_find":
+            return path_arg == root and not args.get("name")
+        if tool_name == "dir_largest_files":
+            return path_arg == root
+        if tool_name in {"log_files_top", "log_rotated_count"}:
+            return root.startswith("/var/log/") and any(_path_is_within(path, root) for path in paths)
+        return False
+
+
+def _normalize_abs_path(path: str) -> str:
+    path = (path or "").strip()
+    if not path.startswith("/"):
+        return ""
+    return posixpath.normpath(path)
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    path = _normalize_abs_path(path)
+    root = _normalize_abs_path(root)
+    return bool(path and root and (path == root or path.startswith(root.rstrip("/") + "/")))
+
+
+def _extract_absolute_paths(text: str) -> set[str]:
+    paths: set[str] = set()
+    for raw in _ABS_FILE_PATH_RE.findall(text or ""):
+        path = _normalize_abs_path(raw.rstrip(".,;:)]}'\""))
+        if path:
+            paths.add(path)
+    return paths
+
+
+def _extract_ls_children(path_arg: str, content: str) -> set[str]:
+    children: set[str] = set()
+    for line in (content or "").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[-1]
+        if name in {".", ".."} or name.startswith("/"):
+            continue
+        if "->" in parts:
+            name = parts[parts.index("->") - 1]
+        if "/" in name:
+            continue
+        children.add(posixpath.join(path_arg, name))
+    return children
+
+
+def _file_cleanup_required_roots(user_text: str) -> list[str]:
+    text = user_text or ""
+    roots: list[str] = []
+    for path in _extract_absolute_paths(text):
+        if path == "/var/log" or path.startswith("/var/log/"):
+            roots.append(path)
+        elif path == "/var/cache" or path.startswith("/var/cache/"):
+            roots.append(path)
+        elif path == "/var/tmp" or path.startswith("/var/tmp/"):
+            roots.append(path)
+    if _ACTION_INTENT_RE.search(text):
+        for service in _SERVICE_TOKEN_RE.findall(text):
+            for base in ("/var/log", "/var/cache", "/var/tmp"):
+                roots.append(f"{base}/{service}")
+    normalized = []
+    for root in roots:
+        root = _normalize_abs_path(root)
+        if root and root not in normalized:
+            normalized.append(root)
+    return normalized
+
+
+def _verify_dir_for_path(path: str) -> str:
+    path = _normalize_abs_path(path)
+    if not path:
+        return "/"
+    return posixpath.dirname(path) or "/"
 
 
 @dataclass
@@ -213,6 +412,7 @@ class Agent:
         self.plan_store = plan_store
         self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
+        self._file_remediation_checklist: _FileRemediationChecklist | None = None
         self.system_prompt = SYSTEM_PROMPT
         if auto_approve_safe_remediation:
             self.system_prompt += (
@@ -386,6 +586,7 @@ class Agent:
                 notes.append("已剥离零宽字符送入 LLM")
 
         self.messages.append({"role": "user", "content": effective_input})
+        self._file_remediation_checklist = _FileRemediationChecklist.from_user_text(effective_input)
 
         tools_for_llm = self.registry.to_anthropic_tools()
         if plan is not None:
@@ -584,6 +785,42 @@ class Agent:
                     })
                     if iterations >= self.cfg.agent.max_iterations:
                         evidence_gate_extra_summary = True
+                    continue
+
+                checklist_error = ""
+                if self._file_remediation_checklist is not None:
+                    checklist_error = self._file_remediation_checklist.pre_scan_error()
+                    if not checklist_error:
+                        checklist_error = self._file_remediation_checklist.final_error()
+                if checklist_error:
+                    notes.append("file remediation checklist blocked final response")
+                    reason = (
+                        "final_without_pre_scan"
+                        if "not yet enumerated" in checklist_error
+                        else "final_without_post_verify"
+                    )
+                    payload = {
+                        "event": "file_remediation_checklist_required",
+                        "reason": reason,
+                        "detail": checklist_error,
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_required",
+                        text=checklist_error,
+                        meta=payload,
+                    ))
+                    if plan is not None:
+                        plan = self._set_plan_step(
+                            trace, plan, "verify", "running",
+                            "File cleanup changes require read-only post-verify",
+                            event_kind="plan_step_update",
+                        )
+                    self.messages.append({
+                        "role": "user",
+                        "content": "System feedback: " + checklist_error,
+                    })
                     continue
 
                 self.messages.append({"role": "assistant",
@@ -1187,6 +1424,28 @@ class Agent:
             argv=list(prep.argv),
         ))
 
+        if tu.name in _AUTO_APPROVE_FILE_REMEDIATION_TOOLS:
+            checklist = self._file_remediation_checklist
+            if checklist is not None:
+                checklist_error = checklist.pre_write_error(
+                    str(prep.cleaned.get("path", "")),
+                    self._user_input_text(trace),
+                )
+                if checklist_error:
+                    notes.append(f"file remediation checklist blocked {tu.name}")
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, {
+                        "event": "file_remediation_checklist_required",
+                        "reason": "write_without_complete_candidate_list",
+                        "tool": tu.name,
+                        "path": prep.cleaned.get("path"),
+                        "detail": checklist_error,
+                    })
+                    return ToolResultBlock(
+                        tool_use_id=tu.id,
+                        is_error=True,
+                        content="System feedback: " + checklist_error,
+                    )
+
         # 2. 安全护栏（即便是 read_only 工具也过一遍，防止参数注入）
         verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
 
@@ -1242,11 +1501,43 @@ class Agent:
             self.audit.event(trace, EventKind.SAFETY_CHECK,
                              {"user_confirmed": True, "tool": tu.name})
 
+        if (
+            tu.name in _FILE_MUTATION_TOOLS
+            and self._file_remediation_checklist is not None
+        ):
+            write_path = str(prep.cleaned.get("path") or "")
+            checklist_err = self._file_remediation_checklist.pre_write_error(
+                write_path, self._user_input_text(trace)
+            )
+            if checklist_err:
+                notes.append("file remediation checklist blocked mutation tool")
+                self.audit.event(trace, EventKind.ERROR, {
+                    "reason": "file_remediation_checklist_blocked_write",
+                    "tool": tu.name,
+                    "path": write_path,
+                    "detail": checklist_err,
+                })
+                return ToolResultBlock(
+                    tool_use_id=tu.id,
+                    is_error=True,
+                    content=checklist_err,
+                )
+
         # 3. 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
         _, formatted, content = execute_and_format(
             prep, trace=trace, audit=self.audit, executor=self.executor,
             parallel_read_only=parallel_read_only,
         )
+        if self._file_remediation_checklist is not None:
+            if tu.name in _FILE_MUTATION_TOOLS:
+                self._file_remediation_checklist.record_write_result(
+                    str(prep.cleaned.get("path") or ""),
+                    formatted.ok,
+                )
+            elif tool.read_only:
+                self._file_remediation_checklist.record_read_result(
+                    tu.name, prep.cleaned, content if formatted.ok else ""
+                )
         return ToolResultBlock(tool_use_id=tu.id, is_error=not formatted.ok, content=content)
 
     def _handle_user_choice(self, trace: Trace, tu: ToolUseBlock) -> ToolResultBlock:
