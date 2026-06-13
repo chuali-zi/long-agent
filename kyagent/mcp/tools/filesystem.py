@@ -6,7 +6,7 @@ from typing import Any
 
 from kyagent.mcp.tools.base import Tool, ToolError, ToolRegistry
 from kyagent.safety.patterns import RiskLevel
-from kyagent.safety.write_preflight import WriteOperation, classify_write_preflight
+from kyagent.safety.write_preflight import WriteOperation, categorize_cleanup_candidate, classify_write_preflight
 
 
 _PROTECTED_READ = {"/etc/shadow", "/etc/gshadow", "/etc/sudoers"}
@@ -119,6 +119,128 @@ class FindTool(Tool):
         return argv
 
 
+class FileCleanupCandidatesTool(Tool):
+    name = "file_cleanup_candidates"
+    description = (
+        "发现指定服务目录下的可清理文件候选（只读）。"
+        "返回 path/size/mtime/suffix/category_guess/risk_markers 等结构化事实；"
+        "LLM 据此标注 delete/protect/unknown，不要直接删除。"
+        "必须传入服务子目录（如 /var/log/auth-api01），不要扫描 /var/log 等全局根。"
+    )
+    input_schema = {
+        "type": "object",
+        "required": ["root"],
+        "properties": {
+            "root": {
+                "type": "string",
+                "pattern": _ABS_PATH_PATTERN,
+                "description": "服务子目录，如 /var/log/auth-api01",
+            },
+            "service_hint": {
+                "type": "string",
+                "maxLength": 80,
+                "description": "可选服务名提示，用于输出",
+            },
+            "min_age_days": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3650,
+                "description": "仅返回修改时间早于 N 天的文件；0 表示不限",
+            },
+            "max_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 8,
+                "description": "默认 4",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "description": "最多返回候选数，默认 80",
+            },
+        },
+    }
+    risk_level = RiskLevel.LOW
+    read_only = True
+
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        cleaned["root"] = _require_scoped_storage_path(
+            cleaned["root"], tool_name=self.name
+        )
+        cleaned["max_depth"] = int(cleaned.get("max_depth", 4))
+        cleaned["limit"] = int(cleaned.get("limit", 80))
+        cleaned["min_age_days"] = int(cleaned.get("min_age_days", 0))
+        return cleaned
+
+    def build_argv(self, args: dict[str, Any]) -> list[str]:
+        root = args["root"]
+        max_depth = int(args.get("max_depth", 4))
+        argv = [
+            "find",
+            root,
+            "-maxdepth",
+            str(max_depth),
+            "-type",
+            "f",
+            "-printf",
+            "%s\\t%T@\\t%p\\n",
+        ]
+        min_age_days = int(args.get("min_age_days", 0))
+        if min_age_days > 0:
+            argv.extend(["-mtime", f"+{min_age_days}"])
+        return argv
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        res = super().format_result(exec_result)
+        if not res.ok:
+            return res
+        limit = int((exec_result.extra.get("tool_args") or {}).get("limit", 80))
+        candidates: list[dict[str, Any]] = []
+        for line in res.content.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            try:
+                size = int(parts[0])
+                mtime = float(parts[1])
+            except ValueError:
+                continue
+            path = parts[2]
+            facts = categorize_cleanup_candidate(path, mtime=mtime, size=size)
+            suffix = facts.suffix
+            if "." in posixpath.basename(path):
+                suffix = "." + posixpath.basename(path).rsplit(".", 1)[-1]
+            entry = {
+                "path": facts.path,
+                "size": size,
+                "mtime": mtime,
+                "suffix": suffix,
+                "file_type": facts.file_type,
+                "category_guess": facts.category_guess,
+                "risk_markers": list(facts.risk_markers),
+            }
+            candidates.append(entry)
+        candidates.sort(key=lambda item: int(item.get("size") or 0), reverse=True)
+        candidates = candidates[:limit]
+        lines = [
+            (
+                f"{item['size']:>12}  {item['category_guess']:<12}  "
+                f"{item['path']}  markers={','.join(item['risk_markers']) or '-'}"
+            )
+            for item in candidates
+        ]
+        res.content = (
+            f"candidate_count={len(candidates)}\n"
+            + ("\n".join(lines) if lines else "(no candidates)")
+        )
+        res.data = dict(res.data)
+        res.data["candidates"] = candidates
+        res.data["candidate_count"] = len(candidates)
+        return res
+
+
 _MUTATION_ALLOWED_PREFIXES = (
     "/var/log/",
     "/var/cache/",
@@ -214,5 +336,6 @@ def register(registry: ToolRegistry) -> None:
     registry.register(DuTool())
     registry.register(LsTool())
     registry.register(FindTool())
+    registry.register(FileCleanupCandidatesTool())
     registry.register(FsTruncateTool())
     registry.register(FsDeleteFileTool())

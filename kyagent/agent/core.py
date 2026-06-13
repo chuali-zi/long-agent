@@ -23,6 +23,14 @@ from kyagent.agent.llm import (
     build_backend,
 )
 from kyagent.agent.prompt import SYSTEM_PROMPT
+from kyagent.agent.scope import (
+    RemediationScope,
+    extract_absolute_paths,
+    normalize_abs_path,
+    path_is_within,
+)
+from kyagent.agent.completion import assess_file_cleanup_completion
+from kyagent.safety.write_preflight import categorize_cleanup_candidate
 from kyagent.audit.logger import AuditLogger
 from kyagent.audit.trace import EventKind, Trace
 from kyagent.config import Config, load_config
@@ -169,14 +177,13 @@ _PROTECTED_PROCESS_MARKERS = (
     "redis",
 )
 _PORT_RE = re.compile(r"(?<!\d)([1-9][0-9]{1,4})(?!\d)")
-_ABS_FILE_PATH_RE = re.compile(r"/[A-Za-z0-9._@%+=:,~-]+(?:/[A-Za-z0-9._@%+=:,~-]+)*")
-_SERVICE_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9-]*[a-z][0-9]{2}\b", re.IGNORECASE)
 _FILE_REMEDIATION_READ_TOOLS = {
     "fs_find",
     "fs_ls",
     "dir_largest_files",
     "log_files_top",
     "log_rotated_count",
+    "file_cleanup_candidates",
 }
 _FILE_MUTATION_TOOLS = frozenset({
     "fs_delete_file",
@@ -189,25 +196,33 @@ _FILE_MUTATION_TOOLS = frozenset({
 class _FileRemediationChecklist:
     """Internal candidate/execute/verify state for file cleanup turns."""
 
+    scope: RemediationScope
     required_roots: tuple[str, ...] = ()
     scanned_roots: set[str] = field(default_factory=set)
     candidate_paths: set[str] = field(default_factory=set)
+    candidate_labels: dict[str, str] = field(default_factory=dict)
+    protected_paths: set[str] = field(default_factory=set)
     executed_paths: list[str] = field(default_factory=list)
     verified_paths: set[str] = field(default_factory=set)
 
     @classmethod
     def from_user_text(cls, text: str) -> "_FileRemediationChecklist":
-        roots = _file_cleanup_required_roots(text)
-        return cls(required_roots=tuple(roots))
+        scope = RemediationScope.from_user_text(text)
+        roots = scope.search_roots(round=1)
+        return cls(scope=scope, required_roots=tuple(roots))
 
     def record_read_result(self, tool_name: str, args: dict, content: str) -> None:
         if tool_name not in _FILE_REMEDIATION_READ_TOOLS:
             return
-        paths = _extract_absolute_paths(content)
-        path_arg = _normalize_abs_path(str(args.get("path") or ""))
+        paths = set(extract_absolute_paths(content))
+        path_arg = normalize_abs_path(str(args.get("path") or args.get("root") or ""))
         if tool_name == "fs_ls" and path_arg:
             paths.update(_extract_ls_children(path_arg, content))
-        self.candidate_paths.update(paths)
+        if tool_name == "file_cleanup_candidates":
+            self._record_discovery_candidates(content)
+        else:
+            for path in paths:
+                self._register_candidate(path)
 
         for root in self.required_roots:
             if self._read_broadly_scans_root(tool_name, args, path_arg, paths, root):
@@ -219,13 +234,61 @@ class _FileRemediationChecklist:
             if self._read_verifies_target(tool_name, path_arg, paths, target):
                 self.verified_paths.add(target)
 
+    def _register_candidate(self, path: str) -> None:
+        target = normalize_abs_path(path)
+        if not target:
+            return
+        self.candidate_paths.add(target)
+        facts = categorize_cleanup_candidate(target)
+        if facts.category_guess in {"audit", "current-log", "db-log"}:
+            self._label_candidate(target, "protect")
+        elif facts.category_guess in {"rotated-log", "cache", "tmp", "core"}:
+            self._label_candidate(target, "delete")
+        elif target not in self.candidate_labels:
+            self.candidate_labels[target] = "unknown"
+
+    def _record_discovery_candidates(self, content: str) -> None:
+        for line in (content or "").splitlines():
+            if "  markers=" not in line and "\t" not in line:
+                continue
+            match = re.search(r"(/[^\s]+)\s+markers=", line)
+            if match:
+                self._register_candidate(match.group(1))
+                continue
+            parts = line.split()
+            for token in parts:
+                if token.startswith("/"):
+                    self._register_candidate(token.rstrip(","))
+                    break
+
+    def _label_candidate(self, path: str, label: str) -> None:
+        target = normalize_abs_path(path)
+        if not target:
+            return
+        self.candidate_paths.add(target)
+        self.candidate_labels[target] = label
+        if label == "protect":
+            self.protected_paths.add(target)
+
     def pre_write_error(self, path: str, user_text: str) -> str:
-        target = _normalize_abs_path(path)
+        target = normalize_abs_path(path)
         if not target:
             return ""
+        if target in self.protected_paths or self.candidate_labels.get(target) == "protect":
+            return (
+                "file cleanup checklist blocked this write: target is marked protect. "
+                f"Do not delete/truncate protected evidence: {target}"
+            )
+        label = self.candidate_labels.get(target)
+        if label == "unknown":
+            return (
+                "file cleanup checklist blocked this write: candidate disposition is unknown. "
+                "Label it delete or protect based on discovery facts before acting: "
+                f"{target}"
+            )
         relevant_roots = [
             root for root in self.required_roots
-            if _path_is_within(target, root)
+            if path_is_within(target, root)
         ]
         missing_roots = [root for root in self.required_roots if root not in self.scanned_roots]
         if relevant_roots and missing_roots:
@@ -234,20 +297,28 @@ class _FileRemediationChecklist:
                 "Before deleting/truncating, enumerate these roots with read-only tools: "
                 + ", ".join(missing_roots)
             )
-        if target in self.candidate_paths:
+        if target in self.candidate_paths and self.candidate_labels.get(target) == "delete":
             return ""
-        if target in _extract_absolute_paths(user_text):
+        if target in self.candidate_paths and self.candidate_labels.get(target) != "unknown":
             return ""
+        if target in extract_absolute_paths(user_text):
+            return ""
+        if not self.scope.path_in_scope(target):
+            return (
+                "file cleanup checklist blocked this write: target is not in current scope. "
+                f"Report it as 不在本次范围 instead of acting: {target}"
+            )
         return (
             "file cleanup checklist blocked this write: target was not present in the "
             "candidate list from prior read-only evidence. First enumerate the exact file "
-            f"with fs_ls/fs_find/dir_largest_files/log_files_top, then retry: {target}"
+            f"with file_cleanup_candidates/fs_ls/dir_largest_files/log_files_top, then retry: {target}"
         )
 
     def record_write_result(self, path: str, ok: bool) -> None:
-        target = _normalize_abs_path(path)
+        target = normalize_abs_path(path)
         if ok and target:
             self.executed_paths.append(target)
+            self.candidate_labels[target] = "delete"
 
     def pre_scan_error(self) -> str:
         if not self.required_roots:
@@ -273,14 +344,26 @@ class _FileRemediationChecklist:
             + ", ".join(verify_dirs)
         )
 
+    def completion_report(self) -> str:
+        report = assess_file_cleanup_completion(
+            self.scope,
+            required_roots=self.required_roots,
+            scanned_roots=self.scanned_roots,
+            candidate_paths=self.candidate_paths,
+            executed_paths=self.executed_paths,
+            verified_paths=self.verified_paths,
+            protected_paths=self.protected_paths,
+        )
+        return report.summary()
+
     @staticmethod
     def _read_verifies_target(tool_name: str, path_arg: str, paths: set[str], target: str) -> bool:
         parent = posixpath.dirname(target)
-        if path_arg and (path_arg == parent or _path_is_within(path_arg, parent)):
+        if path_arg and (path_arg == parent or path_is_within(path_arg, parent)):
             return True
-        if tool_name in {"log_files_top", "log_rotated_count"} and target.startswith("/var/log/"):
+        if tool_name in {"log_files_top", "log_rotated_count", "file_cleanup_candidates"} and target.startswith("/var/log/"):
             return True
-        return any(_path_is_within(path, parent) for path in paths)
+        return any(path_is_within(path, parent) for path in paths)
 
     @staticmethod
     def _read_broadly_scans_root(
@@ -296,31 +379,11 @@ class _FileRemediationChecklist:
             return path_arg == root and not args.get("name")
         if tool_name == "dir_largest_files":
             return path_arg == root
+        if tool_name == "file_cleanup_candidates":
+            return normalize_abs_path(str(args.get("root") or "")) == root
         if tool_name in {"log_files_top", "log_rotated_count"}:
-            return root.startswith("/var/log/") and any(_path_is_within(path, root) for path in paths)
+            return root.startswith("/var/log/") and any(path_is_within(path, root) for path in paths)
         return False
-
-
-def _normalize_abs_path(path: str) -> str:
-    path = (path or "").strip()
-    if not path.startswith("/"):
-        return ""
-    return posixpath.normpath(path)
-
-
-def _path_is_within(path: str, root: str) -> bool:
-    path = _normalize_abs_path(path)
-    root = _normalize_abs_path(root)
-    return bool(path and root and (path == root or path.startswith(root.rstrip("/") + "/")))
-
-
-def _extract_absolute_paths(text: str) -> set[str]:
-    paths: set[str] = set()
-    for raw in _ABS_FILE_PATH_RE.findall(text or ""):
-        path = _normalize_abs_path(raw.rstrip(".,;:)]}'\""))
-        if path:
-            paths.add(path)
-    return paths
 
 
 def _extract_ls_children(path_arg: str, content: str) -> set[str]:
@@ -340,30 +403,8 @@ def _extract_ls_children(path_arg: str, content: str) -> set[str]:
     return children
 
 
-def _file_cleanup_required_roots(user_text: str) -> list[str]:
-    text = user_text or ""
-    roots: list[str] = []
-    for path in _extract_absolute_paths(text):
-        if path == "/var/log" or path.startswith("/var/log/"):
-            roots.append(path)
-        elif path == "/var/cache" or path.startswith("/var/cache/"):
-            roots.append(path)
-        elif path == "/var/tmp" or path.startswith("/var/tmp/"):
-            roots.append(path)
-    if _ACTION_INTENT_RE.search(text):
-        for service in _SERVICE_TOKEN_RE.findall(text):
-            for base in ("/var/log", "/var/cache", "/var/tmp"):
-                roots.append(f"{base}/{service}")
-    normalized = []
-    for root in roots:
-        root = _normalize_abs_path(root)
-        if root and root not in normalized:
-            normalized.append(root)
-    return normalized
-
-
 def _verify_dir_for_path(path: str) -> str:
-    path = _normalize_abs_path(path)
+    path = normalize_abs_path(path)
     if not path:
         return "/"
     return posixpath.dirname(path) or "/"
@@ -586,7 +627,20 @@ class Agent:
                 notes.append("已剥离零宽字符送入 LLM")
 
         self.messages.append({"role": "user", "content": effective_input})
+        remediation_scope = RemediationScope.from_user_text(effective_input)
         self._file_remediation_checklist = _FileRemediationChecklist.from_user_text(effective_input)
+        turn_system_prompt = self.system_prompt
+        if remediation_scope.services or remediation_scope.actions or remediation_scope.resource_types:
+            turn_system_prompt += (
+                "\n\n## 当前范围模型\n"
+                + remediation_scope.summary()
+                + "\n\n## 候选清单工作流\n"
+                "1. 先用 file_cleanup_candidates / fs_ls / dir_largest_files 生成完整候选清单。\n"
+                "2. 为每个候选标注 delete / protect / unknown；unknown 不执行。\n"
+                "3. 只对 delete 候选调用 fs_delete_file / fs_truncate / log_delete_file。\n"
+                "4. 最终报告必须区分：已确认、未检查、未覆盖、不在本次范围；"
+                "未扫描过的目录不要说“没有/cache/不存在”。"
+            )
 
         tools_for_llm = self.registry.to_anthropic_tools()
         if plan is not None:
@@ -631,11 +685,11 @@ class Agent:
                 stream_fn = getattr(self.llm, "chat_stream", None)
                 if callable(stream_fn):
                     assistant = stream_fn(
-                        self.system_prompt, self.messages, tools_for_llm, _on_delta
+                        turn_system_prompt, self.messages, tools_for_llm, _on_delta
                     )
                 else:
                     assistant = self.llm.chat(
-                        self.system_prompt, self.messages, tools_for_llm
+                        turn_system_prompt, self.messages, tools_for_llm
                     )
                     # fallback：一次性把全部文本作为单条 delta 喷出，保持事件契约
                     for _t in assistant.texts():
@@ -794,6 +848,8 @@ class Agent:
                         checklist_error = self._file_remediation_checklist.final_error()
                 if checklist_error:
                     notes.append("file remediation checklist blocked final response")
+                    if self._file_remediation_checklist is not None:
+                        checklist_error += "\n\n" + self._file_remediation_checklist.completion_report()
                     reason = (
                         "final_without_pre_scan"
                         if "not yet enumerated" in checklist_error

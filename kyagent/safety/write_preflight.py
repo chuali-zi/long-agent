@@ -331,3 +331,152 @@ def _app_path_segments(lower_path: str, segments: tuple[str, ...]) -> tuple[str,
     if lower_path.startswith("/tmp/"):
         return segments[1:]
     return segments
+
+
+@dataclass(frozen=True)
+class CleanupCandidateFacts:
+    path: str
+    size: int | None = None
+    mtime: float | None = None
+    suffix: str = ""
+    file_type: str = "file"
+    category_guess: str = "unknown"
+    risk_markers: tuple[str, ...] = ()
+
+
+def categorize_cleanup_candidate(
+    path: str,
+    *,
+    mtime: float | None = None,
+    size: int | None = None,
+) -> CleanupCandidateFacts:
+    """Structured discovery facts for cleanup candidates (read-only, no I/O)."""
+    normalized = posixpath.normpath(path)
+    basename = posixpath.basename(normalized).lower()
+    suffix = basename.rsplit(".", 1)[-1] if "." in basename else ""
+    segments = tuple(seg for seg in normalized.lower().split("/") if seg)
+    markers: list[str] = []
+
+    sensitive = _sensitive_log_rule(normalized.lower(), basename, segments)
+    if sensitive is not None:
+        rule_id, reason = sensitive
+        markers.append(rule_id)
+        if "incident" in basename or "incident" in segments:
+            category = "audit"
+        elif "audit" in segments or rule_id == "audit-log":
+            category = "audit"
+        elif rule_id == "database-log":
+            category = "db-log"
+        elif rule_id == "auth-log":
+            category = "audit"
+        else:
+            category = "audit"
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess=category,
+            risk_markers=tuple(markers + [reason]),
+        )
+
+    if basename == "access.log" or (
+        basename.startswith("access.log.") and not _is_rotated_log_name(basename)
+    ):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="current-log",
+            risk_markers=("current-access-log", "active nginx/access log without rotation suffix"),
+        )
+
+    if basename.endswith(".log") and basename in {"current.log", "app.log", "application.log"}:
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="current-log",
+            risk_markers=("current-app-log", "likely active application log"),
+        )
+
+    if _is_core_dump_residual(normalized.lower(), basename, segments):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="core",
+            risk_markers=("core-dump",),
+        )
+
+    if _is_stale_cache_target(normalized.lower(), basename, segments):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="cache",
+            risk_markers=("stale-cache",),
+        )
+
+    if normalized.lower().startswith("/var/cache/"):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="cache",
+            risk_markers=("cache-path",),
+        )
+
+    if _is_rotated_log_name(basename):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="rotated-log",
+            risk_markers=("rotated-log",),
+        )
+
+    if _is_dated_log_name(basename) or _is_stale_named_log(normalized.lower(), basename):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="rotated-log",
+            risk_markers=("dated-log",),
+        )
+
+    if _is_temp_build_residual(normalized.lower(), basename, segments):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="tmp",
+            risk_markers=("tmp-residual",),
+        )
+
+    if basename.endswith(".log"):
+        return CleanupCandidateFacts(
+            path=normalized,
+            size=size,
+            mtime=mtime,
+            suffix=suffix,
+            category_guess="current-log",
+            risk_markers=("active-log-name",),
+        )
+
+    return CleanupCandidateFacts(
+        path=normalized,
+        size=size,
+        mtime=mtime,
+        suffix=suffix,
+        category_guess="unknown",
+        risk_markers=tuple(markers),
+    )

@@ -265,8 +265,15 @@ class TestNetworkExtensions:
 
 class TestLogsExtensions:
     def test_log_files_top_argv(self):
-        argv = _argv(logs_mod.LogFilesTopTool(), {})
-        assert argv[0] == "find" and "/var/log" in argv and "+1M" in argv
+        argv = _argv(
+            logs_mod.LogFilesTopTool(),
+            {"path": "/var/log/auth-api01"},
+        )
+        assert argv[0] == "find" and "/var/log/auth-api01" in argv and "+1M" in argv
+
+    def test_log_files_top_rejects_global_root(self):
+        with pytest.raises(ToolError, match="服务子目录"):
+            logs_mod.LogFilesTopTool().validate({"path": "/var/log"})
 
     def test_log_files_top_scoped_path(self):
         argv = _argv(
@@ -663,8 +670,9 @@ class TestLoongArchTools:
 
 
 class TestRegistry:
-    def test_default_registry_has_133_tools(self, registry):
-        assert len(registry.names()) == 133
+    def test_default_registry_has_134_tools(self, registry):
+        assert len(registry.names()) == 134
+        assert "file_cleanup_candidates" in registry.names()
 
     def test_all_tools_have_description(self, registry):
         bad = [
@@ -725,7 +733,7 @@ class TestRegistry:
             "log_vacuum", "log_delete_file", "process_kill",
             "pkg_install", "pkg_update", "pkg_reinstall", "pkg_update_all",
             "pkg_security_upgrade", "pkg_clean_cache", "pkg_rebuild_db",
-            "pkg_remove", "fs_truncate", "fs_delete_file",  # write ops
+            "pkg_remove", "fs_truncate", "fs_delete_file", "file_cleanup_candidates",  # write ops
             "git_status", "git_diff", "git_show",
             "web_fetch_url", "osv_query_package", "github_issue_search",
             "verify_pytest", "verify_ruff", "verify_script_syntax",

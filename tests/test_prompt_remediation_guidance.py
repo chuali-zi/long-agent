@@ -14,6 +14,13 @@ def test_prompt_cron_injection_preserves_evidence() -> None:
     assert "保留脚本和相关文件证据" in SYSTEM_PROMPT
 
 
+def test_prompt_requires_accurate_reporting_sections() -> None:
+    assert "已确认" in SYSTEM_PROMPT
+    assert "未检查" in SYSTEM_PROMPT
+    assert "不在本次范围" in SYSTEM_PROMPT
+    assert "file_cleanup_candidates" in SYSTEM_PROMPT
+
+
 def test_prompt_allows_controlled_permission_tightening_only() -> None:
     assert "受控权限修复工具" in SYSTEM_PROMPT
     assert "收紧到 `0750`/`0755`" in SYSTEM_PROMPT

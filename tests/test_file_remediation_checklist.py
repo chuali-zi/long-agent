@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from kyagent.agent.core import (
-    _FileRemediationChecklist,
-    _file_cleanup_required_roots,
-)
+from kyagent.agent.core import _FileRemediationChecklist
+from kyagent.agent.scope import RemediationScope, file_cleanup_required_roots
+
+
+def _checklist(**kwargs) -> _FileRemediationChecklist:
+    scope = kwargs.pop("scope", RemediationScope.from_user_text("cleanup auth-api01"))
+    return _FileRemediationChecklist(scope=scope, **kwargs)
 
 
 def test_required_roots_from_service_name_cover_log_cache_tmp() -> None:
@@ -12,15 +15,16 @@ def test_required_roots_from_service_name_cover_log_cache_tmp() -> None:
         "今天把已经泄漏的旧归档清理掉。"
     )
 
-    roots = _file_cleanup_required_roots(text)
+    roots = file_cleanup_required_roots(text)
 
     assert "/var/log/auth-api01" in roots
     assert "/var/cache/auth-api01" in roots
     assert "/var/tmp/auth-api01" in roots
+    assert "/tmp/auth-api01" not in roots
 
 
 def test_pre_scan_error_lists_missing_roots() -> None:
-    checklist = _FileRemediationChecklist(
+    checklist = _checklist(
         required_roots=("/var/log/auth-api01", "/var/cache/auth-api01"),
     )
 
@@ -32,9 +36,7 @@ def test_pre_scan_error_lists_missing_roots() -> None:
 
 
 def test_read_result_marks_scanned_root_from_path_arg() -> None:
-    checklist = _FileRemediationChecklist(
-        required_roots=("/var/log/auth-api01",),
-    )
+    checklist = _checklist(required_roots=("/var/log/auth-api01",))
 
     checklist.record_read_result(
         "fs_ls",
@@ -46,9 +48,7 @@ def test_read_result_marks_scanned_root_from_path_arg() -> None:
 
 
 def test_write_blocked_until_root_scanned() -> None:
-    checklist = _FileRemediationChecklist(
-        required_roots=("/var/log/auth-api01",),
-    )
+    checklist = _checklist(required_roots=("/var/log/auth-api01",))
     target = "/var/log/auth-api01/app/debug-20260412.log"
 
     err = checklist.pre_write_error(target, "清理 auth-api01 泄漏文件")
@@ -58,12 +58,11 @@ def test_write_blocked_until_root_scanned() -> None:
 
 
 def test_final_error_requires_post_verify_after_delete() -> None:
-    checklist = _FileRemediationChecklist(
-        required_roots=("/var/log/auth-api01",),
-    )
+    checklist = _checklist(required_roots=("/var/log/auth-api01",))
     target = "/var/log/auth-api01/app/debug-20260412.log"
     checklist.scanned_roots.add("/var/log/auth-api01")
     checklist.candidate_paths.add(target)
+    checklist.candidate_labels[target] = "delete"
     checklist.record_write_result(target, ok=True)
 
     err = checklist.final_error()

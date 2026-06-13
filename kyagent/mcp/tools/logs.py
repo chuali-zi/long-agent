@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from kyagent.mcp.tools.base import Tool, ToolRegistry
-from kyagent.mcp.tools.filesystem import _safe_path
+from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolError
+from kyagent.mcp.tools.filesystem import _safe_path, _require_scoped_storage_path
 from kyagent.safety.patterns import RiskLevel
 from kyagent.safety.write_preflight import classify_write_preflight
 
@@ -134,12 +134,13 @@ class LogFilesTopTool(Tool):
     )
     input_schema = {
         "type": "object",
+        "required": ["path"],
         "properties": {
             "path": {
                 "type": "string",
                 "pattern": r"^/[A-Za-z0-9._/@-]+$",
                 "maxLength": 200,
-                "description": "日志目录，默认 /var/log；建议限定到 /var/log/<service>",
+                "description": "服务日志目录，如 /var/log/auth-api01",
             },
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "默认 20"},
         },
@@ -148,8 +149,16 @@ class LogFilesTopTool(Tool):
     read_only = True
     requires_root = False
 
+    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
+        cleaned = super().validate(args)
+        self._limit = int(cleaned.get("limit", 20))
+        cleaned["path"] = _require_scoped_storage_path(
+            cleaned["path"], tool_name=self.name
+        )
+        return cleaned
+
     def build_argv(self, args: dict[str, Any]) -> list[str]:
-        path = args.get("path", "/var/log")
+        path = args["path"]
         return [
             "find", path, "-type", "f", "-size", "+1M",
             "-printf", "%s\t%T@\t%p\n",
@@ -180,13 +189,6 @@ class LogFilesTopTool(Tool):
         res.data = dict(res.data)
         res.data["files"] = rows
         return res
-
-    def validate(self, args: dict[str, Any]) -> dict[str, Any]:  # type: ignore[override]
-        cleaned = super().validate(args)
-        self._limit = int(cleaned.get("limit", 20))
-        if "path" in cleaned:
-            cleaned["path"] = _safe_path(cleaned["path"])
-        return cleaned
 
 
 class LogSizeSampleTool(Tool):
