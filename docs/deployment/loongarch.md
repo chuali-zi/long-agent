@@ -232,6 +232,13 @@ sudo bash scripts/setup-sudoers.sh
 sudo bash /opt/kyagent/scripts/kyagent.sh prod-env
 ```
 
+如果是在修复已有 `.venv`，并且里面可能已经有编译版或更新版 Pydantic，先用 LoongArch requirements 里的同一个约束重装 Pydantic，再执行完整 requirements 安装：
+
+```bash
+PYDANTIC_REQ="$(grep -E '^pydantic[<>=!~]' requirements-loongarch.txt | head -1)"
+SKIP_CYTHON=1 python -m pip install --force-reinstall --no-cache-dir --no-binary pydantic "$PYDANTIC_REQ"
+```
+
 然后用 `sudo -u kyagent` 启动。
 
 ## 常见故障

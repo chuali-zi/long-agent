@@ -73,6 +73,7 @@ Options:
 
 Default LoongArch path:
   SKIP_CYTHON=1 pip install --no-binary PyYAML,pydantic -r requirements-loongarch.txt
+  SKIP_CYTHON=1 pip install --force-reinstall --no-binary pydantic "$(grep -E '^pydantic[<>=!~]' requirements-loongarch.txt | head -1)"
   KYAGENT_DEEPSEEK_TRANSPORT=deepseek_httpx
 EOF
 }
@@ -377,9 +378,13 @@ create_venv_and_install() {
     run "$vpy" -m pip install --upgrade "pip>=23" setuptools wheel
   fi
 
+  local pydantic_requirement
+  pydantic_requirement="$(grep -E '^pydantic[<>=!~]' requirements-loongarch.txt | head -1 || true)"
+  [[ -n "$pydantic_requirement" ]] || die "requirements-loongarch.txt must pin a pydantic v1 constraint"
+
   if [[ -d ".venv" ]]; then
-    log "forcing pure-Python pydantic reinstall (existing venv may carry compiled wheels)"
-    run env SKIP_CYTHON=1 "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --force-reinstall --no-cache-dir --no-binary pydantic pydantic
+    log "forcing audited pure-Python pydantic reinstall (existing venv may carry compiled wheels)"
+    run env SKIP_CYTHON=1 "$vpy" -m pip install "${PIP_OFFLINE_ARGS[@]}" --force-reinstall --no-cache-dir --no-binary pydantic "$pydantic_requirement"
   fi
 
   log "installing LoongArch-audited default requirements"

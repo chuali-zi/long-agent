@@ -102,6 +102,17 @@ def test_loongarch_installer_uses_linux_only_audited_dependency_path() -> None:
         assert token in script
 
 
+def test_loongarch_installer_never_installs_unconstrained_pydantic() -> None:
+    script = read_repo("scripts/install-loongarch.sh")
+    requirements = read_repo("requirements-loongarch.txt")
+
+    assert "pydantic>=1.10.13,<2" in requirements
+    assert "pydantic_requirement" in script
+    assert "grep -E '^pydantic[<>=!~]' requirements-loongarch.txt" in script
+    assert "--force-reinstall --no-cache-dir --no-binary pydantic \"$pydantic_requirement\"" in script
+    assert "--force-reinstall --no-cache-dir --no-binary pydantic pydantic" not in script
+
+
 def test_loongarch_installer_reports_optional_command_inventory() -> None:
     script = read_repo("scripts/install-loongarch.sh")
     deployment = read_repo("docs/deployment/loongarch.md")

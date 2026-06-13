@@ -1,0 +1,10 @@
+# Developer and evaluator test dependencies.
+#
+# Runtime dependencies live in pyproject.toml [project.dependencies] and
+# requirements.txt. Keep this file aligned with pyproject.toml
+# [project.optional-dependencies].dev so both editable installs and
+# requirements-based environments get the same test toolchain.
+
+pytest>=8
+pytest-asyncio>=0.23
+ruff>=0.5

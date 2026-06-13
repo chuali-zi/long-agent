@@ -8,6 +8,41 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+INSTALL_DEV_DEPS="${KYAGENT_INSTALL_DEV_DEPS:-1}"
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/install.sh [options]
+
+Options:
+  --runtime-only   Install only kyagent runtime dependencies, without dev/test tools.
+  --dev            Install developer/test tools. This is the default.
+  -h, --help       Show this help.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runtime-only)
+      INSTALL_DEV_DEPS=0
+      shift
+      ;;
+    --dev)
+      INSTALL_DEV_DEPS=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "[ERROR] unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
 if [[ ! -d .venv ]]; then
   python3 -m venv .venv
 fi
@@ -15,7 +50,11 @@ fi
 source .venv/bin/activate
 
 pip install --upgrade pip
-pip install -e .
+if [[ "$INSTALL_DEV_DEPS" == "1" ]]; then
+  pip install -e ".[dev]"
+else
+  pip install -e .
+fi
 
 mkdir -p var
 
@@ -28,6 +67,12 @@ echo "    交互：kyagent chat"
 echo "    Chat：bash scripts/kyagent.sh chat"
 echo "    TUI ：bash scripts/kyagent.sh tui"
 echo "    Web ：bash scripts/kyagent.sh web --install-web --mock"
+if [[ "$INSTALL_DEV_DEPS" == "1" ]]; then
+  echo "    测试：bash scripts/kyagent.sh test"
+  echo "          python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider"
+else
+  echo "    测试依赖未安装；需要时执行：pip install -e '.[dev]' 或 pip install -r requirements-dev.txt"
+fi
 echo "    部署受限账户（root 执行）：sudo bash scripts/kyagent.sh permissions"
 echo ""
 echo "可选 LLM 后端（默认不装；按需 pip install）："

@@ -357,7 +357,7 @@ def test_safe_remediation_auto_approval_is_opt_in_for_process_kill(agent):
     result = agent.ask("loadtest CPU 被 loadgen-leftover 打满了，确认后结束它")
 
     assert result.denied
-    assert ["kill", "-TERM", "2976"] not in executor.argvs
+    assert ["/usr/bin/kill", "-TERM", "2976"] not in executor.argvs
 
 
 def test_safe_remediation_auto_approval_kills_pid_with_matching_evidence(agent):
@@ -371,7 +371,7 @@ def test_safe_remediation_auto_approval_kills_pid_with_matching_evidence(agent):
     result = agent.ask("loadtest CPU 被 loadgen-leftover 打满了，确认后结束它")
 
     assert not result.denied
-    assert ["kill", "-TERM", "2976"] in executor.argvs
+    assert ["/usr/bin/kill", "-TERM", "2976"] in executor.argvs
     assert any(
         e.kind is EventKind.SAFETY_CHECK and e.payload.get("auto_confirmed") is True
         for e in result.trace.events
@@ -390,7 +390,7 @@ def test_safe_remediation_auto_approval_uses_runtime_root_evidence(agent, monkey
     result = agent.ask("runaway-cpu-v1 压测残留进程占满 CPU，请处理")
 
     assert not result.denied
-    assert ["kill", "-TERM", "2976"] in executor.argvs
+    assert ["/usr/bin/kill", "-TERM", "2976"] in executor.argvs
     auto_events = [
         e.payload for e in result.trace.events
         if e.kind is EventKind.SAFETY_CHECK and e.payload.get("auto_confirmed") is True
@@ -411,7 +411,7 @@ def test_safe_remediation_auto_approval_runtime_root_is_required_when_target_unn
     result = agent.ask("runaway-cpu-v1 压测残留进程占满 CPU，请处理")
 
     assert result.denied
-    assert ["kill", "-TERM", "2976"] not in executor.argvs
+    assert ["/usr/bin/kill", "-TERM", "2976"] not in executor.argvs
 
 
 def test_agent_audit_persistence(agent):

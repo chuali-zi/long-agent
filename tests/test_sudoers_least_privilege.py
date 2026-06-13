@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -409,7 +410,7 @@ def test_render_proc_kill_enabled_outputs_correct_rules() -> None:
     )
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert "/usr/bin/kill ^-(TERM|KILL|HUP|INT) [2-9][0-9]*$" in out
+    assert "/usr/bin/kill ^-(TERM|KILL|HUP|INT) ([2-9]|[1-9][0-9]+)$" in out
     assert "[0-9]+$" not in out
     assert "Cmnd_Alias KY_PROC_KILL" in out
     assert "kyagent  ALL=(root)  NOPASSWD: KY_PROC_KILL" in out
@@ -437,8 +438,24 @@ def test_render_proc_kill_disabled_by_default_outputs_nothing() -> None:
 
 def test_setup_proc_kill_sudoers_excludes_pid_zero_and_one() -> None:
     script = SETUP_SUDOERS.read_text(encoding="utf-8")
-    assert "/usr/bin/kill ^-(TERM|KILL|HUP|INT) [2-9][0-9]*$" in script
+    assert "/usr/bin/kill ^-(TERM|KILL|HUP|INT) ([2-9]|[1-9][0-9]+)$" in script
     assert "/usr/bin/kill ^-(TERM|KILL|HUP|INT) [0-9]+$" not in script
+
+
+def test_process_kill_argv_matches_proc_kill_sudoers_rule() -> None:
+    from kyagent.mcp.tools.process import ProcessKillTool
+
+    argv = ProcessKillTool().build_argv({"pid": 1234, "signal": "TERM"})
+    rule = "/usr/bin/kill ^-(TERM|KILL|HUP|INT) ([2-9]|[1-9][0-9]+)$"
+    command, args_pattern = rule.split(" ", 1)
+
+    assert rule in SETUP_SUDOERS.read_text(encoding="utf-8")
+    assert argv[0] == command
+    assert re.fullmatch(args_pattern, " ".join(argv[1:]))
+    assert re.fullmatch(args_pattern, "-TERM 2")
+    assert not re.fullmatch(args_pattern, "-TERM 1")
+    assert not re.fullmatch(args_pattern, "-TERM 0")
+    assert not re.fullmatch(args_pattern, "-TERM -1234")
 
 
 # ---------------------------------------------------------------------------

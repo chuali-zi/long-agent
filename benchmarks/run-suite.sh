@@ -98,10 +98,11 @@ for bench in "${BENCHES[@]}"; do
   fi
 
   log "running $bench -> $log_file"
-  set +e
-  bash "$run_script" --ask 2>&1 | tee "$log_file"
-  rc=$?
-  set -e
+  if bash "$run_script" --ask 2>&1 | tee "$log_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
 
   verdict="-"
   exit_code="$rc"
@@ -116,8 +117,11 @@ import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8")).get("verdict", "?"))
 PY
 )"
-    "$py" "$ROOT/lib/grade.py" exit "$score_copy"
-    exit_code=$?
+    if "$py" "$ROOT/lib/grade.py" exit "$score_copy"; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
   fi
 
   if [[ "$rc" -eq 0 && "$verdict" == "PERFECT" ]]; then

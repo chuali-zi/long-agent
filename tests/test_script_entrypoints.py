@@ -28,7 +28,7 @@ def require_usable_bash() -> None:
 def test_unified_entrypoint_exposes_abstract_commands() -> None:
     script = ENTRYPOINT.read_text(encoding="utf-8")
 
-    for command in ("install", "permissions", "prod-env", "chat", "tui", "web", "web-backend", "web-open", "tools"):
+    for command in ("install", "test", "permissions", "prod-env", "chat", "tui", "web", "web-backend", "web-open", "tools"):
         assert f"{command})" in script
 
     assert 'exec bash "$SCRIPT_DIR/setup-sudoers.sh"' in script
@@ -57,6 +57,8 @@ def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
     for command in (
         "sudo bash scripts/developer-quick-test.sh",
         "bash scripts/kyagent.sh install",
+        "bash scripts/kyagent.sh test",
+        "python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider",
         "sudo bash scripts/kyagent.sh permissions",
         "sudo bash /opt/kyagent/scripts/kyagent.sh prod-env",
         "bash scripts/kyagent.sh chat",
@@ -68,6 +70,22 @@ def test_root_readme_stays_high_level_and_links_detailed_guides() -> None:
     assert "docs/deployment/permissions.md" in readme
     assert "docs/deployment/web.md" in readme
     assert len(readme.splitlines()) < 230
+
+
+def test_development_install_includes_test_dependencies() -> None:
+    install = read_repo("scripts/install.sh")
+    entrypoint = read_repo("scripts/kyagent.sh")
+    pyproject = read_repo("pyproject.toml")
+    req_dev = read_repo("requirements-dev.txt")
+
+    assert 'pip install -e ".[dev]"' in install
+    assert "--runtime-only" in install
+    assert 'python" -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider' in entrypoint
+    assert 'bash "$SCRIPT_DIR/install.sh" --dev' in entrypoint
+    assert "installing dev/test dependencies" in entrypoint
+    assert 'dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"]' in pyproject
+    for dep in ("pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5"):
+        assert dep in req_dev
 
 
 def test_developer_quick_test_script_chains_readme_flow() -> None:

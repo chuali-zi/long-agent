@@ -214,7 +214,7 @@ render_proc_kill() {
   [[ "${KYAGENT_ENABLE_PROC_KILL:-}" != "1" ]] && return 0
   printf '\n# Explicit process-kill mutations generated when KYAGENT_ENABLE_PROC_KILL=1.\n'
   printf 'Cmnd_Alias KY_PROC_KILL = \\\n'
-  printf '    /usr/bin/kill ^-(TERM|KILL|HUP|INT) [2-9][0-9]*$\n'
+  printf '    /usr/bin/kill ^-(TERM|KILL|HUP|INT) ([2-9]|[1-9][0-9]+)$\n'
   printf '%s  ALL=(root)  NOPASSWD: KY_PROC_KILL\n' "$user_name"
 }
 

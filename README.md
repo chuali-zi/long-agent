@@ -5,6 +5,13 @@ kyagent 是面向 A2 赛题的安全智能运维 Agent：在 LoongArch Linux + �
 这份 README 只回答一个问题：**从 Gitee 拉下代码后，怎样一路启动 Web，并问出 `which process used the most cpu`，让 Agent 返回真实系统结果。** 详细原理和排障见 `docs/`。
 
 ## 开发者快速测试
+本地开发/评测环境先安装开发依赖；这个入口默认会安装 `.[dev]`（含 `pytest`、`pytest-asyncio`、`ruff`），然后用项目推荐参数跑测试。等价的直接 pytest 命令也列在下面：
+
+```bash
+bash scripts/kyagent.sh install
+bash scripts/kyagent.sh test
+python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider
+```
 
 在 LoongArch/Kylin 目标机上，想把下面 README 链路一次性顺完，可以直接运行新增脚本。默认只交互输入一次 DeepSeek API key；脚本会复制到 `/opt/kyagent`、安装 Web 依赖、切到最大测试 sudoers、重写 `/etc/kyagent/env`，并把 `KYAGENT_WEB_ADMIN_TOKEN=admin123` 写在 `DEEPSEEK_API_KEY` 同一个环境文件里，随后执行快速验收和真实 CLI 提问，最后启动 Web。
 

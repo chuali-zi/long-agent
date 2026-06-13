@@ -238,7 +238,7 @@ class ProcessKillTool(Tool):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         pid = args["pid"]
         signal = args.get("signal", "TERM")
-        return ["kill", f"-{signal}", str(pid)]
+        return ["/usr/bin/kill", f"-{signal}", str(pid)]
 
 
 def register(registry: ToolRegistry) -> None:

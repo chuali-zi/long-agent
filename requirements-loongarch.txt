@@ -8,6 +8,9 @@
 # Pydantic/PyYAML note:
 #   The installer uses:
 #     SKIP_CYTHON=1 pip install --no-binary PyYAML,pydantic -r requirements-loongarch.txt
+#     SKIP_CYTHON=1 pip install --force-reinstall --no-binary pydantic "pydantic>=1.10.13,<2"
+#   when repairing an existing venv, so pip never installs unconstrained
+#   pydantic v2 before the requirements pass brings it back to v1.
 #   Pydantic v1 can optionally compile Cython extensions. SKIP_CYTHON=1 keeps
 #   the conservative LoongArch path pure Python.
 #   On LoongArch, PyYAML may try to build the optional libyaml C extension.

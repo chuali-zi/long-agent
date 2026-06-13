@@ -869,17 +869,17 @@ class TestWriteOperationTools:
     def test_process_kill_argv_default_signal(self):
         t = process_mod.ProcessKillTool()
         argv = _argv(t, {"pid": 1234})
-        assert argv == ["kill", "-TERM", "1234"]
+        assert argv == ["/usr/bin/kill", "-TERM", "1234"]
 
     def test_process_kill_argv_kill_signal(self):
         t = process_mod.ProcessKillTool()
         argv = _argv(t, {"pid": 999, "signal": "KILL"})
-        assert argv == ["kill", "-KILL", "999"]
+        assert argv == ["/usr/bin/kill", "-KILL", "999"]
 
     def test_process_kill_argv_hup_signal(self):
         t = process_mod.ProcessKillTool()
         argv = _argv(t, {"pid": 500, "signal": "HUP"})
-        assert argv == ["kill", "-HUP", "500"]
+        assert argv == ["/usr/bin/kill", "-HUP", "500"]
 
     def test_process_kill_rejects_pid_less_than_2(self):
         t = process_mod.ProcessKillTool()

@@ -12,6 +12,7 @@ Usage: bash scripts/kyagent.sh <command> [options]
 
 Commands:
   install       Install the local development environment.
+  test          Run the project test suite with the recommended pytest options.
   permissions   Create the restricted runtime account, sudoers policy, and audit dirs.
   permissions-prod  Same as permissions, but pre-enables a production-realistic
                     write-operation allowlist (log clean, pkg mgmt, proc kill, common services).
@@ -25,6 +26,7 @@ Commands:
 
 Common examples:
   bash scripts/kyagent.sh install
+  bash scripts/kyagent.sh test
   sudo bash scripts/kyagent.sh permissions
   sudo bash scripts/kyagent.sh permissions-prod --yes
   sudo bash scripts/kyagent.sh prod-env
@@ -89,6 +91,14 @@ case "$COMMAND" in
   install)
     require_script_readable "$SCRIPT_DIR/install.sh"
     exec bash "$SCRIPT_DIR/install.sh" "$@"
+    ;;
+  test)
+    if ! "$ROOT/.venv/bin/python" -m pytest --version >/dev/null 2>&1; then
+      require_script_readable "$SCRIPT_DIR/install.sh"
+      printf '[kyagent] pytest is missing from %s; installing dev/test dependencies...\n' "$ROOT/.venv" >&2
+      bash "$SCRIPT_DIR/install.sh" --dev
+    fi
+    exec "$ROOT/.venv/bin/python" -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider "$@"
     ;;
   permissions)
     require_script_readable "$SCRIPT_DIR/setup-sudoers.sh"
