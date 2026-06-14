@@ -46,6 +46,45 @@ class _PlannedToolBackend(LlmBackend):
         )
 
 
+class _RepairsPlanAfterFeedbackBackend(LlmBackend):
+    name = "repairs_plan_after_feedback"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        self.calls += 1
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
+        if self.calls == 1:
+            return AssistantMessage(
+                blocks=[
+                    TextBlock(text="我直接查一下。"),
+                    ToolUseBlock(
+                        id="missing-plan-1",
+                        name="process_list",
+                        input={"sort_by": "cpu", "limit": 3},
+                    ),
+                ],
+                stop_reason="tool_use",
+            )
+        return AssistantMessage(
+            blocks=[
+                TextBlock(text=(
+                    "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
+                    "TODO 2: 根据结果返回关键证据。"
+                )),
+                ToolUseBlock(
+                    id="planned-after-feedback",
+                    name="process_list",
+                    input={"sort_by": "cpu", "limit": 3},
+                ),
+            ],
+            stop_reason="tool_use",
+        )
+
+
 class _FinalThenSummaryBackend(LlmBackend):
     name = "final_then_summary"
 
@@ -303,23 +342,57 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
-def test_tool_use_without_todo_plan_is_auto_repaired(agent):
+def test_tool_use_without_todo_plan_is_rejected_not_auto_repaired(agent):
     agent.llm = _NoPlanToolBackend()
     agent.cfg.agent.max_iterations = 2
     result = agent.ask("查下 CPU 占用最高的进程")
     kinds = [e.kind.value for e in result.trace.events]
     assert EventKind.LLM_THOUGHT.value in kinds
     assert EventKind.PLAN_UPDATE.value in kinds
-    assert EventKind.TOOL_REQUEST.value in kinds
-    assert EventKind.EXECUTION.value in kinds
+    assert EventKind.TOOL_REQUEST.value not in kinds
+    assert EventKind.EXECUTION.value not in kinds
+    assert result.denied
+    assert result.final_text.startswith("[blocked]")
+    plan_required = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+    ]
     repaired = [
         e for e in result.trace.events
         if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
     ]
-    assert repaired
+    assert len(plan_required) == 2
+    assert plan_required[-1].payload["violation_count"] == 2
+    assert not repaired
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
-    assert plan.todos[0].content.startswith("调用只读工具 process_list")
+    assert plan.status == "failed"
+    assert plan.todos == []
+
+
+def test_tool_use_without_todo_plan_can_recover_after_feedback(agent):
+    agent.llm = _RepairsPlanAfterFeedbackBackend()
+    agent.cfg.agent.max_iterations = 3
+    result = agent.ask("查下 CPU 占用最高的进程")
+    kinds = [e.kind.value for e in result.trace.events]
+    assert EventKind.TOOL_REQUEST.value in kinds
+    assert EventKind.EXECUTION.value in kinds
+    plan_required = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+    ]
+    repaired = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
+    ]
+    assert len(plan_required) == 1
+    assert not repaired
+    assert result.plan_id is not None
+    plan = agent.plan_store.get(result.plan_id)
+    assert [todo.content for todo in plan.todos] == [
+        "调用只读工具查看 CPU 进程列表。",
+        "根据结果返回关键证据。",
+    ]
 
 
 def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
@@ -529,7 +602,9 @@ def test_safe_remediation_auto_approval_runtime_root_is_required_when_target_unn
 
 
 def test_file_cleanup_requires_complete_candidate_list_before_delete(agent, monkeypatch):
-    allow_preflight = lambda path, operation: SimpleNamespace(allowed=True, rule_id="test", reason="ok")
+    def allow_preflight(path, operation):  # noqa: ANN001, ARG001
+        return SimpleNamespace(allowed=True, rule_id="test", reason="ok")
+
     monkeypatch.setattr(
         "kyagent.mcp.tools.filesystem.classify_write_preflight",
         allow_preflight,
@@ -562,7 +637,9 @@ def test_file_cleanup_requires_complete_candidate_list_before_delete(agent, monk
 
 
 def test_file_cleanup_allows_candidate_execute_verify_sequence(agent, monkeypatch):
-    allow_preflight = lambda path, operation: SimpleNamespace(allowed=True, rule_id="test", reason="ok")
+    def allow_preflight(path, operation):  # noqa: ANN001, ARG001
+        return SimpleNamespace(allowed=True, rule_id="test", reason="ok")
+
     monkeypatch.setattr(
         "kyagent.mcp.tools.filesystem.classify_write_preflight",
         allow_preflight,
