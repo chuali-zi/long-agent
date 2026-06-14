@@ -8,7 +8,6 @@ import pytest
 
 from kyagent.agent.core import Agent
 from kyagent.agent.llm import AssistantMessage, LlmBackend, TextBlock, ToolUseBlock
-from kyagent.agent.planning_contract import PLAN_CONTRACT_FIELD
 from kyagent.audit.store import AuditStore
 from kyagent.audit.trace import EventKind
 from kyagent.config import Config
@@ -42,42 +41,6 @@ class _PlannedToolBackend(LlmBackend):
                     "TODO 2: 根据结果返回关键证据。"
                 )),
                 ToolUseBlock(id="planned-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
-            ],
-            stop_reason="tool_use",
-        )
-
-
-class _StructuredPlanToolBackend(LlmBackend):
-    name = "structured_plan_tool"
-
-    def __init__(self) -> None:
-        self.seen_required_plan_field = False
-
-    def chat(self, system, messages, tools):  # noqa: ANN001
-        self.seen_required_plan_field = all(
-            PLAN_CONTRACT_FIELD in (t.get("input_schema", {}).get("required") or [])
-            for t in tools
-            if t.get("name") == "process_list"
-        )
-        last = messages[-1] if messages else {}
-        if last.get("role") == "user" and isinstance(last.get("content"), list):
-            return AssistantMessage(blocks=[TextBlock(text="已完成结构化计划感知。")])
-        return AssistantMessage(
-            blocks=[
-                ToolUseBlock(
-                    id="structured-plan-1",
-                    name="process_list",
-                    input={
-                        "sort_by": "cpu",
-                        "limit": 3,
-                        PLAN_CONTRACT_FIELD: {
-                            "items": [
-                                "调用只读工具查看 CPU 进程列表。",
-                                "根据结果返回关键证据。",
-                            ]
-                        },
-                    },
-                ),
             ],
             stop_reason="tool_use",
         )
@@ -340,7 +303,7 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
-def test_tool_use_without_runtime_plan_uses_visible_legacy_fallback(agent):
+def test_tool_use_without_todo_plan_is_auto_repaired(agent):
     agent.llm = _NoPlanToolBackend()
     agent.cfg.agent.max_iterations = 2
     result = agent.ask("查下 CPU 占用最高的进程")
@@ -349,37 +312,14 @@ def test_tool_use_without_runtime_plan_uses_visible_legacy_fallback(agent):
     assert EventKind.PLAN_UPDATE.value in kinds
     assert EventKind.TOOL_REQUEST.value in kinds
     assert EventKind.EXECUTION.value in kinds
-    inferred = [
+    repaired = [
         e for e in result.trace.events
-        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_legacy_inferred"
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
     ]
-    assert inferred
-    assert inferred[0].payload["source"] == "legacy_inferred"
+    assert repaired
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
     assert plan.todos[0].content.startswith("调用只读工具 process_list")
-
-
-def test_tool_use_with_structured_plan_contract_executes_and_strips_plan(agent):
-    backend = _StructuredPlanToolBackend()
-    agent.llm = backend
-    result = agent.ask("查下 CPU 占用最高的进程")
-    assert backend.seen_required_plan_field
-    kinds = [e.kind.value for e in result.trace.events]
-    assert EventKind.TOOL_REQUEST.value in kinds
-    assert EventKind.EXECUTION.value in kinds
-    declared = [
-        e for e in result.trace.events
-        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_declared"
-    ]
-    assert declared
-    assert declared[0].payload["source"] == "tool_contract"
-    assert result.plan_id is not None
-    plan = agent.plan_store.get(result.plan_id)
-    assert [todo.content for todo in plan.todos] == [
-        "调用只读工具查看 CPU 进程列表。",
-        "根据结果返回关键证据。",
-    ]
 
 
 def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
@@ -589,9 +529,7 @@ def test_safe_remediation_auto_approval_runtime_root_is_required_when_target_unn
 
 
 def test_file_cleanup_requires_complete_candidate_list_before_delete(agent, monkeypatch):
-    def allow_preflight(path, operation):  # noqa: ANN001, ARG001
-        return SimpleNamespace(allowed=True, rule_id="test", reason="ok")
-
+    allow_preflight = lambda path, operation: SimpleNamespace(allowed=True, rule_id="test", reason="ok")
     monkeypatch.setattr(
         "kyagent.mcp.tools.filesystem.classify_write_preflight",
         allow_preflight,
@@ -624,9 +562,7 @@ def test_file_cleanup_requires_complete_candidate_list_before_delete(agent, monk
 
 
 def test_file_cleanup_allows_candidate_execute_verify_sequence(agent, monkeypatch):
-    def allow_preflight(path, operation):  # noqa: ANN001, ARG001
-        return SimpleNamespace(allowed=True, rule_id="test", reason="ok")
-
+    allow_preflight = lambda path, operation: SimpleNamespace(allowed=True, rule_id="test", reason="ok")
     monkeypatch.setattr(
         "kyagent.mcp.tools.filesystem.classify_write_preflight",
         allow_preflight,

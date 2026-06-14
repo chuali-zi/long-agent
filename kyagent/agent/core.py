@@ -29,13 +29,6 @@ from kyagent.agent.scope import (
     normalize_abs_path,
     path_is_within,
 )
-from kyagent.agent.planning_contract import (
-    PLAN_CONTRACT_SYSTEM_APPENDIX,
-    PLAN_SOURCE_LEGACY_INFERRED,
-    choose_plan_candidate,
-    strip_plan_contract_from_assistant,
-    wrap_tools_with_plan_contract,
-)
 from kyagent.agent.completion import assess_file_cleanup_completion
 from kyagent.safety.write_preflight import categorize_cleanup_candidate
 from kyagent.audit.logger import AuditLogger
@@ -44,7 +37,7 @@ from kyagent.config import Config, load_config
 from kyagent.executor.proxy import ExecutionProxy
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
 from kyagent.progress import ProgressCallback, ProgressEvent, noop_progress
-from kyagent.planner import PlanSnapshot, PlanStore
+from kyagent.planner import PlanSnapshot, PlanStore, PlanTodoItem
 from kyagent.mcp.tools.pipeline import (
     PipelineError,
     check_safety,
@@ -471,8 +464,6 @@ class Agent:
                 "也不要调用 ask_user_choice 做执行确认；应直接调用具体修复工具，"
                 "由 Agent 的 safety/write preflight 决定是否放行。"
             )
-        self._turn_system_prompt = self.system_prompt + PLAN_CONTRACT_SYSTEM_APPENDIX
-        self._tools_for_llm = wrap_tools_with_plan_contract(self.registry.to_anthropic_tools())
         self._run_lock = threading.RLock()
         self._active_run_thread_id: int | None = None
         # 持久线程池：避免每多工具回合都付一次 thread spawn 的固定开销，
@@ -638,7 +629,7 @@ class Agent:
         self.messages.append({"role": "user", "content": effective_input})
         remediation_scope = RemediationScope.from_user_text(effective_input)
         self._file_remediation_checklist = _FileRemediationChecklist.from_user_text(effective_input)
-        turn_system_prompt = self._turn_system_prompt
+        turn_system_prompt = self.system_prompt
         if remediation_scope.services or remediation_scope.actions or remediation_scope.resource_types:
             turn_system_prompt += (
                 "\n\n## 当前范围模型\n"
@@ -651,7 +642,7 @@ class Agent:
                 "未扫描过的目录不要说“没有/cache/不存在”。"
             )
 
-        tools_for_llm = self._tools_for_llm
+        tools_for_llm = self.registry.to_anthropic_tools()
         if plan is not None:
             plan = self._set_plan_step(
                 trace, plan, "receive", "complete", "Request accepted",
@@ -911,65 +902,54 @@ class Agent:
                                       tool_iterations=iterations, denied=denied, notes=notes,
                                       plan_id=plan.plan_id if plan else None)
 
-            plan_candidate = choose_plan_candidate(
-                texts=assistant.texts(),
-                tool_uses=tool_uses,
-                tool_lookup=self.registry.get,
-            )
-            if plan_candidate is None:
-                notes.append("模型在工具调用前未提供可解析的运行计划，已阻止本轮行动")
-                payload = {
-                    "event": "plan_required",
-                    "reason": "tool_use_without_runtime_plan",
-                    "tool_calls": [t.name for t in tool_uses],
-                    "plan_id": plan.plan_id if plan else None,
-                }
-                self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                self._emit(ProgressEvent(
-                    kind="plan_required",
-                    text="工具调用前必须通过 kyagent_plan.items 或 TODO 文本提供计划",
-                    meta=payload,
-                ))
-                if plan is not None:
-                    plan = self._set_plan_step(
-                        trace, plan, "reason", "running",
-                        "Blocked tool calls until a runtime plan is provided",
-                        event_kind="plan_step_update",
-                    )
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        "系统反馈：你刚才准备调用工具，但没有提供可解析的运行计划。"
-                        "请在工具参数里包含 `kyagent_plan: {\"items\": [...]}`，"
-                        "或先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
-                        "然后再发起必要的工具调用。"
-                    ),
-                })
-                continue
-
-            todos = plan_candidate.todos
-            payload = {
-                "event": plan_candidate.event,
-                "reason": "runtime_plan_gate",
-                "source": plan_candidate.source,
-                "detail": plan_candidate.detail,
-                "tool_calls": [t.name for t in tool_uses],
-                "plan_id": plan.plan_id if plan else None,
-            }
-            if plan_candidate.source == PLAN_SOURCE_LEGACY_INFERRED:
-                notes.append("模型工具调用缺少显式运行计划，已启用 legacy fallback 推导计划")
-                event_text = "已按 legacy fallback 从工具调用推导运行计划"
-            else:
-                event_text = "已接收工具调用前运行计划"
-            self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-            self._emit(ProgressEvent(
-                kind="plan_step_update",
-                text=event_text,
-                meta=payload,
-            ))
-
-            assistant = strip_plan_contract_from_assistant(assistant)
-            tool_uses = assistant.tool_uses()
+            todos = self._extract_todo_plan(assistant.texts())
+            if not todos:
+                todos = self._synthesize_todo_plan(tool_uses)
+                if todos:
+                    repaired_text = self._todo_items_to_text(todos)
+                    assistant.blocks.insert(0, TextBlock(text=repaired_text))
+                    notes.append("模型工具调用缺少 todo 计划，已根据 tool_call 自动补齐")
+                    payload = {
+                        "event": "plan_auto_repaired",
+                        "reason": "tool_use_without_todo_plan",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_step_update",
+                        text="已根据工具调用自动补齐 TODO 计划",
+                        meta=payload,
+                    ))
+                else:
+                    notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
+                    payload = {
+                        "event": "plan_required",
+                        "reason": "tool_use_without_todo_plan",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_required",
+                        text="工具调用前必须先给出 TODO 计划",
+                        meta=payload,
+                    ))
+                    if plan is not None:
+                        plan = self._set_plan_step(
+                            trace, plan, "reason", "running",
+                            "Blocked tool calls until a todo plan is provided",
+                            event_kind="plan_step_update",
+                        )
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
+                            "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
+                            "然后再发起必要的工具调用。"
+                        ),
+                    })
+                    continue
 
             if plan is not None and self.plan_store is not None:
                 plan = self.plan_store.replace_todos(plan.plan_id, todos)
@@ -1072,6 +1052,72 @@ class Agent:
             kind="plan_snapshot",
             text=plan.title,
             meta={"plan": snapshot, "plan_id": plan.plan_id},
+        ))
+
+    _TODO_LINE_RE = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:TODO|Todo|todo|PLAN|Plan|plan|任务|步骤)\s*"
+        r"\d{1,2}\s*[:：.)、-]\s*(.+?)\s*$"
+    )
+    _CHECKBOX_TODO_RE = re.compile(r"^\s*[-*]\s*\[[ xX-]\]\s*(.+?)\s*$")
+
+    def _extract_todo_plan(self, texts: list[str]) -> list[PlanTodoItem]:
+        items: list[PlanTodoItem] = []
+        for text in texts:
+            for line in text.splitlines():
+                match = self._TODO_LINE_RE.match(line) or self._CHECKBOX_TODO_RE.match(line)
+                if not match:
+                    continue
+                content = match.group(1).strip()
+                if not content:
+                    continue
+                priority = "high" if self._todo_looks_high_priority(content) else "medium"
+                status = "in_progress" if not items else "pending"
+                items.append(PlanTodoItem(
+                    todo_id=f"todo-{len(items) + 1}",
+                    content=content,
+                    status=status,
+                    priority=priority,
+                ))
+        return items[:20]
+
+    def _synthesize_todo_plan(self, tool_uses: list[ToolUseBlock]) -> list[PlanTodoItem]:
+        items: list[PlanTodoItem] = []
+        for tu in tool_uses[:12]:
+            tool = self.registry.get(tu.name)
+            if tool is not None and tool.read_only:
+                content = f"调用只读工具 {tu.name} 感知当前系统状态。"
+            elif tool is not None:
+                content = f"在安全校验后调用变更工具 {tu.name} 处理已确认目标。"
+            else:
+                content = f"校验并调用工具 {tu.name}。"
+            priority = "high" if tool is not None and not tool.read_only else "medium"
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{len(items) + 1}",
+                content=content,
+                status="in_progress" if not items else "pending",
+                priority=priority,
+            ))
+        if items:
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{len(items) + 1}",
+                content="根据工具结果验证影响范围并返回结论。",
+                status="pending",
+                priority="medium",
+            ))
+        return items[:20]
+
+    @staticmethod
+    def _todo_items_to_text(items: list[PlanTodoItem]) -> str:
+        return "\n".join(
+            f"TODO {idx}: {item.content}"
+            for idx, item in enumerate(items, start=1)
+        )
+
+    def _todo_looks_high_priority(self, content: str) -> bool:
+        lowered = content.lower()
+        return any(token in lowered for token in (
+            "high", "critical", "危险", "高危", "变更", "重启", "删除", "清空",
+            "restart", "remove", "truncate", "kill",
         ))
 
     def _set_plan_step(
