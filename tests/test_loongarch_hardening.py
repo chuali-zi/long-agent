@@ -10,15 +10,10 @@ from kyagent.mcp.tools import package as package_mod
 from kyagent.mcp.tools.base import ToolError
 from kyagent.mcp.tools.pkg_family import PkgFamily, set_pkg_family_for_tests
 from kyagent.mcp.tools.loongarch import LaWorldCheckTool
+from tests.path_helpers import bash_path as _bash_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _bash_path(path: Path) -> str:
-    resolved = path.resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    return f"/mnt/{drive}{resolved.as_posix()[2:]}"
 
 
 def require_usable_bash() -> None:

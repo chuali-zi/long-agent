@@ -98,6 +98,14 @@ case "$COMMAND" in
       printf '[kyagent] pytest is missing from %s; installing dev/test dependencies...\n' "$ROOT/.venv" >&2
       bash "$SCRIPT_DIR/install.sh" --dev
     fi
+    if ! "$ROOT/.venv/bin/python" - <<'PY' >/dev/null 2>&1; then
+import fastapi  # noqa: F401
+import uvicorn  # noqa: F401
+PY
+      require_script_readable "$SCRIPT_DIR/install.sh"
+      printf '[kyagent] Web test dependencies missing; installing .[web]...\n' "$ROOT/.venv" >&2
+      "$ROOT/.venv/bin/pip" install -e ".[web]" >/dev/null
+    fi
     exec "$ROOT/.venv/bin/python" -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider "$@"
     ;;
   permissions)

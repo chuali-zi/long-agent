@@ -48,8 +48,12 @@ read_secret_file() {
   [[ -r "$key_file" ]] || die "cannot read --deepseek-key-file: $key_file"
   DEEPSEEK_KEY="$(cat -- "$key_file")"
   DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\r'}"
+  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\n'}"
   if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
     die "DEEPSEEK_API_KEY file must contain exactly one line"
+  fi
+  if [[ -z "$DEEPSEEK_KEY" ]]; then
+    die "DEEPSEEK_API_KEY file must not be empty: $key_file"
   fi
 }
 
@@ -99,8 +103,15 @@ id "$KYAGENT_USER" >/dev/null 2>&1 || die "runtime account '$KYAGENT_USER' does 
 if [[ -n "$DEEPSEEK_KEY_FILE" ]]; then
   read_secret_file "$DEEPSEEK_KEY_FILE"
 fi
-if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
-  die "DEEPSEEK_API_KEY must not contain newlines"
+if [[ -n "$DEEPSEEK_KEY" ]]; then
+  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\r'}"
+  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\n'}"
+  if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
+    die "DEEPSEEK_API_KEY must not contain newlines"
+  fi
+  if [[ -z "$DEEPSEEK_KEY" ]]; then
+    die "DEEPSEEK_API_KEY must not be empty"
+  fi
 fi
 
 write_shell_assignment() {
@@ -157,6 +168,15 @@ chmod 0600 "$tmp"
 
 install -m 0640 -o root -g "$KYAGENT_USER" "$tmp" "$ENV_FILE"
 rm -f "$tmp"
+
+if [[ -n "$DEEPSEEK_KEY" ]]; then
+  if ! grep -q '^DEEPSEEK_API_KEY=' "$ENV_FILE"; then
+    die "env file missing DEEPSEEK_API_KEY after write: $ENV_FILE"
+  fi
+  if ! sudo -u "$KYAGENT_USER" bash -c "set -a; source $(printf '%q' "$ENV_FILE"); set +a; [[ -n \"\${DEEPSEEK_API_KEY:-}\" ]]"; then
+    die "runtime account cannot read DEEPSEEK_API_KEY from $ENV_FILE"
+  fi
+fi
 
 log "wrote $ENV_FILE"
 log "verify: sudo -u $KYAGENT_USER test -r $ENV_FILE"

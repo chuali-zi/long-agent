@@ -157,14 +157,22 @@ done
 
 trap 'die "failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
 
+normalize_deepseek_key() {
+  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\r'}"
+  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\n'}"
+  if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
+    die "DEEPSEEK_API_KEY must contain exactly one line"
+  fi
+  if [[ -z "$DEEPSEEK_KEY" ]]; then
+    die "DEEPSEEK_API_KEY must not be empty"
+  fi
+}
+
 load_deepseek_key_file() {
   local key_file="$1"
   [[ -f "$key_file" && -r "$key_file" ]] || die "cannot read --deepseek-key-file: $key_file"
   DEEPSEEK_KEY="$(cat -- "$key_file")"
-  DEEPSEEK_KEY="${DEEPSEEK_KEY%$'\r'}"
-  if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
-    die "DEEPSEEK_API_KEY file must contain exactly one line"
-  fi
+  normalize_deepseek_key
 }
 
 configure_options() {
@@ -185,6 +193,9 @@ configure_options() {
     load_deepseek_key_file "$DEEPSEEK_KEY_FILE"
   elif [[ "$INLINE_DEEPSEEK_KEY_SET" == "1" ]]; then
     log "warning: --deepseek-key is not recommended; prefer --deepseek-key-file"
+    normalize_deepseek_key
+  elif [[ -n "$DEEPSEEK_KEY" ]]; then
+    normalize_deepseek_key
   fi
 }
 
@@ -458,9 +469,6 @@ write_env_file() {
   local env_dir="/etc/kyagent"
   local env_file="$env_dir/env"
   local tmp
-  if [[ "$DEEPSEEK_KEY" == *$'\n'* || "$DEEPSEEK_KEY" == *$'\r'* ]]; then
-    die "DEEPSEEK_API_KEY must not contain newlines"
-  fi
   tmp="$(mktemp)"
   chmod 0600 "$tmp"
 
@@ -496,6 +504,24 @@ write_env_file() {
   run install -m 0640 -o root -g "$KYAGENT_USER" "$tmp" "$env_file"
   rm -f "$tmp"
   log "wrote $env_file"
+  verify_deepseek_env "$env_file"
+}
+
+verify_deepseek_env() {
+  local env_file="$1"
+  if [[ "$DRY_RUN" == "1" || "$SKIP_SUDOERS" == "1" ]]; then
+    return 0
+  fi
+  if [[ -z "$DEEPSEEK_KEY" ]]; then
+    return 0
+  fi
+  if ! grep -q '^DEEPSEEK_API_KEY=' "$env_file"; then
+    die "env file missing DEEPSEEK_API_KEY after write: $env_file"
+  fi
+  if ! sudo -u "$KYAGENT_USER" bash -c "set -a; source $(printf '%q' "$env_file"); set +a; [[ -n \"\${DEEPSEEK_API_KEY:-}\" ]]"; then
+    die "runtime account cannot read DEEPSEEK_API_KEY from $env_file"
+  fi
+  log "verified DEEPSEEK_API_KEY in $env_file"
 }
 
 run_selfcheck() {
@@ -545,9 +571,12 @@ PY
       KYAGENT_AUDIT_JSONL=/tmp/kyagent-audit.jsonl \
       KYAGENT_PLAN_DB=/tmp/kyagent-plans.db \
       DEEPSEEK_API_KEY="${DEEPSEEK_KEY:-${DEEPSEEK_API_KEY:-}}" \
-      "$ky" ask "ping" >/dev/null
+      timeout 60 "$ky" ask "ping" >/dev/null
     else
-      sudo -u "$KYAGENT_USER" bash -c "set -a; source /etc/kyagent/env; set +a; '$ky' ask 'ping' >/dev/null"
+      if ! sudo -u "$KYAGENT_USER" bash -c "set -a; source /etc/kyagent/env; set +a; [[ -n \"\${DEEPSEEK_API_KEY:-}\" ]]"; then
+        die "DeepSeek selfcheck aborted: DEEPSEEK_API_KEY missing in /etc/kyagent/env"
+      fi
+      timeout 60 sudo -u "$KYAGENT_USER" bash -c "set -a; source /etc/kyagent/env; set +a; '$ky' ask 'ping' >/dev/null"
     fi
   fi
 }

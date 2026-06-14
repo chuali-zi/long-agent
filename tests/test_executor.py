@@ -1,6 +1,7 @@
 """ExecutionProxy 行为测试。"""
 from __future__ import annotations
 
+import getpass
 import sys
 
 import pytest
@@ -11,7 +12,7 @@ from kyagent.executor.sandbox import SandboxConfig, build_clean_env
 
 def _proxy() -> ExecutionProxy:
     return ExecutionProxy(SandboxConfig(
-        account="kyagent",
+        account=getpass.getuser(),
         timeout=2.0,
         output_cap=2048,
     ))
