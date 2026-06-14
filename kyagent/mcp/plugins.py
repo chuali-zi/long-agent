@@ -15,7 +15,9 @@ def _entry_points() -> list[Any]:
     points = metadata.entry_points()
     if hasattr(points, "select"):
         return list(points.select(group=ENTRY_POINT_GROUP))
-    return [point for point in points if point.group == ENTRY_POINT_GROUP]
+    if isinstance(points, dict):
+        return list(points.get(ENTRY_POINT_GROUP, []))
+    return [point for point in points if getattr(point, "group", None) == ENTRY_POINT_GROUP]
 
 
 def _load_plugin(registry: ToolRegistry, point: Any) -> None:
