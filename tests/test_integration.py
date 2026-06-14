@@ -18,7 +18,11 @@ from kyagent.executor.proxy import ExecutionResult
 class _NoPlanToolBackend(LlmBackend):
     name = "no_plan_tool"
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     def chat(self, system, messages, tools):
+        self.calls += 1
         return AssistantMessage(
             blocks=[
                 TextBlock(text="我直接查一下。"),
@@ -341,18 +345,25 @@ def test_low_risk_query_flows_through(agent):
 
 
 def test_tool_use_without_runtime_plan_uses_visible_legacy_fallback(agent):
-    agent.llm = _NoPlanToolBackend()
+    backend = _NoPlanToolBackend()
+    agent.llm = backend
     agent.cfg.agent.max_iterations = 2
     result = agent.ask("查下 CPU 占用最高的进程")
+    assert backend.calls == 2
     kinds = [e.kind.value for e in result.trace.events]
     assert EventKind.LLM_THOUGHT.value in kinds
     assert EventKind.PLAN_UPDATE.value in kinds
     assert EventKind.TOOL_REQUEST.value in kinds
     assert EventKind.EXECUTION.value in kinds
+    retries = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_contract_retry"
+    ]
     inferred = [
         e for e in result.trace.events
         if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_legacy_inferred"
     ]
+    assert len(retries) == 1
     assert inferred
     assert inferred[0].payload["source"] == "legacy_inferred"
     assert result.plan_id is not None

@@ -304,10 +304,6 @@ class _FileRemediationChecklist:
                 "Before deleting/truncating, enumerate these roots with read-only tools: "
                 + ", ".join(missing_roots)
             )
-        if target in self.candidate_paths and self.candidate_labels.get(target) == "delete":
-            return ""
-        if target in self.candidate_paths and self.candidate_labels.get(target) != "unknown":
-            return ""
         if target in extract_absolute_paths(user_text):
             return ""
         if not self.scope.path_in_scope(target):
@@ -315,6 +311,10 @@ class _FileRemediationChecklist:
                 "file cleanup checklist blocked this write: target is not in current scope. "
                 f"Report it as 不在本次范围 instead of acting: {target}"
             )
+        if target in self.candidate_paths and self.candidate_labels.get(target) == "delete":
+            return ""
+        if target in self.candidate_paths and self.candidate_labels.get(target) != "unknown":
+            return ""
         return (
             "file cleanup checklist blocked this write: target was not present in the "
             "candidate list from prior read-only evidence. First enumerate the exact file "
@@ -568,6 +568,9 @@ class Agent:
         evidence_gate_required = self._is_os_question(user_input)
         evidence_gate_forced_once = False
         evidence_gate_extra_summary = False
+        plan_contract_retry_sent = False
+        legacy_plan_mode = False
+        legacy_plan_notice_emitted = False
 
         # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
         # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
@@ -915,7 +918,49 @@ class Agent:
                 texts=assistant.texts(),
                 tool_uses=tool_uses,
                 tool_lookup=self.registry.get,
+                allow_legacy=legacy_plan_mode,
             )
+            if plan_candidate is None:
+                if not plan_contract_retry_sent:
+                    plan_contract_retry_sent = True
+                    notes.append("模型工具调用缺少显式运行计划，已要求按 kyagent_plan 合约重试")
+                    payload = {
+                        "event": "plan_contract_retry",
+                        "reason": "tool_use_without_explicit_runtime_plan",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_required",
+                        text="工具调用缺少 kyagent_plan.items，已要求模型重试",
+                        meta=payload,
+                    ))
+                    if plan is not None:
+                        plan = self._set_plan_step(
+                            trace, plan, "reason", "running",
+                            "Retrying tool call because runtime plan contract was missing",
+                            event_kind="plan_step_update",
+                        )
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "系统反馈：你刚才准备调用工具，但工具参数缺少结构化运行计划。"
+                            "请重试本轮工具调用，并在每个工具参数里加入 "
+                            "`kyagent_plan: {\"items\": [\"...\", \"...\"]}`。"
+                            "即使不输出任何正文，也必须把计划放进 tool arguments。"
+                        ),
+                    })
+                    continue
+
+                legacy_plan_mode = True
+                plan_candidate = choose_plan_candidate(
+                    texts=assistant.texts(),
+                    tool_uses=tool_uses,
+                    tool_lookup=self.registry.get,
+                    allow_legacy=True,
+                )
+
             if plan_candidate is None:
                 notes.append("模型在工具调用前未提供可解析的运行计划，已阻止本轮行动")
                 payload = {
@@ -957,8 +1002,14 @@ class Agent:
                 "plan_id": plan.plan_id if plan else None,
             }
             if plan_candidate.source == PLAN_SOURCE_LEGACY_INFERRED:
-                notes.append("模型工具调用缺少显式运行计划，已启用 legacy fallback 推导计划")
-                event_text = "已按 legacy fallback 从工具调用推导运行计划"
+                if not legacy_plan_notice_emitted:
+                    notes.append("模型工具调用缺少显式运行计划，已启用 legacy fallback 推导计划")
+                    legacy_plan_notice_emitted = True
+                    event_text = "已按 legacy fallback 从工具调用推导运行计划"
+                else:
+                    payload["event"] = "plan_declared"
+                    payload["detail"] = "legacy_fallback_session_reuse"
+                    event_text = "legacy fallback 计划模式继续生效"
             else:
                 event_text = "已接收工具调用前运行计划"
             self.audit.event(trace, EventKind.PLAN_UPDATE, payload)

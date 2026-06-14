@@ -38,16 +38,19 @@ is the primary contract for tool calls.
 _PLAN_CONTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Required kyagent runtime plan for this assistant turn. It is consumed "
-        "by the Agent before tool execution and stripped before the underlying "
-        "OS tool runs."
+        "REQUIRED kyagent runtime plan for this assistant turn. Tool calls that "
+        "omit this object are retried before execution. The Agent consumes it "
+        "before tool execution and strips it before the underlying OS tool runs."
     ),
     "required": ["items"],
     "additionalProperties": False,
     "properties": {
         "items": {
             "type": "array",
-            "description": "Ordered action plan for the tool calls in this assistant turn.",
+            "description": (
+                "REQUIRED ordered action plan for the tool calls in this assistant turn. "
+                "Do not rely on assistant text; put the plan here."
+            ),
             "minItems": 1,
             "maxItems": 12,
             "items": {"type": "string", "minLength": 3, "maxLength": 240},
@@ -198,12 +201,12 @@ def choose_plan_candidate(
     texts: list[str],
     tool_uses: list[ToolUseBlock],
     tool_lookup: Callable[[str], Any | None],
+    allow_legacy: bool = True,
 ) -> PlanCandidate | None:
-    return (
-        extract_text_todos(texts)
-        or extract_tool_contract_todos(tool_uses)
-        or infer_legacy_todos(tool_uses, tool_lookup)
-    )
+    explicit = extract_text_todos(texts) or extract_tool_contract_todos(tool_uses)
+    if explicit is not None or not allow_legacy:
+        return explicit
+    return infer_legacy_todos(tool_uses, tool_lookup)
 
 
 def _coerce_plan_items(raw: Any) -> list[str]:
