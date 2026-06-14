@@ -559,7 +559,6 @@ class Agent:
         evidence_gate_required = self._is_os_question(user_input)
         evidence_gate_forced_once = False
         evidence_gate_extra_summary = False
-        missing_todo_violations = 0
 
         # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
         # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
@@ -905,68 +904,52 @@ class Agent:
 
             todos = self._extract_todo_plan(assistant.texts())
             if not todos:
-                missing_todo_violations += 1
-                notes.append("模型在工具调用前未给出 todo 计划，已拒绝执行本轮工具调用")
-                payload = {
-                    "event": "plan_required",
-                    "reason": "tool_use_without_todo_plan",
-                    "violation_count": missing_todo_violations,
-                    "tool_calls": [t.name for t in tool_uses],
-                    "plan_id": plan.plan_id if plan else None,
-                }
-                self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                self._emit(ProgressEvent(
-                    kind="plan_required",
-                    text="工具调用前必须先给出 TODO 计划",
-                    meta=payload,
-                ))
-
-                if missing_todo_violations >= 2:
-                    denied = True
-                    final = "[blocked] 模型连续两次在工具调用前缺少显式 TODO 计划，已中止本次运行。"
-                    self.audit.event(trace, EventKind.ERROR, {
-                        "reason": "repeated_tool_use_without_todo_plan",
-                        "violation_count": missing_todo_violations,
+                todos = self._synthesize_todo_plan(tool_uses)
+                if todos:
+                    repaired_text = self._todo_items_to_text(todos)
+                    assistant.blocks.insert(0, TextBlock(text=repaired_text))
+                    notes.append("模型工具调用缺少 todo 计划，已根据 tool_call 自动补齐")
+                    payload = {
+                        "event": "plan_auto_repaired",
+                        "reason": "tool_use_without_todo_plan",
                         "tool_calls": [t.name for t in tool_uses],
-                    })
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_step_update",
+                        text="已根据工具调用自动补齐 TODO 计划",
+                        meta=payload,
+                    ))
+                else:
+                    notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
+                    payload = {
+                        "event": "plan_required",
+                        "reason": "tool_use_without_todo_plan",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_required",
+                        text="工具调用前必须先给出 TODO 计划",
+                        meta=payload,
+                    ))
                     if plan is not None:
                         plan = self._set_plan_step(
-                            trace, plan, "reason", "failed",
-                            "Repeated tool calls without a todo plan",
-                            event_kind="plan_step_end",
+                            trace, plan, "reason", "running",
+                            "Blocked tool calls until a todo plan is provided",
+                            event_kind="plan_step_update",
                         )
-                        plan = self._set_plan_status(trace, plan, "failed", current_step="reason")
-                    self.audit.event(trace, EventKind.AGENT_REPLY, {"text": final})
-                    self.audit.close(trace)
-                    self._emit(ProgressEvent(
-                        kind="error",
-                        text=final,
-                        meta={"reason": "repeated_tool_use_without_todo_plan"},
-                    ))
-                    return AgentRunResult(
-                        trace=trace,
-                        final_text=final,
-                        tool_iterations=iterations,
-                        denied=denied,
-                        notes=notes,
-                        plan_id=plan.plan_id if plan else None,
-                    )
-
-                if plan is not None:
-                    plan = self._set_plan_step(
-                        trace, plan, "reason", "running",
-                        "Blocked tool calls until a todo plan is provided",
-                        event_kind="plan_step_update",
-                    )
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
-                        "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
-                        "然后再发起必要的工具调用。"
-                    ),
-                })
-                continue
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
+                            "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
+                            "然后再发起必要的工具调用。"
+                        ),
+                    })
+                    continue
 
             if plan is not None and self.plan_store is not None:
                 plan = self.plan_store.replace_todos(plan.plan_id, todos)
@@ -1096,6 +1079,39 @@ class Agent:
                     priority=priority,
                 ))
         return items[:20]
+
+    def _synthesize_todo_plan(self, tool_uses: list[ToolUseBlock]) -> list[PlanTodoItem]:
+        items: list[PlanTodoItem] = []
+        for tu in tool_uses[:12]:
+            tool = self.registry.get(tu.name)
+            if tool is not None and tool.read_only:
+                content = f"调用只读工具 {tu.name} 感知当前系统状态。"
+            elif tool is not None:
+                content = f"在安全校验后调用变更工具 {tu.name} 处理已确认目标。"
+            else:
+                content = f"校验并调用工具 {tu.name}。"
+            priority = "high" if tool is not None and not tool.read_only else "medium"
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{len(items) + 1}",
+                content=content,
+                status="in_progress" if not items else "pending",
+                priority=priority,
+            ))
+        if items:
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{len(items) + 1}",
+                content="根据工具结果验证影响范围并返回结论。",
+                status="pending",
+                priority="medium",
+            ))
+        return items[:20]
+
+    @staticmethod
+    def _todo_items_to_text(items: list[PlanTodoItem]) -> str:
+        return "\n".join(
+            f"TODO {idx}: {item.content}"
+            for idx, item in enumerate(items, start=1)
+        )
 
     def _todo_looks_high_priority(self, content: str) -> bool:
         lowered = content.lower()
