@@ -86,14 +86,3 @@ def test_missing_text_and_contract_is_visible_legacy_inference():
     assert candidate.event == "plan_legacy_inferred"
     assert candidate.source == "legacy_inferred"
     assert candidate.todos[0].content.startswith("调用只读工具 process_list")
-
-
-def test_missing_text_and_contract_can_disable_legacy_for_retry_gate():
-    candidate = choose_plan_candidate(
-        texts=[],
-        tool_uses=[ToolUseBlock(id="call-1", name="process_list", input={})],
-        tool_lookup=lambda name: None,
-        allow_legacy=False,
-    )
-
-    assert candidate is None

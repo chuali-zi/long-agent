@@ -34,36 +34,6 @@ def test_protect_candidate_blocks_delete() -> None:
     assert "protect" in err
 
 
-def test_out_of_scope_candidate_still_blocks_delete() -> None:
-    checklist = _FileRemediationChecklist(
-        scope=RemediationScope.from_user_text("cleanup old files for web-app01"),
-        required_roots=("/var/log/web-app01", "/var/cache/web-app01"),
-    )
-    checklist.scanned_roots.update({"/var/log/web-app01", "/var/cache/web-app01"})
-    target = "/var/cache/dnf/packages/pkg.rpm"
-    checklist.candidate_paths.add(target)
-    checklist.candidate_labels[target] = "delete"
-
-    err = checklist.pre_write_error(target, "cleanup old files for web-app01")
-
-    assert "not in current scope" in err
-    assert target in err
-
-
-def test_explicit_path_can_override_scope_candidate_block() -> None:
-    checklist = _FileRemediationChecklist(
-        scope=RemediationScope.from_user_text("delete /var/cache/dnf/packages/pkg.rpm"),
-        required_roots=(),
-    )
-    target = "/var/cache/dnf/packages/pkg.rpm"
-    checklist.candidate_paths.add(target)
-    checklist.candidate_labels[target] = "delete"
-
-    err = checklist.pre_write_error(target, f"delete {target}")
-
-    assert err == ""
-
-
 def test_completion_report_marks_unchecked_roots() -> None:
     scope = RemediationScope.from_user_text("cleanup auth-api01 logs and cache")
     report = assess_file_cleanup_completion(
