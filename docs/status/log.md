@@ -1,5 +1,12 @@
 # 工作日志
 
+## 2026-06-15 23:55:00 +08:00
+
+- 完成最后一轮比赛提交文档复核修订：更新功能测试报告为 `831 passed, 3 skipped, 10 warnings, 0 failed`，明确 skipped 原因；保留 RealOps 9 bench 全部 PERFECT 的真实结论。
+- 更新性能报告为最新 `benchmarks/bench_ask.py` 复测结果：`ask_p50 +66.5%`、`ask_p95 +30.5%` 未达标，`guardrail_p50 -83.2%`、`audit_total -71.8%` 达标，`overall_pass=false`。
+- 新增根目录 `FINAL_LOONGARCH_CHECKLIST.md`，列出 LoongArch64 + 麒麟 V11 实机最终验收步骤、通过/失败标准、密钥与交付包检查、Web/CLI/pytest/RealOps/性能/权限复核要求。
+- 明确不将兼容环境结果冒充目标平台实机证据；提交前需按清单在目标机补齐最终验收记录。
+
 ## 2026-06-11 21:18:12 +08:00
 
 - 根据 `fail_analysis` 完成 RealOps 修复能力补齐，未修改 `benchmarks/`：新增 stale lock、stale Unix socket、cron.d 禁用、日志目录权限收紧四类专用工具，保持“不开放通用 rm/chmod/mv”的安全边界。

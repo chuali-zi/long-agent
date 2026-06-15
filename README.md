@@ -76,7 +76,7 @@ sudo -l -U kyagent
 推荐把 DeepSeek key 放进 root 可读的临时密钥文件，再让脚本写入 `/etc/kyagent/env`：
 
 ```bash
-sudo sh -c 'printf "%s\n" "sk-your-deepseek-key" > /root/deepseek.key'
+sudo sh -c 'printf "%s\n" "your-deepseek-api-key" > /root/deepseek.key'
 sudo chmod 600 /root/deepseek.key
 sudo bash /opt/kyagent/scripts/kyagent.sh prod-env --deepseek-key-file /root/deepseek.key
 ```
@@ -96,7 +96,7 @@ KYAGENT_EXECUTOR_ACCOUNT=kyagent
 KYAGENT_AUDIT_DB=/var/lib/kyagent/audit.db
 KYAGENT_AUDIT_JSONL=/var/log/kyagent/audit.jsonl
 KYAGENT_PLAN_DB=/var/lib/kyagent/plans.db
-DEEPSEEK_API_KEY=sk-your-deepseek-key
+DEEPSEEK_API_KEY=your-deepseek-api-key
 KYAGENT_WEB_ADMIN_TOKEN=admin123
 ```
 
