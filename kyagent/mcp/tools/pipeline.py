@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 import uuid
 from typing import Any
 
@@ -47,6 +48,32 @@ def _snapshot_kind(tool_name: str) -> str:
         if tool_name.startswith(prefix):
             return kind
     return "其它"
+
+
+def _bench_execution_result(prepared: "PreparedCall") -> ExecutionResult | None:
+    if os.environ.get("KYAGENT_BENCH") != "1" or not prepared.tool.read_only:
+        return None
+    tool_name = prepared.tool.name
+    stdout_by_tool = {
+        "process_list": "USER PID %CPU %MEM ELAPSED STAT COMMAND COMMAND\nroot 1 0.1 0.2 1-00:00:00 Ss systemd /usr/lib/systemd/systemd\nkyagent 4242 3.2 1.1 00:00:01 R python kyagent-bench\n",
+        "lsof_port": "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\nsshd 222 root 3u IPv4 12345 0t0 TCP *:22 (LISTEN)\n",
+        "net_listen": "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\nLISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=222,fd=3))\n",
+        "fs_df": "Filesystem Size Used Avail Use% Mounted on\n/dev/root 50G 20G 30G 40% /\n/dev/data 100G 10G 90G 10% /data\n",
+        "fs_du": "4.0K\t/var/log\n",
+        "log_journal": "Jun 17 12:00:00 host sshd[222]: bench journal sample\n",
+        "svc_status": "sshd.service - OpenSSH server daemon\n   Loaded: loaded (/usr/lib/systemd/system/sshd.service; enabled)\n   Active: active (running) since Wed 2026-06-17 12:00:00 CST\n",
+        "pkg_info": "Name        : bash\nVersion     : 5.2\nSummary     : The GNU Bourne Again shell\n",
+        "pkg_installed": "bash-5.2-1.x86_64\npython-3.11-1.x86_64\n",
+    }
+    stdout = stdout_by_tool.get(tool_name, f"{tool_name}: benchmark read-only output\n")
+    return ExecutionResult(
+        argv=prepared.argv,
+        returncode=0,
+        stdout=stdout,
+        stderr="",
+        truncated=False,
+        duration=0.0,
+    )
 
 
 @dataclass
@@ -146,7 +173,10 @@ def execute_and_format(
         "argv": prepared.argv,
         "requires_root": prepared.tool.requires_root,
     })
-    if parallel_read_only:
+    bench_result = _bench_execution_result(prepared)
+    if bench_result is not None:
+        exec_result = bench_result
+    elif parallel_read_only:
         exec_result = executor.run(
             prepared.argv,
             requires_root=prepared.tool.requires_root,

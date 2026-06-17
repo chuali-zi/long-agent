@@ -967,6 +967,10 @@ class MockBackend(LlmBackend):
     # MockBackend 用的 sleep 间隔（秒）；测试可 monkeypatch 调低
     _STREAM_CHUNK_DELAY: float = 0.01
 
+    def __init__(self):
+        self._tool_names_key: int | None = None
+        self._tool_names_cache: set[str] = set()
+
     def chat_stream(self, system, messages, tools, on_delta):
         """把 chat() 返回的 text 块切成 5-10 段逐块 on_delta，加微小 sleep
         以便 TUI 看见动画。tool_use 块不切，最终 AssistantMessage 与 chat() 同。
@@ -1022,7 +1026,7 @@ class MockBackend(LlmBackend):
             return AssistantMessage(blocks=[TextBlock(text=self._fallback_reply(text))])
 
         # 校验工具确实存在
-        names = {t["name"] for t in tools}
+        names = self._tool_names(tools)
         if tool_name not in names:
             return AssistantMessage(blocks=[
                 TextBlock(text=f"（mock）希望调用 {tool_name} 但该工具未注册，已退回文本回复。")
@@ -1040,6 +1044,13 @@ class MockBackend(LlmBackend):
         )
 
     # ---- 私有 ----------------------------------------------------------
+
+    def _tool_names(self, tools) -> set[str]:
+        key = id(tools)
+        if key != self._tool_names_key:
+            self._tool_names_key = key
+            self._tool_names_cache = {t["name"] for t in tools}
+        return self._tool_names_cache
 
     def _extract_user_text(self, messages: list[dict[str, Any]]) -> str:
         for m in reversed(messages):

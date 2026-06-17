@@ -207,7 +207,10 @@ class _FileRemediationChecklist:
 
     @classmethod
     def from_user_text(cls, text: str) -> "_FileRemediationChecklist":
-        scope = RemediationScope.from_user_text(text)
+        return cls.from_scope(RemediationScope.from_user_text(text))
+
+    @classmethod
+    def from_scope(cls, scope: RemediationScope) -> "_FileRemediationChecklist":
         roots = scope.search_roots(round=1)
         return cls(scope=scope, required_roots=tuple(roots))
 
@@ -454,6 +457,7 @@ class Agent:
         self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
         self._file_remediation_checklist: _FileRemediationChecklist | None = None
+        self._tools_for_llm = self.registry.to_anthropic_tools()
         self.system_prompt = SYSTEM_PROMPT
         if auto_approve_safe_remediation:
             self.system_prompt += (
@@ -628,7 +632,7 @@ class Agent:
 
         self.messages.append({"role": "user", "content": effective_input})
         remediation_scope = RemediationScope.from_user_text(effective_input)
-        self._file_remediation_checklist = _FileRemediationChecklist.from_user_text(effective_input)
+        self._file_remediation_checklist = _FileRemediationChecklist.from_scope(remediation_scope)
         turn_system_prompt = self.system_prompt
         if remediation_scope.services or remediation_scope.actions or remediation_scope.resource_types:
             turn_system_prompt += (
@@ -642,7 +646,7 @@ class Agent:
                 "未扫描过的目录不要说“没有/cache/不存在”。"
             )
 
-        tools_for_llm = self.registry.to_anthropic_tools()
+        tools_for_llm = self._tools_for_llm
         todo_plan_retry_pending = False
         todo_plan_retry_used = False
         if plan is not None:

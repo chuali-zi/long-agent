@@ -5,7 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -46,8 +46,8 @@ class OpenAIConfig(BaseModel):
     max_tokens: int = 20480
     temperature: float = 0.2
     api_key_env: str = "OPENAI_API_KEY"
-    base_url: str | None = None
-    organization: str | None = None
+    base_url: Optional[str] = None
+    organization: Optional[str] = None
 
 
 class DeepSeekConfig(BaseModel):
@@ -63,7 +63,7 @@ class DeepSeekConfig(BaseModel):
     effort: str = "high"
     api_key_env: str = "DEEPSEEK_API_KEY"
     # 留空则使用预设 https://api.deepseek.com；仅在使用第三方反代时填
-    base_url: str | None = None
+    base_url: Optional[str] = None
 
 
 class QwenConfig(BaseModel):
@@ -79,7 +79,7 @@ class QwenConfig(BaseModel):
     temperature: float = 0.2
     api_key_env: str = "DASHSCOPE_API_KEY"
     # 留空则用国内端点；海外用户填 https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-    base_url: str | None = None
+    base_url: Optional[str] = None
 
 
 class AgentConfig(BaseModel):
@@ -133,11 +133,11 @@ class SafetyConfig(BaseModel):
 
 class AuditConfig(BaseModel):
     database: str = "./var/audit.db"
-    jsonl_file: str | None = "./var/audit.jsonl"
+    jsonl_file: Optional[str] = "./var/audit.jsonl"
     retain_days: int = 90
     integrity_enabled: bool = False
     hmac_key_env: str = "KYAGENT_AUDIT_HMAC_KEY"
-    hmac_key_file: str | None = None
+    hmac_key_file: Optional[str] = None
     hmac_key_id: str = "local-v1"
 
 
