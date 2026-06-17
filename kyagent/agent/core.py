@@ -643,6 +643,8 @@ class Agent:
             )
 
         tools_for_llm = self.registry.to_anthropic_tools()
+        todo_plan_retry_pending = False
+        todo_plan_retry_used = False
         if plan is not None:
             plan = self._set_plan_step(
                 trace, plan, "receive", "complete", "Request accepted",
@@ -653,18 +655,29 @@ class Agent:
                 event_kind="plan_step_start",
             )
 
-        while iterations < self.cfg.agent.max_iterations or evidence_gate_extra_summary:
+        while (
+            iterations < self.cfg.agent.max_iterations
+            or evidence_gate_extra_summary
+            or todo_plan_retry_pending
+        ):
             extra_summary_iteration = (
                 evidence_gate_extra_summary
                 and iterations >= self.cfg.agent.max_iterations
             )
+            budget_reason = "loop"
+            if extra_summary_iteration:
+                budget_reason = "evidence_gate_summary"
+            elif todo_plan_retry_pending and iterations >= self.cfg.agent.max_iterations:
+                budget_reason = "todo_plan_retry"
             if evidence_gate_extra_summary:
                 evidence_gate_extra_summary = False
+            if todo_plan_retry_pending:
+                todo_plan_retry_pending = False
             iterations += 1
             budget_payload = {
                 "iteration": iterations,
                 "max_iterations": self.cfg.agent.max_iterations,
-                "reason": "evidence_gate_summary" if extra_summary_iteration else "loop",
+                "reason": budget_reason,
                 "plan_id": plan.plan_id if plan else None,
             }
             self.audit.event(trace, EventKind.BUDGET, budget_payload)
@@ -904,24 +917,9 @@ class Agent:
 
             todos = self._extract_todo_plan(assistant.texts())
             if not todos:
-                todos = self._synthesize_todo_plan(tool_uses)
-                if todos:
-                    repaired_text = self._todo_items_to_text(todos)
-                    assistant.blocks.insert(0, TextBlock(text=repaired_text))
-                    notes.append("模型工具调用缺少 todo 计划，已根据 tool_call 自动补齐")
-                    payload = {
-                        "event": "plan_auto_repaired",
-                        "reason": "tool_use_without_todo_plan",
-                        "tool_calls": [t.name for t in tool_uses],
-                        "plan_id": plan.plan_id if plan else None,
-                    }
-                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                    self._emit(ProgressEvent(
-                        kind="plan_step_update",
-                        text="已根据工具调用自动补齐 TODO 计划",
-                        meta=payload,
-                    ))
-                else:
+                if not todo_plan_retry_used:
+                    todo_plan_retry_used = True
+                    todo_plan_retry_pending = True
                     notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
                     payload = {
                         "event": "plan_required",
@@ -944,11 +942,89 @@ class Agent:
                     self.messages.append({
                         "role": "user",
                         "content": (
-                            "系统反馈：你刚才准备调用工具，但没有先给出显式 todo 计划。"
-                            "请先用 `TODO 1: ...`、`TODO 2: ...` 格式列出行动计划，"
-                            "然后再发起必要的工具调用。"
+                            "System feedback: 你刚才准备调用工具 "
+                            f"{', '.join(t.name for t in tool_uses)}，"
+                            "但没有在同一条 assistant 消息的文本部分先给出显式 todo 计划。"
+                            "本轮工具调用已被拒绝且未执行。请立即重发：先写 "
+                            "`TODO 1: ...`、`TODO 2: ...`（或 `1. ...`/`2. ...`），"
+                            "然后在同一条消息里发起必要的工具调用。不要只解释原因。"
                         ),
                     })
+                    continue
+
+                plan_only_text = ""
+                plan_only_todos_generated = False
+                try:
+                    plan_only = self.llm.chat(
+                        turn_system_prompt,
+                        self.messages + [{
+                            "role": "user",
+                            "content": (
+                                "System feedback: 上一轮仍然直接发起了工具调用但没有 TODO。"
+                                "现在不要调用任何工具，只输出 2-5 行显式 TODO 计划，格式必须是 "
+                                "`TODO 1: ...`、`TODO 2: ...`。"
+                            ),
+                        }],
+                        [],
+                    )
+                    plan_only_text = "\n".join(plan_only.texts()).strip()
+                    todos = self._extract_todo_plan(plan_only.texts())
+                except Exception as exc:  # noqa: BLE001
+                    notes.append(f"todo 计划专用重试失败: {exc}")
+                    self.audit.event(trace, EventKind.ERROR, {
+                        "reason": "todo_plan_retry_llm_error",
+                        "detail": str(exc),
+                    })
+
+                if todos:
+                    plan_only_todos_generated = True
+                    assistant.blocks.insert(0, TextBlock(text=plan_only_text))
+                    notes.append("模型在无工具计划轮生成 todo 计划")
+                    payload = {
+                        "event": "plan_generated_after_retry",
+                        "reason": "tool_use_without_todo_plan_recovered_by_plan_only_turn",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_step_update",
+                        text="模型已在无工具计划轮补交 TODO 计划",
+                        meta=payload,
+                    ))
+                else:
+                    todos = self._synthesize_todo_plan(tool_uses)
+                if todos:
+                    if not plan_only_todos_generated:
+                        repaired_text = self._todo_items_to_text(todos)
+                        assistant.blocks.insert(0, TextBlock(text=repaired_text))
+                        notes.append("模型计划专用重试后仍缺少 todo 计划，已根据 tool_call 兜底补齐")
+                        payload = {
+                            "event": "plan_auto_repaired_after_retry",
+                            "reason": "tool_use_without_todo_plan_after_plan_retry",
+                            "tool_calls": [t.name for t in tool_uses],
+                            "plan_id": plan.plan_id if plan else None,
+                        }
+                        self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                        self._emit(ProgressEvent(
+                            kind="plan_step_update",
+                            text="模型计划专用重试后仍缺少 TODO，已兜底补齐计划",
+                            meta=payload,
+                        ))
+                else:
+                    notes.append("模型在工具调用前未给出 todo 计划，且无法兜底生成")
+                    payload = {
+                        "event": "plan_required",
+                        "reason": "tool_use_without_todo_plan_unrepairable",
+                        "tool_calls": [t.name for t in tool_uses],
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self._emit(ProgressEvent(
+                        kind="plan_required",
+                        text="工具调用前必须先给出 TODO 计划",
+                        meta=payload,
+                    ))
                     continue
 
             if plan is not None and self.plan_store is not None:
@@ -1059,12 +1135,17 @@ class Agent:
         r"\d{1,2}\s*[:：.)、-]\s*(.+?)\s*$"
     )
     _CHECKBOX_TODO_RE = re.compile(r"^\s*[-*]\s*\[[ xX-]\]\s*(.+?)\s*$")
+    _NUMBERED_TODO_RE = re.compile(r"^\s*\d{1,2}\s*[\.:：\)、-]\s*(.+?)\s*$")
 
     def _extract_todo_plan(self, texts: list[str]) -> list[PlanTodoItem]:
         items: list[PlanTodoItem] = []
         for text in texts:
             for line in text.splitlines():
-                match = self._TODO_LINE_RE.match(line) or self._CHECKBOX_TODO_RE.match(line)
+                match = (
+                    self._TODO_LINE_RE.match(line)
+                    or self._CHECKBOX_TODO_RE.match(line)
+                    or self._NUMBERED_TODO_RE.match(line)
+                )
                 if not match:
                     continue
                 content = match.group(1).strip()

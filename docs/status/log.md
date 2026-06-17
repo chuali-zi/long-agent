@@ -1,5 +1,11 @@
 # 工作日志
 
+## 2026-06-17 21:35:00 +08:00
+
+- 修复 Agent TODO 计划协议：首次漏 TODO 的工具调用会被拒绝并要求模型重发；二次仍漏时优先触发无工具计划轮生成 TODO，只有计划轮失败才按工具调用兜底合成计划；同时接受 `1. ...` 这类编号计划。
+- 验证：全量 pytest `834 passed, 3 skipped, 10 warnings, 0 failed`；真实 DeepSeek + `/opt/kyagent` 生产前缀 RealOps 9 bench 全部 `PERFECT`。
+- 更新比赛提交文档中的测试数字与性能结论：性能 `overall_pass=false` 仍未达标，但最新复测已变为仅 `ask_p50` 未达标，`ask_p95`、`guardrail_p50`、`audit_total` 均达标。
+
 ## 2026-06-15 23:55:00 +08:00
 
 - 完成最后一轮比赛提交文档复核修订：更新功能测试报告为 `831 passed, 3 skipped, 10 warnings, 0 failed`，明确 skipped 原因；保留 RealOps 9 bench 全部 PERFECT 的真实结论。

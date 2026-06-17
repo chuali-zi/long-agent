@@ -27,6 +27,86 @@ class _NoPlanToolBackend(LlmBackend):
         )
 
 
+class _CompliesAfterTodoFeedbackBackend(LlmBackend):
+    name = "complies_after_todo_feedback"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        self.calls += 1
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
+        if self.calls == 1:
+            return AssistantMessage(
+                blocks=[
+                    TextBlock(text="我直接查一下。"),
+                    ToolUseBlock(
+                        id="no-plan-1",
+                        name="process_list",
+                        input={"sort_by": "cpu", "limit": 3},
+                    ),
+                ],
+                stop_reason="tool_use",
+            )
+        return AssistantMessage(
+            blocks=[
+                TextBlock(text=(
+                    "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
+                    "TODO 2: 根据结果返回关键证据。"
+                )),
+                ToolUseBlock(
+                    id="planned-after-feedback-1",
+                    name="process_list",
+                    input={"sort_by": "cpu", "limit": 3},
+                ),
+            ],
+            stop_reason="tool_use",
+        )
+
+
+class _NumberedPlanBackend(LlmBackend):
+    name = "numbered_plan"
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
+        return AssistantMessage(
+            blocks=[
+                TextBlock(text="1. 调用只读工具查看 CPU 进程列表。\n2. 根据结果返回关键证据。"),
+                ToolUseBlock(id="numbered-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
+            ],
+            stop_reason="tool_use",
+        )
+
+
+class _PlanOnlyRetryBackend(LlmBackend):
+    name = "plan_only_retry"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        self.calls += 1
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
+        if not tools:
+            return AssistantMessage(blocks=[TextBlock(text=(
+                "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
+                "TODO 2: 根据结果返回关键证据。"
+            ))])
+        return AssistantMessage(
+            blocks=[
+                TextBlock(text="我还是直接查一下。"),
+                ToolUseBlock(id=f"no-plan-{self.calls}", name="process_list", input={"sort_by": "cpu", "limit": 3}),
+            ],
+            stop_reason="tool_use",
+        )
+
+
 class _PlannedToolBackend(LlmBackend):
     name = "planned_tool"
 
@@ -303,23 +383,71 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
-def test_tool_use_without_todo_plan_is_auto_repaired(agent):
-    agent.llm = _NoPlanToolBackend()
-    agent.cfg.agent.max_iterations = 2
+def test_tool_use_without_todo_plan_is_retried_before_execution(agent):
+    backend = _CompliesAfterTodoFeedbackBackend()
+    agent.llm = backend
+    agent.cfg.agent.max_iterations = 3
     result = agent.ask("查下 CPU 占用最高的进程")
     kinds = [e.kind.value for e in result.trace.events]
     assert EventKind.LLM_THOUGHT.value in kinds
     assert EventKind.PLAN_UPDATE.value in kinds
     assert EventKind.TOOL_REQUEST.value in kinds
     assert EventKind.EXECUTION.value in kinds
+    required = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+    ]
+    assert required
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
+        for e in result.trace.events
+    )
+    tool_requests = [e for e in result.trace.events if e.kind is EventKind.TOOL_REQUEST]
+    assert len(tool_requests) == 1
+    assert backend.calls == 3
+    assert result.plan_id is not None
+    plan = agent.plan_store.get(result.plan_id)
+    assert [todo.content for todo in plan.todos] == [
+        "调用只读工具查看 CPU 进程列表。",
+        "根据结果返回关键证据。",
+    ]
+
+
+def test_tool_use_without_todo_plan_falls_back_only_after_retry(agent):
+    agent.llm = _NoPlanToolBackend()
+    agent.cfg.agent.max_iterations = 2
+    result = agent.ask("查下 CPU 占用最高的进程")
     repaired = [
         e for e in result.trace.events
-        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
+        if e.kind is EventKind.PLAN_UPDATE
+        and e.payload.get("event") == "plan_auto_repaired_after_retry"
     ]
     assert repaired
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
     assert plan.todos[0].content.startswith("调用只读工具 process_list")
+
+
+def test_tool_use_without_todo_plan_prefers_plan_only_retry(agent):
+    backend = _PlanOnlyRetryBackend()
+    agent.llm = backend
+    agent.cfg.agent.max_iterations = 3
+    result = agent.ask("查下 CPU 占用最高的进程")
+    assert any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_generated_after_retry"
+        for e in result.trace.events
+    )
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE
+        and e.payload.get("event") == "plan_auto_repaired_after_retry"
+        for e in result.trace.events
+    )
+    assert result.plan_id is not None
+    plan = agent.plan_store.get(result.plan_id)
+    assert [todo.content for todo in plan.todos] == [
+        "调用只读工具查看 CPU 进程列表。",
+        "根据结果返回关键证据。",
+    ]
 
 
 def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
@@ -335,6 +463,21 @@ def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
         "根据结果返回关键证据。",
     ]
     assert plan.todos[0].status == "in_progress"
+
+
+def test_numbered_plan_is_accepted_as_todo_plan(agent):
+    agent.llm = _NumberedPlanBackend()
+    result = agent.ask("查下 CPU 占用最高的进程")
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+        for e in result.trace.events
+    )
+    assert result.plan_id is not None
+    plan = agent.plan_store.get(result.plan_id)
+    assert [todo.content for todo in plan.todos] == [
+        "调用只读工具查看 CPU 进程列表。",
+        "根据结果返回关键证据。",
+    ]
 
 
 def test_os_question_final_without_evidence_forces_read_only_perception(agent):

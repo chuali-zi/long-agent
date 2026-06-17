@@ -1,6 +1,6 @@
 # 仓库当前状态 - A2 麒麟安全智能运维 Agent
 
-更新时间：2026-06-06 +08:00
+更新时间：2026-06-17 +08:00
 
 ## 当前定位
 
@@ -59,6 +59,13 @@ sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.
 - Web extra 独立放在 `requirements-loongarch-web.txt`，不安装 `uvicorn[standard]`。
 - `install-loongarch.sh` 支持 dry-run、离线 wheelhouse、命令库存检查、sudoers/env/selfcheck。
 - `scripts/kyagent.sh prod-env` 可单独重写 `/etc/kyagent/env`，不用重跑完整安装器。
+
+## 当前验证状态
+
+- Python 3.10+ 是运行与测试硬要求；若系统默认 `python` 为 3.9，应使用项目 `.venv` 或显式 Python 3.10+。
+- 最新全量 pytest：`834 passed, 3 skipped, 10 warnings, 0 failed`。
+- 最新真实 DeepSeek + `/opt/kyagent` 生产前缀 RealOps：9 个 bench 全部 `PERFECT`。
+- 最新性能微基准：`overall_pass=false`；仅 `ask_p50` 未达到 25% 降幅目标，`ask_p95`、`guardrail_p50`、`audit_total` 均达标。
 
 ## 权限边界
 
