@@ -214,6 +214,23 @@ class _FileRemediationChecklist:
         roots = scope.search_roots(round=1)
         return cls(scope=scope, required_roots=tuple(roots))
 
+    def inherit_discovery_from(self, previous: "_FileRemediationChecklist") -> None:
+        """Carry read-only discovery into a short follow-up cleanup turn.
+
+        Web sessions commonly split cleanup into two turns: first discover and
+        classify candidates, then the user replies with a short "clean them".
+        The second turn may not repeat service/root names, but the prior
+        read-only evidence is still the active safety context for this session.
+        """
+        if not self.required_roots:
+            self.required_roots = tuple(previous.required_roots)
+        self.scanned_roots.update(previous.scanned_roots)
+        self.candidate_paths.update(previous.candidate_paths)
+        self.candidate_labels.update(previous.candidate_labels)
+        self.protected_paths.update(previous.protected_paths)
+        self.executed_paths.extend(previous.executed_paths)
+        self.verified_paths.update(previous.verified_paths)
+
     def record_read_result(self, tool_name: str, args: dict, content: str) -> None:
         if tool_name not in _FILE_REMEDIATION_READ_TOOLS:
             return
@@ -630,9 +647,18 @@ class Agent:
                 effective_input = intent_verdict.sanitized_text
                 notes.append("已剥离零宽字符送入 LLM")
 
-        self.messages.append({"role": "user", "content": effective_input})
-        remediation_scope = RemediationScope.from_user_text(effective_input)
+        current_scope = RemediationScope.from_user_text(effective_input)
+        scope_input = self._scope_context_text(effective_input)
+        remediation_scope = RemediationScope.from_user_text(scope_input)
+        previous_file_checklist = self._file_remediation_checklist
         self._file_remediation_checklist = _FileRemediationChecklist.from_scope(remediation_scope)
+        if (
+            previous_file_checklist is not None
+            and not current_scope.search_roots(round=1)
+            and current_scope.actions & {"cleanup"}
+        ):
+            self._file_remediation_checklist.inherit_discovery_from(previous_file_checklist)
+        self.messages.append({"role": "user", "content": effective_input})
         turn_system_prompt = self.system_prompt
         if remediation_scope.services or remediation_scope.actions or remediation_scope.resource_types:
             turn_system_prompt += (
@@ -1334,6 +1360,15 @@ class Agent:
             if event.kind is EventKind.USER_INPUT:
                 return str((event.payload or {}).get("text") or "")
         return ""
+
+    def _scope_context_text(self, current_input: str) -> str:
+        user_turns = [
+            str(message.get("content") or "")
+            for message in self.messages
+            if message.get("role") == "user" and isinstance(message.get("content"), str)
+        ]
+        recent_user_turns = [text for text in user_turns[-3:] if text.strip()]
+        return "\n".join([*recent_user_turns, current_input])
 
     def _line_confirms_safe_process_target(self, trace: Trace, line: str) -> bool:
         lowered = line.lower()

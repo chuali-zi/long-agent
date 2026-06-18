@@ -69,3 +69,44 @@ def test_final_error_requires_post_verify_after_delete() -> None:
 
     assert "unverified changes" in err
     assert "/var/log/auth-api01/app" in err
+
+
+def test_followup_cleanup_inherits_previous_discovery_candidates() -> None:
+    previous = _checklist(required_roots=("/var/log/web-app01",))
+    previous.scanned_roots.add("/var/log/web-app01")
+    target = "/var/log/web-app01/app/portal.log.6"
+    previous._label_candidate(target, "delete")
+
+    followup = _checklist(
+        scope=RemediationScope.from_user_text("帮我清理系统垃圾"),
+        required_roots=(),
+    )
+    followup.inherit_discovery_from(previous)
+
+    assert followup.pre_write_error(target, "帮我清理系统垃圾") == ""
+
+
+def test_inherit_discovery_preserves_current_required_roots() -> None:
+    previous = _checklist(required_roots=("/var/log/web-app01",))
+    target = "/var/log/web-app01/app/portal.log.6"
+    previous._label_candidate(target, "delete")
+
+    followup = _checklist(required_roots=("/var/cache/web-app01",))
+    followup.inherit_discovery_from(previous)
+
+    assert followup.required_roots == ("/var/cache/web-app01",)
+    assert followup.candidate_labels[target] == "delete"
+
+
+def test_generic_cleanup_without_discovery_still_blocks_out_of_scope_write() -> None:
+    checklist = _checklist(
+        scope=RemediationScope.from_user_text("帮我清理系统垃圾"),
+        required_roots=(),
+    )
+
+    err = checklist.pre_write_error(
+        "/var/log/web-app01/app/portal.log.6",
+        "帮我清理系统垃圾",
+    )
+
+    assert "not in current scope" in err
