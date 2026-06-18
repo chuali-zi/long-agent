@@ -87,7 +87,7 @@ sudo bash /opt/kyagent/scripts/kyagent.sh prod-env --deepseek-key-file /root/dee
 sudo editor /etc/kyagent/env
 ```
 
-至少确认里面有这些值：
+至少确认里面有这些值。这里不要只写 DeepSeek key，Web 的 admin access token 也必须写进去：
 
 ```bash
 KYAGENT_CONFIG=/opt/kyagent/configs/deepseek.yaml
@@ -100,7 +100,7 @@ DEEPSEEK_API_KEY=your-deepseek-api-key
 KYAGENT_WEB_ADMIN_TOKEN=admin123
 ```
 
-key 只从环境变量读取，不从 YAML 或 `kyagent.json` 读取。
+`DEEPSEEK_API_KEY` 和 `KYAGENT_WEB_ADMIN_TOKEN` 都只从环境变量读取，不从 YAML 或 `kyagent.json` 读取。Web 页面调用 API 时会把页面里填写的 token 作为 `Authorization: Bearer <token>` 发送；如果 `/etc/kyagent/env` 里没有 `KYAGENT_WEB_ADMIN_TOKEN`，或者页面里没有填写同一个值，就拿不到 `admin` 角色，管理类命令、审核、审计等需要权限的接口会被拒绝。
 
 ## 激活虚拟环境
 
@@ -132,7 +132,7 @@ sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent
 http://127.0.0.1:8000
 ```
 
-有桌面环境时脚本会自动打开浏览器；没有桌面 opener 时，终端会打印手工访问地址。
+有桌面环境时脚本会自动打开浏览器；没有桌面 opener 时，终端会打印手工访问地址。打开页面后，先在右侧/浮层里的 `Bearer token` 输入框填入 `/etc/kyagent/env` 中的 `KYAGENT_WEB_ADMIN_TOKEN`（上面的示例是 `admin123`）。这个 token 是 Web access token，不是 DeepSeek API key；不填它只能走本地开发放行的少数接口，不能以 admin 身份执行需要权限的 Web 操作。
 
 打开页面后，在输入框里问：
 
