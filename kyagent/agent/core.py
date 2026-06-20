@@ -102,7 +102,48 @@ _OS_PERCEPTION_TOOL_PREFIXES = (
 _NON_PERCEPTION_READ_ONLY_TOOLS = {
     "ask_user_choice",
     "submit_rca_report",
+    "todo_read",
 }
+_TODO_TOOL_NAMES = {"todo_read", "todo_write"}
+_TODO_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string", "minLength": 1, "maxLength": 500},
+        "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "completed", "cancelled"],
+        },
+        "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": ["content", "status", "priority"],
+    "additionalProperties": False,
+}
+_TODO_TOOLS_FOR_LLM = [
+    {
+        "name": "todo_read",
+        "description": "Read the current durable todo list for this agent turn.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "todo_write",
+        "description": (
+            "Create and maintain the current turn's todo list. Submit the complete updated list every time; "
+            "the backend replaces the previous list atomically and keeps the given order."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": _TODO_ITEM_SCHEMA,
+                    "maxItems": 20,
+                },
+            },
+            "required": ["todos"],
+            "additionalProperties": False,
+        },
+    },
+]
 _AUTO_APPROVE_FILE_REMEDIATION_TOOLS = {
     "fs_delete_file",
     "fs_truncate",
@@ -474,7 +515,7 @@ class Agent:
         self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
         self._file_remediation_checklist: _FileRemediationChecklist | None = None
-        self._tools_for_llm = self.registry.to_anthropic_tools()
+        self._tools_for_llm = self._build_tools_for_llm()
         self.system_prompt = SYSTEM_PROMPT
         if auto_approve_safe_remediation:
             self.system_prompt += (
@@ -491,6 +532,12 @@ class Agent:
         # 在 Windows mock 后端这一开销会盖过并行带来的收益。
         self._tool_pool: ThreadPoolExecutor | None = None
         self._shutdown = False
+
+    def _build_tools_for_llm(self) -> list[dict]:
+        tools = list(self.registry.to_anthropic_tools())
+        if self.plan_store is not None:
+            tools.extend(dict(tool) for tool in _TODO_TOOLS_FOR_LLM)
+        return tools
 
     def _ensure_pool(self) -> ThreadPoolExecutor:
         if self._tool_pool is None:
@@ -673,8 +720,6 @@ class Agent:
             )
 
         tools_for_llm = self._tools_for_llm
-        todo_plan_retry_pending = False
-        todo_plan_retry_used = False
         if plan is not None:
             plan = self._set_plan_step(
                 trace, plan, "receive", "complete", "Request accepted",
@@ -688,7 +733,6 @@ class Agent:
         while (
             iterations < self.cfg.agent.max_iterations
             or evidence_gate_extra_summary
-            or todo_plan_retry_pending
         ):
             extra_summary_iteration = (
                 evidence_gate_extra_summary
@@ -697,12 +741,8 @@ class Agent:
             budget_reason = "loop"
             if extra_summary_iteration:
                 budget_reason = "evidence_gate_summary"
-            elif todo_plan_retry_pending and iterations >= self.cfg.agent.max_iterations:
-                budget_reason = "todo_plan_retry"
             if evidence_gate_extra_summary:
                 evidence_gate_extra_summary = False
-            if todo_plan_retry_pending:
-                todo_plan_retry_pending = False
             iterations += 1
             budget_payload = {
                 "iteration": iterations,
@@ -945,119 +985,59 @@ class Agent:
                                       tool_iterations=iterations, denied=denied, notes=notes,
                                       plan_id=plan.plan_id if plan else None)
 
+            todo_write_uses = [tu for tu in tool_uses if tu.name == "todo_write"]
+            action_tool_uses = [tu for tu in tool_uses if tu.name not in _TODO_TOOL_NAMES]
             todos = self._extract_todo_plan(assistant.texts())
-            if not todos:
-                if not todo_plan_retry_used:
-                    todo_plan_retry_used = True
-                    todo_plan_retry_pending = True
-                    notes.append("模型在工具调用前未给出 todo 计划，已阻止本轮行动")
+            todo_source = "text" if todos else ""
+            if todo_write_uses:
+                try:
+                    todos = self._todo_items_from_tool_input(todo_write_uses[-1].input or {})
+                    todo_source = "tool"
+                except ToolError as exc:
+                    notes.append(f"todo_write 参数非法: {exc}")
                     payload = {
                         "event": "plan_required",
-                        "reason": "tool_use_without_todo_plan",
+                        "reason": "invalid_todo_write",
+                        "detail": str(exc),
                         "tool_calls": [t.name for t in tool_uses],
                         "plan_id": plan.plan_id if plan else None,
                     }
                     self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
                     self._emit(ProgressEvent(
                         kind="plan_required",
-                        text="工具调用前必须先给出 TODO 计划",
+                        text=f"todo_write 参数非法：{exc}",
                         meta=payload,
                     ))
-                    if plan is not None:
-                        plan = self._set_plan_step(
-                            trace, plan, "reason", "running",
-                            "Blocked tool calls until a todo plan is provided",
-                            event_kind="plan_step_update",
-                        )
                     self.messages.append({
                         "role": "user",
                         "content": (
-                            "System feedback: 你刚才准备调用工具 "
-                            f"{', '.join(t.name for t in tool_uses)}，"
-                            "但没有在同一条 assistant 消息的文本部分先给出显式 todo 计划。"
-                            "本轮工具调用已被拒绝且未执行。请立即重发：先写 "
-                            "`TODO 1: ...`、`TODO 2: ...`（或 `1. ...`/`2. ...`），"
-                            "然后在同一条消息里发起必要的工具调用。不要只解释原因。"
+                            "System feedback: todo_write 参数非法，todos 必须是完整数组；"
+                            "每项包含 content/status/priority，status 只能是 "
+                            "pending/in_progress/completed/cancelled，priority 只能是 high/medium/low。"
                         ),
                     })
                     continue
-
-                plan_only_text = ""
-                plan_only_todos_generated = False
-                try:
-                    plan_only = self.llm.chat(
-                        turn_system_prompt,
-                        self.messages + [{
-                            "role": "user",
-                            "content": (
-                                "System feedback: 上一轮仍然直接发起了工具调用但没有 TODO。"
-                                "现在不要调用任何工具，只输出 2-5 行显式 TODO 计划，格式必须是 "
-                                "`TODO 1: ...`、`TODO 2: ...`。"
-                            ),
-                        }],
-                        [],
-                    )
-                    plan_only_text = "\n".join(plan_only.texts()).strip()
-                    todos = self._extract_todo_plan(plan_only.texts())
-                except Exception as exc:  # noqa: BLE001
-                    notes.append(f"todo 计划专用重试失败: {exc}")
-                    self.audit.event(trace, EventKind.ERROR, {
-                        "reason": "todo_plan_retry_llm_error",
-                        "detail": str(exc),
-                    })
-
+            if action_tool_uses and not todos:
+                # 模型未先给 todo 计划：不阻断、不额外发 LLM 轮、不伪造 todo_write，
+                # 直接按本轮 tool_call 静默合成 TODO，并在同一轮放行工具执行。
+                todos = self._synthesize_todo_plan(action_tool_uses)
                 if todos:
-                    plan_only_todos_generated = True
-                    assistant.blocks.insert(0, TextBlock(text=plan_only_text))
-                    notes.append("模型在无工具计划轮生成 todo 计划")
+                    assistant.blocks.insert(0, TextBlock(text=self._todo_items_to_text(todos)))
+                    notes.append("模型在工具调用前未给出 todo 计划，已根据 tool_call 自动合成 TODO")
                     payload = {
-                        "event": "plan_generated_after_retry",
-                        "reason": "tool_use_without_todo_plan_recovered_by_plan_only_turn",
-                        "tool_calls": [t.name for t in tool_uses],
+                        "event": "plan_auto_synthesized",
+                        "reason": "tool_use_without_todo_plan_synthesized",
+                        "tool_calls": [t.name for t in action_tool_uses],
                         "plan_id": plan.plan_id if plan else None,
                     }
                     self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
                     self._emit(ProgressEvent(
                         kind="plan_step_update",
-                        text="模型已在无工具计划轮补交 TODO 计划",
+                        text="已根据工具调用自动合成 TODO 计划",
                         meta=payload,
                     ))
-                else:
-                    todos = self._synthesize_todo_plan(tool_uses)
-                if todos:
-                    if not plan_only_todos_generated:
-                        repaired_text = self._todo_items_to_text(todos)
-                        assistant.blocks.insert(0, TextBlock(text=repaired_text))
-                        notes.append("模型计划专用重试后仍缺少 todo 计划，已根据 tool_call 兜底补齐")
-                        payload = {
-                            "event": "plan_auto_repaired_after_retry",
-                            "reason": "tool_use_without_todo_plan_after_plan_retry",
-                            "tool_calls": [t.name for t in tool_uses],
-                            "plan_id": plan.plan_id if plan else None,
-                        }
-                        self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                        self._emit(ProgressEvent(
-                            kind="plan_step_update",
-                            text="模型计划专用重试后仍缺少 TODO，已兜底补齐计划",
-                            meta=payload,
-                        ))
-                else:
-                    notes.append("模型在工具调用前未给出 todo 计划，且无法兜底生成")
-                    payload = {
-                        "event": "plan_required",
-                        "reason": "tool_use_without_todo_plan_unrepairable",
-                        "tool_calls": [t.name for t in tool_uses],
-                        "plan_id": plan.plan_id if plan else None,
-                    }
-                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                    self._emit(ProgressEvent(
-                        kind="plan_required",
-                        text="工具调用前必须先给出 TODO 计划",
-                        meta=payload,
-                    ))
-                    continue
 
-            if plan is not None and self.plan_store is not None:
+            if plan is not None and self.plan_store is not None and todo_source != "tool":
                 plan = self.plan_store.replace_todos(plan.plan_id, todos)
                 self._emit_plan(
                     trace, plan, kind="plan_step_update",
@@ -1073,9 +1053,15 @@ class Agent:
             # allow-only 只读调用时才进入线程池。confirm/deny/未知/参数错误路径
             # 保持串行，避免交互提示与审计流并发交错。
             tool_results: list[dict | None] = [None] * len(tool_uses)
+            tool_indices = {id(tu): idx for idx, tu in enumerate(tool_uses)}
+            execution_tool_uses = (
+                [tu for tu in tool_uses if tu.name == "todo_write"]
+                + [tu for tu in tool_uses if tu.name != "todo_write"]
+            )
             run_parallel = (
                 sys.platform != "win32"
                 and len(tool_uses) >= 2
+                and not any(tu.name in _TODO_TOOL_NAMES for tu in tool_uses)
                 and self._executor_supports_parallel_tools()
                 and all(self._is_parallel_safe(tu) for tu in tool_uses)
             )
@@ -1103,7 +1089,8 @@ class Agent:
                         "is_error": result_block.is_error,
                     }
             else:
-                for idx, tu in enumerate(tool_uses):
+                for tu in execution_tool_uses:
+                    idx = tool_indices[id(tu)]
                     result_block = self._handle_tool_use(trace, tu, notes, False)
                     if result_block.is_error and result_block.content.startswith("[denied]"):
                         denied = True
@@ -1166,6 +1153,92 @@ class Agent:
     )
     _CHECKBOX_TODO_RE = re.compile(r"^\s*[-*]\s*\[[ xX-]\]\s*(.+?)\s*$")
     _NUMBERED_TODO_RE = re.compile(r"^\s*\d{1,2}\s*[\.:：\)、-]\s*(.+?)\s*$")
+
+    def _todo_items_from_tool_input(self, data: dict) -> list[PlanTodoItem]:
+        if not isinstance(data, dict):
+            raise ToolError("todo_write input must be an object")
+        raw = data.get("todos")
+        if not isinstance(raw, list):
+            raise ToolError("todos must be an array")
+        items: list[PlanTodoItem] = []
+        for idx, item in enumerate(raw[:20], start=1):
+            if not isinstance(item, dict):
+                raise ToolError(f"todos[{idx - 1}] must be an object")
+            content = str(item.get("content", "")).strip()
+            if not content:
+                raise ToolError(f"todos[{idx - 1}].content is required")
+            status = str(item.get("status", "pending")).strip()
+            if status not in {"pending", "in_progress", "completed", "cancelled"}:
+                raise ToolError(f"todos[{idx - 1}].status is invalid")
+            priority = str(item.get("priority", "medium")).strip()
+            if priority not in {"high", "medium", "low"}:
+                raise ToolError(f"todos[{idx - 1}].priority is invalid")
+            items.append(PlanTodoItem(
+                todo_id=f"todo-{idx}",
+                content=content,
+                status=status,  # type: ignore[arg-type]
+                priority=priority,  # type: ignore[arg-type]
+            ))
+        return items
+
+    def _handle_todo_read(self, trace: Trace, tool_use_id: str) -> ToolResultBlock:
+        self.audit.event(trace, EventKind.TOOL_REQUEST, {
+            "tool": "todo_read",
+            "argv": [],
+            "args": {},
+            "risk": "low",
+            "requires_root": False,
+        })
+        plan_id = trace.metadata.get("plan_id")
+        todos: list[dict] = []
+        if isinstance(plan_id, str) and self.plan_store is not None:
+            try:
+                todos = [todo.to_dict() for todo in self.plan_store.get(plan_id).todos]
+            except KeyError:
+                todos = []
+        content = json.dumps({"todos": todos}, ensure_ascii=False)
+        return ToolResultBlock(tool_use_id=tool_use_id, content=content)
+
+    def _handle_todo_write(self, trace: Trace, tu: ToolUseBlock) -> ToolResultBlock:
+        self.audit.event(trace, EventKind.TOOL_REQUEST, {
+            "tool": "todo_write",
+            "argv": [],
+            "args": tu.input or {},
+            "risk": "low",
+            "requires_root": False,
+        })
+        if self.plan_store is None:
+            return ToolResultBlock(
+                tool_use_id=tu.id,
+                is_error=True,
+                content="todo_write unavailable: planning store is disabled",
+            )
+        plan_id = trace.metadata.get("plan_id")
+        if not isinstance(plan_id, str):
+            return ToolResultBlock(
+                tool_use_id=tu.id,
+                is_error=True,
+                content="todo_write unavailable: no active plan",
+            )
+        try:
+            todos = self._todo_items_from_tool_input(tu.input or {})
+        except ToolError as exc:
+            self.audit.event(trace, EventKind.ERROR, {
+                "reason": "invalid_args",
+                "tool": "todo_write",
+                "detail": str(exc),
+            })
+            return ToolResultBlock(tool_use_id=tu.id, is_error=True, content=f"工具参数非法：{exc}")
+        plan = self.plan_store.replace_todos(plan_id, todos)
+        self._emit_plan(
+            trace,
+            plan,
+            kind="plan_step_update",
+            text="Todo list updated",
+            step_id="reason",
+        )
+        content = json.dumps({"todos": [todo.to_dict() for todo in plan.todos]}, ensure_ascii=False)
+        return ToolResultBlock(tool_use_id=tu.id, content=content)
 
     def _extract_todo_plan(self, texts: list[str]) -> list[PlanTodoItem]:
         items: list[PlanTodoItem] = []
@@ -1564,6 +1637,10 @@ class Agent:
                 )
             tu = ToolUseBlock(id=tu.id, name=tu.name, input=cleaned)
             return self._handle_user_choice(trace, tu)
+        if tu.name == "todo_read":
+            return self._handle_todo_read(trace, tu.id)
+        if tu.name == "todo_write":
+            return self._handle_todo_write(trace, tu)
         if tu.name == "submit_rca_report":
             tool = self.registry.get(tu.name)
             if tool is None:

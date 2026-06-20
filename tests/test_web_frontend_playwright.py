@@ -264,6 +264,54 @@ def test_progress_updates_single_status_column_without_tool_log_rows(chromium_pa
     assert page.locator(".msg.event").count() == 0
 
 
+def test_backend_todos_render_as_structured_status_list_without_local_drift(chromium_page):
+    page = chromium_page
+
+    def handle_request(route: Route) -> None:
+        request = route.request
+        if request.url == APP_URL:
+            route.fulfill(
+                status=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=INDEX_HTML.read_text(encoding="utf-8"),
+            )
+            return
+        if request.url.endswith("/api/health"):
+            _json_response(route, {"status": "ok", "version": "0.1.0-test"})
+            return
+        route.fulfill(status=404, body="unexpected api route")
+
+    page.route("**/*", handle_request)
+    page.goto(APP_URL)
+    page.locator("#askInput").wait_for(state="visible", timeout=5000)
+
+    page.evaluate(
+        """() => {
+          handleProgress({kind: 'plan_snapshot', meta: {plan: {
+            plan_id: 'plan-browser',
+            todos: [
+              {todo_id: 'todo-1', content: '整理最终结论', status: 'pending', priority: 'medium'},
+              {todo_id: 'todo-2', content: '查看 CPU 进程', status: 'in_progress', priority: 'high'},
+              {todo_id: 'todo-3', content: '读取系统负载', status: 'completed', priority: 'medium'}
+            ]
+          }}});
+          handleProgress({kind: 'thinking_delta', delta: 'TODO 1: 不应该覆盖后端 todo'});
+          handleProgress({kind: 'tool_call_end', tool: 'process_list', meta: {ok: true}, text: 'ok'});
+        }"""
+    )
+
+    todos = page.locator('#planDock [data-component="todos"] [data-slot="item"]')
+    assert todos.count() == 3
+    assert page.locator("#planCount").inner_text() == "1/3"
+    assert todos.nth(0).get_attribute("data-status") == "in_progress"
+    assert todos.nth(0).inner_text() == "查看 CPU 进程"
+    assert todos.nth(1).get_attribute("data-status") == "pending"
+    assert todos.nth(1).inner_text() == "整理最终结论"
+    assert todos.nth(2).get_attribute("data-status") == "completed"
+    assert todos.nth(2).inner_text() == "读取系统负载"
+    assert page.locator('#planDock [data-component="todos"]').get_by_text("不应该覆盖后端 todo").count() == 0
+
+
 def test_agent_final_markdown_renders_safely_without_new_runtime(chromium_page):
     page = chromium_page
 

@@ -482,36 +482,33 @@
   .approval-layer .choice-panel.pop-out { animation: cardPopOut .26s ease forwards !important; }
 
   #planDock { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding-right: 4px; }
-  .plan-list { display: flex; flex-direction: column; }
-  .plan-step {
-    display: flex; align-items: flex-start; gap: 11px;
-    padding: 9px 9px; border-radius: 9px; transition: background .15s;
+  [data-component="todos"] { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line-soft); border-radius: 12px; overflow: hidden; background: var(--paper-2); }
+  [data-component="todos"] [data-slot="item"] {
+    display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: flex-start;
+    padding: 10px 11px; font-size: 13.5px; line-height: 1.5; color: var(--ink-soft);
+    overflow-wrap: anywhere;
   }
-  .plan-step + .plan-step { border-top: 1px solid var(--line-soft); }
-  .plan-step:hover { background: var(--paper-3); }
-  .plan-check {
-    flex: none; width: 18px; height: 18px; margin-top: 1px; position: relative;
-    border: 1.7px solid var(--line); border-radius: 5px; background: var(--paper-2);
-    transition: border-color .18s, background .18s;
+  [data-component="todos"] [data-slot="item"] + [data-slot="item"] { border-top: 1px solid var(--line-soft); }
+  [data-component="todos"] [data-slot="item"] > span:first-child {
+    width: 17px; height: 17px; margin-top: 1px; position: relative; border: 1.7px solid var(--line);
+    border-radius: 5px; background: var(--paper-2); transition: border-color .18s, background .18s;
   }
-  .plan-num { flex: none; width: 18px; text-align: right; color: var(--muted); font: 700 11px var(--mono); margin-top: 2px; }
-  .plan-text { font-size: 13.5px; line-height: 1.5; color: var(--ink-soft); overflow-wrap: anywhere; }
-  .plan-step[data-status="running"] .plan-check { border-color: var(--clay); }
-  .plan-step[data-status="running"] .plan-check::after {
-    content: ""; position: absolute; inset: 3px; border-radius: 2px;
+  [data-component="todos"] [data-status="in_progress"] { color: var(--ink); font-weight: 600; }
+  [data-component="todos"] [data-status="in_progress"] > span:first-child { border-color: var(--clay); }
+  [data-component="todos"] [data-status="in_progress"] > span:first-child::after {
+    content: ""; position: absolute; inset: 3px; border-radius: 999px;
     background: var(--clay); animation: planPulse 1s ease-in-out infinite;
   }
-  .plan-step[data-status="running"] .plan-text { color: var(--ink); font-weight: 600; }
-  .plan-step[data-status="running"] .plan-num { color: var(--clay); }
   @keyframes planPulse { 0%,100%{ opacity:.3; transform:scale(.6);} 50%{ opacity:1; transform:scale(1);} }
-  .plan-step[data-status="done"] .plan-check { border-color: var(--sage); background: var(--sage); }
-  .plan-step[data-status="done"] .plan-check::after {
+  [data-component="todos"] [data-status="completed"] { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+  [data-component="todos"] [data-status="completed"] > span:first-child { border-color: var(--sage); background: var(--sage); }
+  [data-component="todos"] [data-status="completed"] > span:first-child::after {
     content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 9px;
     border: solid #f7faf4; border-width: 0 2px 2px 0; transform: rotate(42deg);
   }
-  .plan-step[data-status="done"] .plan-text { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
-  .plan-step[data-status="failed"] .plan-check { border-color: var(--danger); background: var(--danger-soft); }
-  .plan-step[data-status="failed"] .plan-check::after {
+  [data-component="todos"] [data-status="cancelled"] { color: var(--muted); text-decoration: line-through; text-decoration-style: wavy; }
+  [data-component="todos"] [data-status="failed"] > span:first-child { border-color: var(--danger); background: var(--danger-soft); }
+  [data-component="todos"] [data-status="failed"] > span:first-child::after {
     content: "x"; position: absolute; inset: 0; display: grid; place-items: center;
     color: var(--danger); font: 800 14px/1 var(--sans);
   }
@@ -1254,10 +1251,10 @@ function planEmptyHtml() {
     </div>`;
 }
 function normalizePlanStatus(status) {
-  if (status === 'complete' || status === 'completed' || status === 'done'
-      || status === 'skipped' || status === 'cancelled') return 'done';
+  if (status === 'complete' || status === 'completed' || status === 'done') return 'completed';
+  if (status === 'skipped' || status === 'cancelled') return 'cancelled';
   if (status === 'failed') return 'failed';
-  if (status === 'running' || status === 'in_progress') return 'running';
+  if (status === 'running' || status === 'in_progress') return 'in_progress';
   return 'pending';
 }
 function normalizePlanTodos(todos) {
@@ -1270,11 +1267,11 @@ function normalizePlanTodos(todos) {
 }
 function markActiveTodo(items) {
   if (!items.length) return items;
-  const hasRunning = items.some(t => t.status === 'running');
+  const hasRunning = items.some(t => t.status === 'in_progress');
   if (hasRunning) return items;
   const next = items.find(t => t.status === 'pending');
-  if (next) next.status = 'running';
-  else if (items.every(t => t.status === 'pending')) items[0].status = 'running';
+  if (next) next.status = 'in_progress';
+  else if (items.every(t => t.status === 'pending')) items[0].status = 'in_progress';
   return items;
 }
 function extractTodosFromText(text) {
@@ -1295,7 +1292,7 @@ function extractTodosFromText(text) {
     items.push({
       id: 'todo-' + (items.length + 1),
       text: content,
-      status: checked ? 'done' : 'pending',
+      status: checked ? 'completed' : 'pending',
     });
   }
   return markActiveTodo(items.slice(0, 20));
@@ -1308,7 +1305,7 @@ function mergeTodoStatuses(current, incoming) {
       || current.find(x => x.text === item.text)
       || current[i];
     if (!prev) return item;
-    const rank = { pending: 0, running: 1, done: 2, failed: 3 };
+    const rank = { pending: 0, in_progress: 1, completed: 2, cancelled: 2, failed: 3 };
     const nextStatus = rank[item.status] >= rank[prev.status] ? item.status : prev.status;
     return { ...item, id: prev.id, status: nextStatus };
   });
@@ -1317,36 +1314,32 @@ function updatePlanCount() {
   const el = document.getElementById('planCount');
   if (!el) return;
   const total = planState.items.length;
-  const done = planState.items.filter(s => s.status === 'done').length;
+  const done = planState.items.filter(s => s.status === 'completed').length;
   el.textContent = total ? `${done}/${total}` : '';
 }
 function drawPlan() {
   const dock = document.getElementById('planDock');
   if (!dock) return;
   if (!planState.items.length) { dock.innerHTML = planEmptyHtml(); updatePlanCount(); return; }
-  const list = document.createElement('div');
-  list.className = 'plan-list';
-  planState.items.forEach((s, i) => {
-    const row = document.createElement('div');
-    row.className = 'plan-step';
+  const order = { in_progress: 0, pending: 1, completed: 2, cancelled: 3, failed: 4 };
+  const list = document.createElement('ul');
+  list.dataset.component = 'todos';
+  planState.items.slice().sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9)).forEach((s) => {
+    const row = document.createElement('li');
+    row.dataset.slot = 'item';
     row.dataset.status = s.status || 'pending';
-    const num = document.createElement('span');
-    num.className = 'plan-num';
-    num.textContent = (i + 1);
     const chk = document.createElement('span');
-    chk.className = 'plan-check';
-    chk.setAttribute('aria-label', s.status === 'done' ? '已完成' : '未完成');
+    chk.setAttribute('aria-hidden', 'true');
     const txt = document.createElement('span');
-    txt.className = 'plan-text';
     txt.textContent = s.text;
-    row.append(num, chk, txt);
+    row.append(chk, txt);
     list.appendChild(row);
   });
   dock.replaceChildren(list);
   updatePlanCount();
 }
 function renderTodos(todos, planId = '', fromBackend = false) {
-  const normalized = markActiveTodo(normalizePlanTodos(todos));
+  const normalized = fromBackend ? normalizePlanTodos(todos) : markActiveTodo(normalizePlanTodos(todos));
   if (!normalized.length) return;
   planState.items = fromBackend
     ? normalized
@@ -1371,25 +1364,24 @@ function maybeUpdateTodosFromText(text) {
   const parsed = extractTodosFromText(text);
   if (!parsed.length) return;
   if (planState.fromBackend) {
-    planState.items = mergeTodoStatuses(planState.items, parsed);
-    markActiveTodo(planState.items);
-    drawPlan();
     return;
   }
   renderTodos(parsed);
 }
 function advanceTodoOnToolEnd() {
   if (!planState.items.length) return;
-  const runningIdx = planState.items.findIndex(t => t.status === 'running');
+  if (planState.fromBackend) return;
+  const runningIdx = planState.items.findIndex(t => t.status === 'in_progress');
   if (runningIdx < 0) return;
-  planState.items[runningIdx].status = 'done';
+  planState.items[runningIdx].status = 'completed';
   const nextIdx = planState.items.findIndex((t, i) => i > runningIdx && t.status === 'pending');
-  if (nextIdx >= 0) planState.items[nextIdx].status = 'running';
+  if (nextIdx >= 0) planState.items[nextIdx].status = 'in_progress';
   drawPlan();
 }
 function completeAllTodos() {
   if (!planState.items.length) return;
-  planState.items.forEach(t => { if (t.status !== 'failed') t.status = 'done'; });
+  if (planState.fromBackend) return;
+  planState.items.forEach(t => { if (t.status !== 'failed') t.status = 'completed'; });
   drawPlan();
 }
 function handlePlanProgress(p) {

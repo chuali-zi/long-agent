@@ -1,6 +1,7 @@
 """端到端集成测试：mock LLM + 内置工具 + guardrail + audit 闭环。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,45 +28,6 @@ class _NoPlanToolBackend(LlmBackend):
         )
 
 
-class _CompliesAfterTodoFeedbackBackend(LlmBackend):
-    name = "complies_after_todo_feedback"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
-        self.calls += 1
-        last = messages[-1] if messages else {}
-        if last.get("role") == "user" and isinstance(last.get("content"), list):
-            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
-        if self.calls == 1:
-            return AssistantMessage(
-                blocks=[
-                    TextBlock(text="我直接查一下。"),
-                    ToolUseBlock(
-                        id="no-plan-1",
-                        name="process_list",
-                        input={"sort_by": "cpu", "limit": 3},
-                    ),
-                ],
-                stop_reason="tool_use",
-            )
-        return AssistantMessage(
-            blocks=[
-                TextBlock(text=(
-                    "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
-                    "TODO 2: 根据结果返回关键证据。"
-                )),
-                ToolUseBlock(
-                    id="planned-after-feedback-1",
-                    name="process_list",
-                    input={"sort_by": "cpu", "limit": 3},
-                ),
-            ],
-            stop_reason="tool_use",
-        )
-
-
 class _NumberedPlanBackend(LlmBackend):
     name = "numbered_plan"
 
@@ -82,26 +44,53 @@ class _NumberedPlanBackend(LlmBackend):
         )
 
 
-class _PlanOnlyRetryBackend(LlmBackend):
-    name = "plan_only_retry"
+class _FeedbackCoercesTodoWriteBackend(LlmBackend):
+    name = "feedback_coerces_todo_write"
 
     def __init__(self) -> None:
         self.calls = 0
+        self.tool_sets: list[list[str]] = []
 
     def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
         self.calls += 1
+        self.tool_sets.append([tool.get("name", "") for tool in tools])
         last = messages[-1] if messages else {}
-        if last.get("role") == "user" and isinstance(last.get("content"), list):
+        content = last.get("content", "")
+        if last.get("role") == "user" and isinstance(content, list):
             return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
-        if not tools:
-            return AssistantMessage(blocks=[TextBlock(text=(
-                "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
-                "TODO 2: 根据结果返回关键证据。"
-            ))])
+        if isinstance(content, str) and "先调用 todo_write" in content:
+            return AssistantMessage(
+                blocks=[
+                    ToolUseBlock(
+                        id="coerced-todo-write",
+                        name="todo_write",
+                        input={
+                            "todos": [
+                                {
+                                    "content": "调用只读工具查看 CPU 进程列表。",
+                                    "status": "in_progress",
+                                    "priority": "medium",
+                                },
+                                {
+                                    "content": "根据结果返回关键证据。",
+                                    "status": "pending",
+                                    "priority": "medium",
+                                },
+                            ]
+                        },
+                    ),
+                    ToolUseBlock(
+                        id="after-coerced-todo",
+                        name="process_list",
+                        input={"sort_by": "cpu", "limit": 3},
+                    ),
+                ],
+                stop_reason="tool_use",
+            )
         return AssistantMessage(
             blocks=[
-                TextBlock(text="我还是直接查一下。"),
-                ToolUseBlock(id=f"no-plan-{self.calls}", name="process_list", input={"sort_by": "cpu", "limit": 3}),
+                TextBlock(text="我直接查一下。"),
+                ToolUseBlock(id="no-plan-before-coercion", name="process_list", input={"sort_by": "cpu", "limit": 3}),
             ],
             stop_reason="tool_use",
         )
@@ -120,6 +109,45 @@ class _PlannedToolBackend(LlmBackend):
                     "TODO 1: 调用只读工具查看 CPU 进程列表。\n"
                     "TODO 2: 根据结果返回关键证据。"
                 )),
+                ToolUseBlock(id="planned-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
+            ],
+            stop_reason="tool_use",
+        )
+
+
+class _TodoWriteToolBackend(LlmBackend):
+    name = "todo_write_tool"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_tools: list[list[str]] = []
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        self.calls += 1
+        self.seen_tools.append([tool.get("name", "") for tool in tools])
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="已完成感知。")])
+        return AssistantMessage(
+            blocks=[
+                ToolUseBlock(
+                    id="todo-write-1",
+                    name="todo_write",
+                    input={
+                        "todos": [
+                            {
+                                "content": "调用只读工具查看 CPU 进程列表。",
+                                "status": "in_progress",
+                                "priority": "high",
+                            },
+                            {
+                                "content": "根据结果返回关键证据。",
+                                "status": "pending",
+                                "priority": "medium",
+                            },
+                        ]
+                    },
+                ),
                 ToolUseBlock(id="planned-1", name="process_list", input={"sort_by": "cpu", "limit": 3}),
             ],
             stop_reason="tool_use",
@@ -383,71 +411,130 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
-def test_tool_use_without_todo_plan_is_retried_before_execution(agent):
-    backend = _CompliesAfterTodoFeedbackBackend()
-    agent.llm = backend
-    agent.cfg.agent.max_iterations = 3
-    result = agent.ask("查下 CPU 占用最高的进程")
-    kinds = [e.kind.value for e in result.trace.events]
-    assert EventKind.LLM_THOUGHT.value in kinds
-    assert EventKind.PLAN_UPDATE.value in kinds
-    assert EventKind.TOOL_REQUEST.value in kinds
-    assert EventKind.EXECUTION.value in kinds
-    required = [
-        e for e in result.trace.events
-        if e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
-    ]
-    assert required
-    assert not any(
-        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_repaired"
-        for e in result.trace.events
-    )
-    tool_requests = [e for e in result.trace.events if e.kind is EventKind.TOOL_REQUEST]
-    assert len(tool_requests) == 1
-    assert backend.calls == 3
-    assert result.plan_id is not None
-    plan = agent.plan_store.get(result.plan_id)
-    assert [todo.content for todo in plan.todos] == [
-        "调用只读工具查看 CPU 进程列表。",
-        "根据结果返回关键证据。",
-    ]
-
-
-def test_tool_use_without_todo_plan_falls_back_only_after_retry(agent):
+def test_tool_use_without_todo_plan_is_synthesized_immediately(agent):
+    """模型直接调工具且无 todo 时：静默合成 TODO 并同轮执行，不阻断、不逼写。"""
     agent.llm = _NoPlanToolBackend()
-    agent.cfg.agent.max_iterations = 2
+    agent.cfg.agent.max_iterations = 1
     result = agent.ask("查下 CPU 占用最高的进程")
-    repaired = [
+
+    synthesized = [
         e for e in result.trace.events
         if e.kind is EventKind.PLAN_UPDATE
-        and e.payload.get("event") == "plan_auto_repaired_after_retry"
+        and e.payload.get("event") == "plan_auto_synthesized"
     ]
-    assert repaired
+    assert synthesized
+    # 不再阻断：没有 plan_required，也没有逼写 todo_write
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+        for e in result.trace.events
+    )
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE
+        and e.payload.get("reason") == "tool_use_without_todo_write"
+        for e in result.trace.events
+    )
+    assert not any(
+        e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "todo_write"
+        for e in result.trace.events
+    )
+    # 工具在同一轮即执行
+    assert any(
+        e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "process_list"
+        for e in result.trace.events
+    )
+    assert any(e.kind is EventKind.EXECUTION for e in result.trace.events)
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
     assert plan.todos[0].content.startswith("调用只读工具 process_list")
 
 
-def test_tool_use_without_todo_plan_prefers_plan_only_retry(agent):
-    backend = _PlanOnlyRetryBackend()
+def test_tool_use_without_todo_plan_is_not_coerced_into_todo_write(agent):
+    backend = _FeedbackCoercesTodoWriteBackend()
     agent.llm = backend
     agent.cfg.agent.max_iterations = 3
+
     result = agent.ask("查下 CPU 占用最高的进程")
-    assert any(
-        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_generated_after_retry"
+
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE
+        and e.payload.get("reason") == "tool_use_without_todo_write"
         for e in result.trace.events
     )
     assert not any(
-        e.kind is EventKind.PLAN_UPDATE
-        and e.payload.get("event") == "plan_auto_repaired_after_retry"
+        e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "todo_write"
         for e in result.trace.events
     )
-    assert result.plan_id is not None
-    plan = agent.plan_store.get(result.plan_id)
-    assert [todo.content for todo in plan.todos] == [
-        "调用只读工具查看 CPU 进程列表。",
-        "根据结果返回关键证据。",
+    assert all(names != ["todo_write"] for names in backend.tool_sets)
+
+
+def test_real_llm_todo_write_coercion_repro_entry(tmp_path):
+    if os.environ.get("KYAGENT_RUN_REAL_LLM_TODO_REPRO") != "1":
+        pytest.skip("set KYAGENT_RUN_REAL_LLM_TODO_REPRO=1 to run the real LLM repro")
+
+    cfg = Config(base_dir=Path(__file__).parent.parent)
+    cfg.audit.database = str(tmp_path / "real-llm-repro.db")
+    cfg.audit.jsonl_file = str(tmp_path / "real-llm-repro.jsonl")
+    cfg.safety.rules_file = "configs/safety-rules.yaml"
+    cfg.agent.llm_backend = os.environ.get("KYAGENT_REAL_LLM_BACKEND", cfg.agent.llm_backend)
+    cfg.agent.max_iterations = int(os.environ.get("KYAGENT_REAL_LLM_MAX_ITERATIONS", "6"))
+
+    backend = cfg.agent.llm_backend.lower()
+    key_env_override = os.environ.get("KYAGENT_REAL_LLM_API_KEY_ENV")
+    if os.environ.get("KYAGENT_REAL_LLM_API_KEY"):
+        key_env_override = "KYAGENT_REAL_LLM_API_KEY"
+    model_override = os.environ.get("KYAGENT_REAL_LLM_MODEL")
+    base_url_override = os.environ.get("KYAGENT_REAL_LLM_BASE_URL")
+    if backend == "anthropic":
+        if key_env_override:
+            cfg.agent.anthropic.api_key_env = key_env_override
+        if model_override:
+            cfg.agent.anthropic.model = model_override
+        key_env = cfg.agent.anthropic.api_key_env
+    elif backend in {"openai", "openai_httpx"}:
+        if key_env_override:
+            cfg.agent.openai.api_key_env = key_env_override
+        if model_override:
+            cfg.agent.openai.model = model_override
+        if base_url_override:
+            cfg.agent.openai.base_url = base_url_override
+        key_env = cfg.agent.openai.api_key_env
+    elif backend in {"deepseek", "deepseek_httpx"}:
+        if key_env_override:
+            cfg.agent.deepseek.api_key_env = key_env_override
+        if model_override:
+            cfg.agent.deepseek.model = model_override
+        if base_url_override:
+            cfg.agent.deepseek.base_url = base_url_override
+        key_env = cfg.agent.deepseek.api_key_env
+    elif backend in {"qwen", "qwen_httpx"}:
+        if key_env_override:
+            cfg.agent.qwen.api_key_env = key_env_override
+        if model_override:
+            cfg.agent.qwen.model = model_override
+        if base_url_override:
+            cfg.agent.qwen.base_url = base_url_override
+        key_env = cfg.agent.qwen.api_key_env
+    else:
+        pytest.skip(f"real LLM repro does not support backend {cfg.agent.llm_backend!r}")
+    if not os.environ.get(key_env):
+        pytest.skip(f"{key_env} is not set")
+
+    agent = Agent.from_config(cfg, confirm=lambda *a, **k: False)
+    result = agent.ask(
+        "查下 CPU 占用最高的进程。不要先写 TODO 或计划，直接使用你认为必要的系统工具。"
+    )
+
+    plan_required = [
+        e for e in result.trace.events
+        if e.kind is EventKind.PLAN_UPDATE
+        and e.payload.get("reason") == "tool_use_without_todo_write"
     ]
+    todo_requests = [
+        e for e in result.trace.events
+        if e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "todo_write"
+    ]
+    assert not plan_required, result.notes
+    assert not todo_requests, result.notes
 
 
 def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
@@ -463,6 +550,37 @@ def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
         "根据结果返回关键证据。",
     ]
     assert plan.todos[0].status == "in_progress"
+
+
+def test_tool_use_with_structured_todo_write_executes_without_text_repair(agent):
+    backend = _TodoWriteToolBackend()
+    agent.llm = backend
+    result = agent.ask("查下 CPU 占用最高的进程")
+    assert result.plan_id is not None
+    assert any("todo_write" in names for names in backend.seen_tools)
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
+        for e in result.trace.events
+    )
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_synthesized"
+        for e in result.trace.events
+    )
+    todo_requests = [
+        e for e in result.trace.events
+        if e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "todo_write"
+    ]
+    process_requests = [
+        e for e in result.trace.events
+        if e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "process_list"
+    ]
+    assert todo_requests and process_requests
+    assert result.trace.events.index(todo_requests[0]) < result.trace.events.index(process_requests[0])
+    plan = agent.plan_store.get(result.plan_id)
+    assert [(todo.content, todo.status, todo.priority) for todo in plan.todos] == [
+        ("调用只读工具查看 CPU 进程列表。", "in_progress", "high"),
+        ("根据结果返回关键证据。", "pending", "medium"),
+    ]
 
 
 def test_numbered_plan_is_accepted_as_todo_plan(agent):

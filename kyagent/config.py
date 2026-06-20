@@ -132,8 +132,10 @@ class SafetyConfig(BaseModel):
 
 
 class AuditConfig(BaseModel):
-    database: str = "./var/audit.db"
-    jsonl_file: Optional[str] = "./var/audit.jsonl"
+    database: str = Field(default_factory=lambda: os.environ.get("KYAGENT_AUDIT_DB", "./var/audit.db"))
+    jsonl_file: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("KYAGENT_AUDIT_JSONL", "./var/audit.jsonl")
+    )
     retain_days: int = 90
     integrity_enabled: bool = False
     hmac_key_env: str = "KYAGENT_AUDIT_HMAC_KEY"
@@ -154,7 +156,7 @@ class RcaConfig(BaseModel):
 
 class PlanningConfig(BaseModel):
     enabled: bool = True
-    database: str = "./var/plans.db"
+    database: str = Field(default_factory=lambda: os.environ.get("KYAGENT_PLAN_DB", "./var/plans.db"))
 
 
 class WebKnowledgeConfig(BaseModel):

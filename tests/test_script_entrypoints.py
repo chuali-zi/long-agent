@@ -111,6 +111,22 @@ def test_developer_quick_test_script_chains_readme_flow() -> None:
     assert "KYAGENT_WEB_ADMIN_TOKEN=admin123" in readme
 
 
+def test_full_test_script_chains_pytest_and_benchmarks() -> None:
+    script = read_repo("scripts/full-test.sh")
+
+    for phrase in (
+        "scripts/kyagent.sh\" install",
+        "scripts/kyagent.sh\" test",
+        "benchmarks/run-suite.sh",
+        "--log-dir",
+        "--setup-permissions-prod",
+        "--teardown-each",
+        "benchmarks require root",
+        "PERFECT",
+    ):
+        assert phrase in script
+
+
 def test_prod_env_script_writes_only_the_minimal_runtime_env() -> None:
     script = read_repo("scripts/write-prod-env.sh")
 
