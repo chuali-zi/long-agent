@@ -758,9 +758,14 @@ class Agent:
             ))
 
             def _on_delta(chunk: str) -> None:
-                # 闭包捕获 self，给 TUI 推 token 级增量；空块直接跳过
+                # 闭包捕获 self，给 UI 推 token 级增量（答案/正文）；空块直接跳过
                 if chunk:
                     self._emit(ProgressEvent(kind="thinking_delta", delta=chunk))
+
+            def _on_reason(chunk: str) -> None:
+                # 推理模型的思维链增量（reasoning_content），独立通道；空块跳过
+                if chunk:
+                    self._emit(ProgressEvent(kind="reasoning_delta", delta=chunk))
 
             try:
                 # 所有后端要么实现 chat_stream（基类默认调 chat 再发一次完整 delta），
@@ -768,7 +773,8 @@ class Agent:
                 stream_fn = getattr(self.llm, "chat_stream", None)
                 if callable(stream_fn):
                     assistant = stream_fn(
-                        turn_system_prompt, self.messages, tools_for_llm, _on_delta
+                        turn_system_prompt, self.messages, tools_for_llm, _on_delta,
+                        on_reasoning=_on_reason,
                     )
                 else:
                     assistant = self.llm.chat(
@@ -1591,14 +1597,92 @@ class Agent:
             )
         return None
 
+    # 工具名前缀 → (中文动词, 取目标用的 input 键)。用于把工具调用渲染成
+    # 一句人话（"读取 /var/log"），供 web / TUI 直接展示，避免裸露 {iterations}。
+    _TOOL_VERB_PREFIX: tuple[tuple[str, str, str], ...] = (
+        ("file_cleanup_candidates", "扫描可清理文件", "path"),
+        ("fs_delete_file", "删除文件", "path"),
+        ("fs_truncate", "清空文件", "path"),
+        ("fs_find", "查找文件", "pattern"),
+        ("fs_ls", "查看目录", "path"),
+        ("fs_du", "统计磁盘占用", "path"),
+        ("fs_df", "查看磁盘空间", ""),
+        ("fs_", "检查文件系统", "path"),
+        ("pkg_install", "安装软件包", "package"),
+        ("pkg_update_all", "更新全部软件包", ""),
+        ("pkg_security_upgrade", "安装安全更新", ""),
+        ("pkg_update", "更新软件包", "package"),
+        ("pkg_reinstall", "重装软件包", "package"),
+        ("pkg_remove", "卸载软件包", "package"),
+        ("pkg_clean_cache", "清理软件包缓存", ""),
+        ("pkg_rebuild_db", "重建软件包数据库", ""),
+        ("pkg_", "查询软件包", "package"),
+        ("git_", "查看 git 信息", ""),
+        ("cron_d_disable", "禁用定时任务", ""),
+        ("cron_", "检查定时任务", ""),
+        ("la_", "检查 LoongArch 兼容性", ""),
+        ("verify_", "校验", ""),
+        ("plan_", "查看计划", ""),
+    )
+
+    @classmethod
+    def _tool_action_label(cls, name: str, argv: list[str] | None,
+                           tool_input: dict | None) -> str:
+        """把一次工具调用渲染成一句中文人话（Cursor 式 "正在做 X"）。
+
+        纯读 name / argv / input，不执行任何东西。优先用前缀动词 + 目标，
+        其次回退到真实命令行（argv），最后回退到工具名。
+        """
+        special = {
+            "todo_read": "查看任务清单",
+            "todo_write": "更新任务清单",
+            "ask_user_choice": "请你做个选择",
+            "submit_rca_report": "提交根因分析报告",
+        }
+        if name in special:
+            return special[name]
+
+        def _target() -> str:
+            inp = tool_input or {}
+            for key in ("path", "package", "pattern", "target", "name", "file", "query"):
+                val = inp.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return ""
+
+        for prefix, verb, key in cls._TOOL_VERB_PREFIX:
+            if name == prefix or name.startswith(prefix):
+                inp = tool_input or {}
+                tgt = ""
+                if key:
+                    val = inp.get(key)
+                    if isinstance(val, str) and val.strip():
+                        tgt = val.strip()
+                if not tgt:
+                    tgt = _target()
+                return f"{verb} {tgt}".strip() if tgt else verb
+
+        # 未识别工具：有真实命令行就展示命令，否则展示目标 / 工具名
+        if argv:
+            cmd = " ".join(str(a) for a in argv)
+            if len(cmd) > 120:
+                cmd = cmd[:117] + "…"
+            return f"执行 {cmd}"
+        tgt = _target()
+        return f"调用 {name} {tgt}".strip() if tgt else f"调用 {name}"
+
     def _handle_tool_use(self, trace: Trace, tu: ToolUseBlock,
                         notes: list[str], parallel_read_only: bool = False) -> ToolResultBlock:
         """对外入口：包一层 try/finally，确保 tool_call_end 一定发出。
 
-        入口先发一次只含 tool 名的 tool_call_start；prepare_call 成功后
-        inner 会再发一次带 argv 的 tool_call_start 补充信息。
+        入口先发一次带人话 action 的 tool_call_start（由 name+input 推导）；
+        prepare_call 成功后 inner 会再发一次带 argv 的 tool_call_start 补充命令行。
         """
-        self._emit(ProgressEvent(kind="tool_call_start", tool=tu.name))
+        self._emit(ProgressEvent(
+            kind="tool_call_start",
+            tool=tu.name,
+            meta={"action": self._tool_action_label(tu.name, None, tu.input)},
+        ))
         ok = False
         result_block: ToolResultBlock | None = None
         try:
@@ -1612,7 +1696,7 @@ class Agent:
                 kind="tool_call_end",
                 tool=tu.name,
                 text=(result_block.content[:200] if result_block else ""),
-                meta={"ok": ok},
+                meta={"ok": ok, "action": self._tool_action_label(tu.name, None, tu.input)},
             ))
 
     def _handle_tool_use_inner(self, trace: Trace, tu: ToolUseBlock,
@@ -1670,11 +1754,13 @@ class Agent:
         if isinstance(prep, PipelineError):
             return ToolResultBlock(tool_use_id=tu.id, is_error=True, content=prep.detail)
 
-        # argv 已就绪：补一次 tool_call_start，让 TUI 看到具体命令行
+        # argv 已就绪：补一次 tool_call_start，让 UI 看到具体命令行 + 精炼人话
         self._emit(ProgressEvent(
             kind="tool_call_start",
             tool=tu.name,
             argv=list(prep.argv),
+            meta={"action": self._tool_action_label(
+                tu.name, list(prep.argv), prep.cleaned or tu.input)},
         ))
 
         if tu.name in _AUTO_APPROVE_FILE_REMEDIATION_TOOLS:

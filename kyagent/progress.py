@@ -17,7 +17,8 @@ from typing import Any, Callable, Literal
 ProgressKind = Literal[
     "agent_start",       # Agent.ask() entered; payload: text=user_input
     "thinking_start",    # LLM round-trip begins; payload: meta={"iteration": N}
-    "thinking_delta",    # LLM stream token chunk; payload: delta=chunk
+    "thinking_delta",    # LLM stream token chunk (answer/content text); payload: delta=chunk
+    "reasoning_delta",   # LLM reasoning/CoT token chunk (separate channel); payload: delta=chunk
     "thinking_end",      # LLM round-trip ends; payload: text=preview, meta={"tool_calls": [...]}
     "tool_call_start",   # About to invoke tool; payload: tool, argv
     "tool_call_end",     # Tool returned; payload: tool, text=truncated_output, meta={"ok": bool}

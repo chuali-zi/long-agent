@@ -88,11 +88,14 @@ class LlmBackend:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         on_delta: Callable[[str], None],
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> AssistantMessage:
         """流式聊天的默认实现：回退到 chat() 并把完整文本作为一次 delta 发出。
 
         子类如有原生流式能力（OpenAI SSE、httpx SSE）应当 override。
         on_delta 仅用于 text 增量，不应包含 tool_call JSON 片段。
+        on_reasoning（可选）接收推理模型的思维链增量（reasoning_content）；
+        默认实现无原生流式、拿不到独立思维链，故忽略该回调。
         """
         result = self.chat(system, messages, tools)
         full = "".join(b.text for b in result.blocks if isinstance(b, TextBlock))
@@ -308,12 +311,14 @@ class OpenAIBackend(LlmBackend):
         choice = resp.choices[0]
         return self._from_openai_choice(choice, raw=resp)
 
-    def chat_stream(self, system, messages, tools, on_delta):
+    def chat_stream(self, system, messages, tools, on_delta, on_reasoning=None):
         """OpenAI SDK 原生 streaming：stream=True 后迭代 ChatCompletionChunk。
 
         text 增量逐块经 on_delta 推出；tool_calls 增量按 index 累积，最后
         组装成与 chat() 等价的 AssistantMessage（复用 _from_openai_dict 路径
         以保证 stop_reason 映射 / tool_use_id 透传 / JSON args 解析全部一致）。
+        on_reasoning（可选）接收 delta.reasoning_content 增量（DeepSeek-R1/v4-pro
+        等推理模型的思维链）；该内容只流式外推，不并入 text_buf / 最终消息。
         """
         oai_messages = self._to_openai_messages(system, messages)
         oai_tools = self._to_openai_tools(tools) if tools else None
@@ -356,6 +361,13 @@ class OpenAIBackend(LlmBackend):
                     on_delta(d_content)
                 except Exception:  # noqa: BLE001
                     logger.debug("on_delta raised", exc_info=True)
+
+            d_reason = getattr(delta, "reasoning_content", None)
+            if d_reason and on_reasoning is not None:
+                try:
+                    on_reasoning(d_reason)
+                except Exception:  # noqa: BLE001
+                    logger.debug("on_reasoning raised", exc_info=True)
 
             d_tcs = getattr(delta, "tool_calls", None) or []
             for tc in d_tcs:
@@ -694,11 +706,12 @@ class HttpxBackend(LlmBackend):
 
         return self._post_with_retry(payload)
 
-    def chat_stream(self, system, messages, tools, on_delta):
+    def chat_stream(self, system, messages, tools, on_delta, on_reasoning=None):
         """SSE 流式聊天（OpenAI 协议 stream=True）。
 
         - 在 chat_completions 上 POST stream=True，迭代 iter_lines 解析 SSE
-        - text 增量经 on_delta 实时推出；tool_calls 增量按 index 累积
+        - text 增量经 on_delta 实时推出；reasoning_content 增量经 on_reasoning
+          实时推出（仅外推、不并入最终消息）；tool_calls 增量按 index 累积
         - 流结束后构造伪 OpenAI 响应 dict 并复用 _from_openai_dict
           以保证与 chat() 完全等价的 AssistantMessage 语义
         - 网络异常（_RETRY_EXC_TYPES）整段重试，最多 max_retries 次；
@@ -724,7 +737,7 @@ class HttpxBackend(LlmBackend):
         attempt = 0
         while True:
             try:
-                return self._stream_once(payload, on_delta)
+                return self._stream_once(payload, on_delta, on_reasoning)
             except self._RETRY_EXC_TYPES as exc:
                 if attempt >= self.max_retries:
                     raise RuntimeError(
@@ -743,6 +756,7 @@ class HttpxBackend(LlmBackend):
         self,
         payload: dict[str, Any],
         on_delta: Callable[[str], None],
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> AssistantMessage:
         """单次 SSE 流式调用；网络异常往外抛由 chat_stream 决定是否重试。"""
         text_buf: list[str] = []
@@ -798,6 +812,14 @@ class HttpxBackend(LlmBackend):
                         on_delta(d_content)
                     except Exception:  # noqa: BLE001
                         logger.debug("on_delta raised", exc_info=True)
+
+                d_reason = delta.get("reasoning_content")
+                if d_reason and on_reasoning is not None:
+                    # 思维链只外推给 UI，不进 text_buf / fake_dict（不回灌对话历史）
+                    try:
+                        on_reasoning(d_reason)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("on_reasoning raised", exc_info=True)
 
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0) or 0
@@ -971,9 +993,10 @@ class MockBackend(LlmBackend):
         self._tool_names_key: int | None = None
         self._tool_names_cache: set[str] = set()
 
-    def chat_stream(self, system, messages, tools, on_delta):
+    def chat_stream(self, system, messages, tools, on_delta, on_reasoning=None):
         """把 chat() 返回的 text 块切成 5-10 段逐块 on_delta，加微小 sleep
         以便 TUI 看见动画。tool_use 块不切，最终 AssistantMessage 与 chat() 同。
+        mock 后端无独立思维链，on_reasoning 忽略（保持调用方签名兼容）。
         """
         result = self.chat(system, messages, tools)
         delay = 0.0 if os.environ.get("KYAGENT_BENCH") == "1" else self._STREAM_CHUNK_DELAY

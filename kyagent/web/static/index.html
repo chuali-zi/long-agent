@@ -308,7 +308,7 @@
   .chat-empty .t { font-family: var(--serif); font-size: 18px; color: var(--ink-soft); margin-bottom: 4px; }
   .chat-empty .d { font-size: 13px; line-height: 1.5; }
 
-  .msg { margin: 0; max-width: 100%; }
+  .msg { margin: 0; max-width: 100%; flex: 0 0 auto; }  /* 聊天块统一不被 flex 压缩 */
   .msg .who {
     margin-bottom: 6px; color: var(--muted); font-size: 11px;
     letter-spacing: .1em; text-transform: uppercase; font-weight: 700;
@@ -414,6 +414,91 @@
     padding: 11px 13px; border-radius: 8px;
   }
   .msg.error .who { color: var(--danger); }
+
+  /* ========================================================================
+     5b. Cursor 式时序块流：thinking / tool_using 收起 pill（流光）+ 流式答案
+     ===================================================================== */
+  /* —— 通用收起 pill（thinking / tool_using 共用） —— */
+  .flow-pill {
+    background: var(--paper-2); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+    flex: 0 0 auto;   /* 关键：overflow:hidden 会把 flex 最小高度归零，必须禁止收缩，否则被压成横杆 */
+    animation: pillIn .22s ease both;
+  }
+  @keyframes pillIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  .pill-head {
+    position: relative; display: flex; align-items: center; gap: 9px; width: 100%;
+    padding: 9px 13px; background: none; border: 0; cursor: pointer;
+    font: inherit; color: var(--ink-soft); text-align: left; overflow: hidden;
+  }
+  .pill-head:hover { background: rgba(196,92,54,.045); }
+  .pill-ic {
+    width: 8px; height: 8px; flex: none; border-radius: 50%;
+    background: var(--muted);
+  }
+  .flow-pill.thinking .pill-ic { background: var(--clay); }
+  .flow-pill.tool .pill-ic { background: var(--ochre); }
+  .flow-pill.active .pill-ic { animation: pillPulse 1.1s ease-in-out infinite; }
+  @keyframes pillPulse { 0%,100% { transform: scale(.7); opacity: .55; } 50% { transform: scale(1.15); opacity: 1; } }
+  .pill-label {
+    flex: 1; font-size: 12.5px; font-weight: 600; letter-spacing: .03em;
+    font-family: var(--mono); color: var(--ink-soft);
+  }
+  .flow-pill.active .pill-label { color: var(--clay-deep); }
+  /* 流光 shimmer：运行态在标签区扫一道暖光 */
+  .pill-sheen { position: absolute; inset: 0; pointer-events: none; opacity: 0; }
+  .flow-pill.active .pill-sheen {
+    opacity: 1;
+    background: linear-gradient(100deg, transparent 20%, rgba(196,92,54,.16) 45%, rgba(255,247,235,.5) 50%, rgba(196,92,54,.16) 55%, transparent 80%);
+    background-size: 220% 100%;
+    animation: sheen 1.5s linear infinite;
+    mix-blend-mode: normal;
+  }
+  @keyframes sheen { from { background-position: 180% 0; } to { background-position: -80% 0; } }
+  .pill-chevron { color: var(--muted); font-size: 13px; transition: transform .18s ease; }
+  .flow-pill.collapsed .pill-chevron { transform: rotate(-90deg); }
+  .flow-pill.collapsed .pill-body { display: none; }
+  .pill-body { border-top: 1px solid var(--line-soft); }
+
+  /* thinking pill 内容（点开才见，流式增长） */
+  .think-pre {
+    margin: 0; padding: 9px 13px 12px; max-height: 320px; overflow: auto;
+    color: var(--muted); font: 12.5px/1.6 var(--mono);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+
+  /* tool_using pill 内部：每行一次工具调用 */
+  .tool-line {
+    display: grid; grid-template-columns: auto 1fr; align-items: start;
+    gap: 8px; padding: 7px 13px; font-size: 12.5px; color: var(--ink-soft);
+    border-top: 1px solid var(--line-soft);
+  }
+  .tool-line:first-child { border-top: 0; }
+  .tool-line.has-result { cursor: pointer; }
+  .tool-line .tl-act { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 1px; }
+  .tool-line .tl-stat { font-size: 12.5px; font-weight: 700; line-height: 1.3; min-width: 14px; }
+  .tool-line.ok .tl-stat { color: var(--sage); }
+  .tool-line.fail .tl-stat { color: var(--danger); }
+  .tool-line .spinner {
+    display: inline-block; width: 11px; height: 11px; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--clay);
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tool-line .tl-result {
+    grid-column: 1 / -1; margin: 4px 0 0; padding: 8px 10px; border-radius: 7px;
+    background: var(--paper-3); border: 1px solid var(--line-soft);
+    font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 220px; overflow: auto; color: var(--ink-soft);
+  }
+
+  /* —— 流式答案气泡：末尾闪烁光标 —— */
+  .msg.agent.streaming .body::after {
+    content: ""; display: inline-block; width: 7px; height: 1.05em;
+    margin-left: 2px; vertical-align: -2px; border-radius: 1px;
+    background: var(--clay); animation: caretBlink 1s steps(2) infinite;
+  }
+  @keyframes caretBlink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 
   /* ========================================================================
      6. 输入条
@@ -1417,34 +1502,38 @@ function clearChatEmpty() {
   const e = document.getElementById('chatEmpty');
   if (e) e.remove();
 }
-const chatFollow = {enabled: true, programmatic: false, timer: 0};
+/* 软自动滚动：平滑跟随新输出；用户向上拖动即停，回到底部附近自动恢复。
+   关键：用 programmatic 窗口屏蔽「自身平滑滚动」触发的 scroll 事件，避免误判为用户操作。 */
+const chatFollow = {enabled: true, programmatic: false, lastTop: 0, timer: 0};
 function chatNearBottom(log) {
-  return log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 60;
 }
 function followChatOutput() {
-  const log = document.getElementById('chatLog');
   if (!chatFollow.enabled) return;
+  const log = document.getElementById('chatLog');
   requestAnimationFrame(() => {
     chatFollow.programmatic = true;
+    chatFollow.lastTop = log.scrollTop;
+    log.scrollTo({top: log.scrollHeight, behavior: 'smooth'});  // 软滚动，不强制吸底
     clearTimeout(chatFollow.timer);
-    log.scrollTo({top: log.scrollHeight, behavior: 'smooth'});
-    chatFollow.timer = setTimeout(() => {
-      if (chatFollow.enabled) {
-        const oldBehavior = log.style.scrollBehavior;
-        log.style.scrollBehavior = 'auto';
-        log.scrollTop = log.scrollHeight;
-        log.style.scrollBehavior = oldBehavior;
-      }
-      chatFollow.programmatic = false;
-    }, 450);
+    chatFollow.timer = setTimeout(() => { chatFollow.programmatic = false; }, 260);
   });
 }
 const chatLogEl = document.getElementById('chatLog');
+/* 仅在「非自身滚动」时按位置裁定：靠近底部=跟随，离开底部=停 */
 chatLogEl.addEventListener('scroll', () => {
-  if (!chatFollow.programmatic) chatFollow.enabled = chatNearBottom(chatLogEl);
+  if (chatFollow.programmatic) { chatFollow.lastTop = chatLogEl.scrollTop; return; }
+  chatFollow.enabled = chatNearBottom(chatLogEl);
 }, {passive: true});
-chatLogEl.addEventListener('wheel', () => { chatFollow.enabled = false; }, {passive: true});
-chatLogEl.addEventListener('touchmove', () => { chatFollow.enabled = false; }, {passive: true});
+/* 用户主动向上滚（滚轮/触摸）立即停跟随 */
+chatLogEl.addEventListener('wheel', (e) => { if (e.deltaY < 0) chatFollow.enabled = false; }, {passive: true});
+let _touchY = 0;
+chatLogEl.addEventListener('touchstart', (e) => { _touchY = e.touches[0]?.clientY || 0; }, {passive: true});
+chatLogEl.addEventListener('touchmove', (e) => {
+  const y = e.touches[0]?.clientY || 0;
+  if (y > _touchY + 2) chatFollow.enabled = false;   // 手指下移 = 内容上滚 = 看历史
+  _touchY = y;
+}, {passive: true});
 function appendMsg(cls, who, text, opts = {}) {
   clearChatEmpty();
   const log = document.getElementById('chatLog');
@@ -1474,28 +1563,201 @@ function toolArgv(p) {
   return p.argv ?? p.args ?? p.arguments ?? {};
 }
 
+/* ============================================================================
+   Cursor 式「时序块流」渲染
+   —— 单一 openBlock 游标；任何与当前块类型不同的事件先收口、再在底部新建块。
+      这一条规则同时实现：时序追加在最底部 / 同类合并 / 再次 thinking 在下方。
+   块类型：'thinking'（收起 pill，流光，点开见流式思维）
+           'tool'（tool_using 收起 pill，连续工具合并，点开见明细）
+           'answer'（可见流式正文，final 转 markdown）
+   ========================================================================== */
+let openBlock = null;            // {type, el, ...}
+let lastThinkingPill = null;     // 最近一个 thinking pill（用于折叠中间旁白）
+let currentThinking = '';        // 兼容旧引用（演示/悬浮球），无实义
+
+function resetTurnRender() {
+  openBlock = null;
+  lastThinkingPill = null;
+  currentThinking = '';
+}
+function chatLog() { return document.getElementById('chatLog'); }
+
+/* 收口当前块：停流光、定格、保持收起 */
+function closeOpenBlock() {
+  if (!openBlock) return;
+  const b = openBlock;
+  if (b.type === 'thinking') {
+    b.el.classList.remove('active');
+    b.el.classList.add('done');
+    const secs = Math.max(1, Math.round((Date.now() - b.ts) / 1000));
+    const label = b.el.querySelector('.pill-label');
+    if (label) label.textContent = `已思考 ${secs}s`;
+  } else if (b.type === 'tool') {
+    b.el.classList.remove('active');
+    b.el.classList.add('done');
+    const label = b.el.querySelector('.pill-label');
+    if (label) label.textContent = b.count > 1 ? `已调用 ${b.count} 个工具` : '已调用工具';
+  } else if (b.type === 'answer') {
+    b.el.classList.remove('streaming');
+    if (!(b.text || '').trim()) {
+      b.el.remove();                       // 空正文轮：不留空气泡
+    } else {
+      renderMarkdownInto(b.body, b.text);  // 正文块收口即转 markdown（含中间报告）
+    }
+  }
+  openBlock = null;
+}
+
+/* ---- 通用收起 pill（thinking / tool_using 共用 .flow-pill） ---- */
+function makeFlowPill(kind, labelText) {
+  clearChatEmpty();
+  const div = document.createElement('div');
+  div.className = `flow-pill ${kind} active collapsed`;
+  div.innerHTML =
+    `<button class="pill-head" type="button" aria-expanded="false">
+       <span class="pill-ic" aria-hidden="true"></span>
+       <span class="pill-label"></span>
+       <span class="pill-sheen" aria-hidden="true"></span>
+       <span class="pill-chevron" aria-hidden="true">⌄</span>
+     </button>
+     <div class="pill-body"></div>`;
+  div.querySelector('.pill-label').textContent = labelText;
+  const head = div.querySelector('.pill-head');
+  head.addEventListener('click', () => {
+    const collapsed = div.classList.toggle('collapsed');
+    head.setAttribute('aria-expanded', String(!collapsed));
+  });
+  chatLog().appendChild(div);
+  followChatOutput();
+  return div;
+}
+
+/* ---- thinking pill ---- */
+function openThinking() {
+  if (openBlock && openBlock.type === 'thinking') return openBlock;
+  closeOpenBlock();
+  const el = makeFlowPill('thinking', 'thinking');
+  const pre = document.createElement('pre');
+  pre.className = 'think-pre';
+  el.querySelector('.pill-body').appendChild(pre);
+  openBlock = {type: 'thinking', el, pre, ts: Date.now()};
+  lastThinkingPill = openBlock;
+  return openBlock;
+}
+
+/* ---- tool_using pill（连续工具合并） ---- */
+function openTool() {
+  if (openBlock && openBlock.type === 'tool') return openBlock;
+  closeOpenBlock();
+  const el = makeFlowPill('tool', 'tool_using');
+  openBlock = {type: 'tool', el, body: el.querySelector('.pill-body'), rows: [], count: 0};
+  return openBlock;
+}
+function toolRowByName(b, name, opts = {}) {
+  for (let i = b.rows.length - 1; i >= 0; i--) {
+    const r = b.rows[i];
+    if (r.name !== name || r.ended) continue;
+    if (opts.needArgvUnset && r.argvSet) continue;
+    return r;
+  }
+  return null;
+}
+function toolStart(p) {
+  const name = toolName(p);
+  const action = (p.meta && p.meta.action) || `调用 ${name}`;
+  const b = openTool();
+  if (p.argv) {
+    const row = toolRowByName(b, name, {needArgvUnset: true});
+    if (row) {                       // 第二次（带 argv）：精炼同一条内部行
+      row.argvSet = true;
+      row.actEl.textContent = action;
+      row.line.title = (p.argv || []).join(' ');
+      return;
+    }
+  }
+  const line = document.createElement('div');
+  line.className = 'tool-line running';
+  line.innerHTML =
+    `<span class="tl-stat"><span class="spinner" aria-hidden="true"></span></span>` +
+    `<span class="tl-act"></span>` +
+    `<pre class="tl-result" hidden></pre>`;
+  line.querySelector('.tl-act').textContent = action;
+  b.body.appendChild(line);
+  const row = {name, line, ended: false, argvSet: !!p.argv,
+               statEl: line.querySelector('.tl-stat'), actEl: line.querySelector('.tl-act'),
+               resEl: line.querySelector('.tl-result')};
+  if (p.argv) row.line.title = (p.argv || []).join(' ');
+  b.rows.push(row);
+  b.count += 1;
+  const label = b.el.querySelector('.pill-label');
+  if (label) label.textContent = b.count > 1 ? `tool_using · ${b.count}` : 'tool_using';
+  state.metrics.tools += 1; updateMetrics();
+  followChatOutput();
+}
+function toolEnd(p) {
+  const name = toolName(p);
+  const ok = (p.meta?.ok ?? p.ok) !== false;
+  if (ok) advanceTodoOnToolEnd();
+  if (!openBlock || openBlock.type !== 'tool') return;
+  const row = toolRowByName(openBlock, name);
+  if (!row) return;
+  row.ended = true;
+  row.line.classList.remove('running');
+  row.line.classList.add(ok ? 'ok' : 'fail');
+  row.statEl.textContent = ok ? '✓' : '✗';
+  const result = p.text ?? p.result ?? p.output ?? '';
+  if (result) {
+    row.resEl.textContent = typeof result === 'string' ? result : JSON.stringify(result);
+    row.line.classList.add('has-result');
+    row.line.addEventListener('click', (e) => {
+      if (e.target.closest('.tl-result')) return;
+      row.resEl.hidden = !row.resEl.hidden;
+    });
+  }
+}
+
+/* ---- answer 块（可见流式正文） ---- */
+function openAnswer() {
+  if (openBlock && openBlock.type === 'answer') return openBlock;
+  closeOpenBlock();
+  clearChatEmpty();
+  const div = document.createElement('div');
+  div.className = 'msg agent streaming';
+  div.innerHTML = '<div class="who">agent</div><div class="body"></div>';
+  chatLog().appendChild(div);
+  openBlock = {type: 'answer', el: div, body: div.querySelector('.body'), text: ''};
+  followChatOutput();
+  return openBlock;
+}
+function appendAnswer(delta) {
+  const b = openAnswer();
+  b.text += delta;
+  b.body.textContent = b.text;     // 流式期纯文本，final 再转 markdown
+  followChatOutput();
+}
 /* ---- SSE progress 事件分发（与 server.py on_progress 对齐） ---- */
 function handleProgress(p) {
-  if (p.kind === 'thinking_delta') {
-    state.metrics.thinking += 1;
-    updateMetrics();
-    currentThinking += p.delta || '';
-    activityState.thinking = currentThinking;
-    maybeUpdateTodosFromText(currentThinking);
-    setActivity('思考中', activityState.detail);
+  if (p.kind === 'reasoning_delta') {
+    if (!openBlock || openBlock.type !== 'thinking') openThinking();
+    openBlock.pre.textContent += (p.delta || '');
+    followChatOutput();
     setStatus('思考中');
+  } else if (p.kind === 'thinking_delta') {
+    state.metrics.thinking += 1; updateMetrics();
+    appendAnswer(p.delta || '');
+    maybeUpdateTodosFromText(openBlock && openBlock.type === 'answer' ? openBlock.text : '');
+    setStatus('生成中');
+  } else if (p.kind === 'thinking_end') {
+    /* 轮结束：若是答案轮则保留 answer；否则交由后续事件收口 */
   } else if (p.kind === 'tool_call_start') {
-    state.metrics.tools += 1;
-    updateMetrics();
-    const name = toolName(p);
-    setStatus(`调用工具：${name}`);
-    setActivity(`调用工具：${name}`, `argv: ${summarize(toolArgv(p))}`);
+    /* 不再把正文折进 thinking：openTool() 会收口 answer 块但保留可见（含报告） */
+    toolStart(p);
+    setStatus('调用工具');
   } else if (p.kind === 'tool_call_end') {
-    const ok = p.meta?.ok ?? p.ok;
-    const name = toolName(p);
-    if (ok !== false) advanceTodoOnToolEnd();
-    setStatus(`工具结束：${name}`);
-    setActivity(`工具结束：${name}`, `${ok === false ? 'FAILED' : 'OK'} ${name}\nresult: ${summarize(p.text ?? p.result ?? p.output ?? p.meta)}`);
+    toolEnd(p);
+    setStatus('工具结束');
+  } else if (p.kind === 'budget_update') {
+    /* 不再把 {iterations:n} 打到主聊天框 */
   } else if (p.kind === 'approval_required') {
     renderApproval(p);
   } else if (p.kind === 'plan' || p.kind === 'plan_step' || p.kind === 'plan_start' || p.kind === 'plan_snapshot' || p.kind === 'plan_step_start' || p.kind === 'plan_step_update' || p.kind === 'plan_step_end') {
@@ -1503,18 +1765,12 @@ function handleProgress(p) {
   } else if (p.kind === 'approval_resolved') {
     resolveApproval(p);
   } else if (p.kind === 'error') {
+    closeOpenBlock();
     setStatus('错误');
-    setActivity('错误', p.text || p.message || '未知错误');
     appendMsg('error', 'error', p.text || p.message || '未知错误');
-  } else {
-    const label = p.kind || '运行中';
-    setStatus(label);
-    setActivity(label, p.text || summarize(p.meta || ''));
   }
+  /* 其余未知 kind：静默忽略 */
 }
-
-let currentThinking = '';
-let currentThinkingDiv = null;
 
 /* ---- POST /api/ask/stream （SSE 流式对话） ---- */
 async function sendAsk() {
@@ -1529,8 +1785,7 @@ async function sendAsk() {
   document.getElementById('traceView').textContent = '—';
   chatFollow.enabled = true;
   appendMsg('user', 'operator', text);
-  currentThinking = '';
-  currentThinkingDiv = null;
+  resetTurnRender();
   resetActivity();
   resetPlan();
   setStatus('调度中');
@@ -1592,9 +1847,19 @@ function handleSseFrame(frame) {
     const trace = p.trace_id ? String(p.trace_id) : '-';
     document.getElementById('traceView').textContent = trace === '-' ? '—' : trace.slice(0, 12);
     setStatus(p.denied ? '已被护栏拦截' : '完成');
-    setActivity(p.denied ? '已被护栏拦截' : '完成', p.text ? '最终答复已输出到会话。' : '无最终文本。');
-    appendMsg('agent', 'agent · final', p.text || '(空)', {markdown: true});
-    maybeUpdateTodosFromText(p.text || '');
+    /* 收口：若当前是流式答案块 → 转 markdown 终稿；否则（思维/工具收尾）补一条答案块 */
+    const finalText = p.text || '';
+    const ans = (openBlock && openBlock.type === 'answer') ? openBlock : null;
+    closeOpenBlock();   // 可能因空正文移除 ans.el，故下面用 isConnected 兜底
+    if (ans && ans.el.isConnected) {
+      ans.el.querySelector('.who').textContent = 'agent · final';
+      renderMarkdownInto(ans.body, finalText || ans.text || '(空)');
+      followChatOutput();
+    } else if (finalText) {
+      appendMsg('agent', 'agent · final', finalText, {markdown: true});
+      followChatOutput();
+    }
+    maybeUpdateTodosFromText(finalText);
     if (p.denied) appendMsg('error', 'safety', '被安全护栏拦截');
     const finishTodos = () => { if (!p.denied) completeAllTodos(); };
     if (p.plan_id) loadPlan(p.plan_id).then(finishTodos);
@@ -1863,9 +2128,19 @@ if (location.search.includes('demo')) {
   setStatus('完成');
   document.getElementById('traceView').textContent = 'a3f9c1b7e204';
   clearChatEmpty();
+  resetTurnRender();
   appendMsg('user', 'operator', '检查 nginx 服务状态，并清理 /var/log 下 30 天前的归档日志。');
-  activityState.thinking = '先用只读工具确认 nginx 在跑、磁盘水位，再列出待清理文件清单，最后才执行删除——删除属高风险，需人工确认。';
-  setActivity('工具结束：disk_usage', 'OK disk_usage\nresult: /var/log 4.7G / 20G (24%) · archives older-than-30d: 38 files, 1.2G');
+  /* 走真实事件流：thinking pill → tool_using pill（合并 2 工具）→ 再一个 thinking pill（在下方）→ 流式答案 */
+  const r1 = '先用只读工具确认 nginx 在跑、看磁盘水位，再列出待清理的归档清单。删除属高风险，必须人工确认后再执行。';
+  for (const ch of r1.match(/.{1,8}/g)) handleProgress({kind: 'reasoning_delta', delta: ch});
+  handleProgress({kind: 'tool_call_start', tool: 'fs_df', meta: {action: '查看磁盘空间'}});
+  handleProgress({kind: 'tool_call_start', tool: 'fs_df', argv: ['df', '-h', '/var/log'], meta: {action: '查看磁盘空间'}});
+  handleProgress({kind: 'tool_call_end', tool: 'fs_df', text: '/var/log  4.7G / 20G (24%)', meta: {ok: true}});
+  handleProgress({kind: 'tool_call_start', tool: 'file_cleanup_candidates', argv: ['find', '/var/log', '-mtime', '+30'], meta: {action: '扫描可清理文件 /var/log'}});
+  handleProgress({kind: 'tool_call_end', tool: 'file_cleanup_candidates', text: '匹配 30 天前归档：38 个文件，约 1.2G', meta: {ok: true}});
+  /* 第二轮思考 —— 必须渲染在工具 pill 的下方 */
+  const r2 = '磁盘水位正常、归档清单已确认，删除高风险，先汇总现状并把删除动作提交人工审批。';
+  for (const ch of r2.match(/.{1,8}/g)) handleProgress({kind: 'reasoning_delta', delta: ch});
   state.metrics = {thinking: 6, tools: 2, approvals: 1}; updateMetrics();
   renderApproval({
     id: 'apr_7c12',
@@ -1874,11 +2149,14 @@ if (location.search.includes('demo')) {
     body: 'find /var/log -name "*.gz" -mtime +30 -delete   # 38 files · ~1.2G',
     summary_lines: ['影响范围：/var/log/*.gz（38 个文件，约 1.2G）', '不可逆：文件将被永久删除', '建议：先确认无审计留存需求'],
   });
-  appendMsg('agent', 'agent · final', '已确认 nginx 正常运行（active, 4 worker），/var/log 使用率 24%。检出 38 个 30 天前归档共约 1.2G，删除操作为高风险，已提交右侧审批卡片，请人工确认后执行。', {markdown: true});
-  /* ?demo=working —— 定格在「agent 行动中」状态，预览星芒脉冲动画 */
+  const answer = '已确认 **nginx 正常运行**（active，4 个 worker），`/var/log` 使用率 24%。\n\n检出 30 天前归档 **38 个**、共约 **1.2G**。删除属高风险操作，已提交右侧审批卡片，请人工确认后执行。';
+  /* ?demo=working —— 定格在「流式进行中」：第二个 thinking pill 仍在流光 */
   if (location.search.includes('working')) {
     setStatus('思考中');
     setAgentWorking(true);
+  } else {
+    for (const ch of answer.match(/.{1,6}/g)) handleProgress({kind: 'thinking_delta', delta: ch});
+    handleSseFrame('event: final\ndata: ' + JSON.stringify({trace_id: 'a3f9c1b7e204', text: answer}));
   }
 }
 </script>
