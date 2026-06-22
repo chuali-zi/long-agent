@@ -421,7 +421,10 @@ class _FileRemediationChecklist:
     @staticmethod
     def _read_verifies_target(tool_name: str, path_arg: str, paths: set[str], target: str) -> bool:
         parent = posixpath.dirname(target)
-        if path_arg and (path_arg == parent or path_is_within(path_arg, parent)):
+        # 一次扫描父目录或任意祖先目录，即可复核该 target 的当前状态（仍在 / 删后已不在）。
+        # 删除成功后文件本身不会再出现在结果里，所以"扫到包含它的目录"就是有效复核，
+        # 这里的包含关系必须是 target 在 path_arg 之内，而非反向。
+        if path_arg and (path_arg == parent or path_is_within(target, path_arg)):
             return True
         if tool_name in {"log_files_top", "log_rotated_count", "file_cleanup_candidates"} and target.startswith("/var/log/"):
             return True
@@ -633,6 +636,11 @@ class Agent:
         evidence_gate_required = self._is_os_question(user_input)
         evidence_gate_forced_once = False
         evidence_gate_extra_summary = False
+        # 防回环：清理 checklist 反复拦截最终回答时的进度守卫。只要每次拦截都伴随
+        # 进度（新扫描的 root 或新复核的 path），就清零计数；进度停滞且连续拦截达到
+        # 阈值即放行（带未复核告警），避免空转到 max_iterations。
+        checklist_block_count = 0
+        last_checklist_progress = 0
 
         # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
         # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
@@ -942,37 +950,77 @@ class Agent:
                     if not checklist_error:
                         checklist_error = self._file_remediation_checklist.final_error()
                 if checklist_error:
-                    notes.append("file remediation checklist blocked final response")
-                    if self._file_remediation_checklist is not None:
-                        checklist_error += "\n\n" + self._file_remediation_checklist.completion_report()
-                    reason = (
-                        "final_without_pre_scan"
-                        if "not yet enumerated" in checklist_error
-                        else "final_without_post_verify"
+                    # 进度守卫：以"已扫描 root 数 + 已复核 path 数"作为进度信号。较上次拦截
+                    # 有增长才视为有进展并清零计数；反复拦截却毫无进展达到阈值时，不再
+                    # continue 空转，而是放行并附未复核告警。
+                    progress_now = (
+                        len(self._file_remediation_checklist.scanned_roots)
+                        + len(self._file_remediation_checklist.verified_paths)
+                        if self._file_remediation_checklist is not None
+                        else 0
                     )
-                    payload = {
-                        "event": "file_remediation_checklist_required",
-                        "reason": reason,
+                    if progress_now > last_checklist_progress:
+                        checklist_block_count = 0
+                        last_checklist_progress = progress_now
+                    else:
+                        checklist_block_count += 1
+
+                    if checklist_block_count < self.cfg.agent.max_repeated_tool_failures:
+                        notes.append("file remediation checklist blocked final response")
+                        if self._file_remediation_checklist is not None:
+                            checklist_error += "\n\n" + self._file_remediation_checklist.completion_report()
+                        reason = (
+                            "final_without_pre_scan"
+                            if "not yet enumerated" in checklist_error
+                            else "final_without_post_verify"
+                        )
+                        payload = {
+                            "event": "file_remediation_checklist_required",
+                            "reason": reason,
+                            "detail": checklist_error,
+                            "plan_id": plan.plan_id if plan else None,
+                        }
+                        self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                        self._emit(ProgressEvent(
+                            kind="plan_required",
+                            text=checklist_error,
+                            meta=payload,
+                        ))
+                        if plan is not None:
+                            plan = self._set_plan_step(
+                                trace, plan, "verify", "running",
+                                "File cleanup changes require read-only post-verify",
+                                event_kind="plan_step_update",
+                            )
+                        self.messages.append({
+                            "role": "user",
+                            "content": "System feedback: " + checklist_error,
+                        })
+                        continue
+
+                    # 守卫触发：连续 max_repeated_tool_failures 次拦截且无新增复核。
+                    # 放行最终回答，但追加未复核告警，并落到下方正常终结分支。
+                    notes.append(
+                        "file remediation checklist could not verify cleanup; "
+                        "returned answer with caveat"
+                    )
+                    guard_payload = {
+                        "event": "file_remediation_unverified",
+                        "reason": "file_remediation_unverified",
                         "detail": checklist_error,
+                        "block_count": checklist_block_count,
                         "plan_id": plan.plan_id if plan else None,
                     }
-                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                    self.audit.event(trace, EventKind.ERROR, guard_payload)
                     self._emit(ProgressEvent(
-                        kind="plan_required",
-                        text=checklist_error,
-                        meta=payload,
+                        kind="error",
+                        text="部分清理结果未能自动复核，已带告警返回",
+                        meta=guard_payload,
                     ))
-                    if plan is not None:
-                        plan = self._set_plan_step(
-                            trace, plan, "verify", "running",
-                            "File cleanup changes require read-only post-verify",
-                            event_kind="plan_step_update",
-                        )
-                    self.messages.append({
-                        "role": "user",
-                        "content": "System feedback: " + checklist_error,
-                    })
-                    continue
+                    final = (
+                        final
+                        + "\n\n> 注意：部分清理结果未能自动复核（系统已尽力重扫验证），请人工确认。"
+                    ).strip()
 
                 self.messages.append({"role": "assistant",
                                       "content": [{"type": "text", "text": final}]})

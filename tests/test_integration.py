@@ -364,6 +364,44 @@ class _CompleteCleanupBackend(LlmBackend):
         return AssistantMessage(blocks=[TextBlock(text="deleted stale cache and verified")])
 
 
+class _NeverVerifyCleanupBackend(LlmBackend):
+    """Scans roots, deletes a file, then keeps emitting a text-only final without
+    ever re-scanning. The post-verify gate can never clear, so this exercises the
+    progress guard that must stop the loop instead of spinning to max_iterations."""
+
+    name = "never_verify_cleanup"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        self.calls += 1
+        if self.calls == 1:
+            return AssistantMessage(
+                blocks=[
+                    TextBlock(text="TODO 1: Enumerate cleanup roots."),
+                    ToolUseBlock(id="scan-log", name="fs_ls", input={"path": "/var/log/auth-api01"}),
+                    ToolUseBlock(id="scan-cache", name="fs_ls", input={"path": "/var/cache/auth-api01"}),
+                    ToolUseBlock(id="scan-tmp", name="fs_ls", input={"path": "/var/tmp/auth-api01"}),
+                ],
+                stop_reason="tool_use",
+            )
+        if self.calls == 2:
+            return AssistantMessage(
+                blocks=[
+                    TextBlock(text="TODO 1: Delete the stale cache file."),
+                    ToolUseBlock(
+                        id="delete-cache",
+                        name="fs_delete_file",
+                        input={"path": "/var/cache/auth-api01/http-v2/metadata.cache"},
+                    ),
+                ],
+                stop_reason="tool_use",
+            )
+        # never re-scans -> verification can never register
+        return AssistantMessage(blocks=[TextBlock(text="cleanup done")])
+
+
 class _FileCleanupExecutor(_RecordingExecutor):
     def run(self, argv, *, requires_root=False, **kwargs):  # noqa: ANN001, ARG002
         self.argvs.append(list(argv))
@@ -893,6 +931,48 @@ def test_file_cleanup_allows_candidate_execute_verify_sequence(agent, monkeypatc
     assert not any(
         e.kind is EventKind.PLAN_UPDATE
         and e.payload.get("reason") == "final_without_post_verify"
+        for e in result.trace.events
+    )
+
+
+def test_file_cleanup_unverifiable_gate_stops_with_caveat(agent, monkeypatch):
+    """Regression: the post-verify gate must not spin to max_iterations when the
+    model never produces a clearing re-scan. After the progress guard trips, the
+    agent returns its answer with a caveat instead of looping forever."""
+    allow_preflight = lambda path, operation: SimpleNamespace(allowed=True, rule_id="test", reason="ok")
+    monkeypatch.setattr(
+        "kyagent.mcp.tools.filesystem.classify_write_preflight",
+        allow_preflight,
+    )
+    monkeypatch.setattr(
+        "kyagent.safety.write_preflight.classify_write_preflight",
+        allow_preflight,
+    )
+    executor = _FileCleanupExecutor()
+    backend = _NeverVerifyCleanupBackend()
+    agent.llm = backend
+    agent.executor = executor
+    agent.auto_approve_safe_remediation = True
+    agent.cfg.agent.max_iterations = 20
+    agent.cfg.agent.max_repeated_tool_failures = 3
+
+    result = agent.ask(
+        "cleanup old leaked files for auth-api01 under logs, cache, and tmp"
+    )
+
+    # stopped well before the iteration ceiling
+    assert result.tool_iterations < 20
+    assert "未能自动复核" in result.final_text
+    assert "cleanup done" in result.final_text
+    assert any("could not verify cleanup" in n for n in result.notes)
+    assert any(
+        e.kind is EventKind.ERROR
+        and e.payload.get("reason") == "file_remediation_unverified"
+        for e in result.trace.events
+    )
+    # did not bail out with the generic max-iterations failure
+    assert not any(
+        e.kind is EventKind.ERROR and e.payload.get("reason") == "max_iterations"
         for e in result.trace.events
     )
 

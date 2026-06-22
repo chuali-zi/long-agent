@@ -71,6 +71,27 @@ def test_final_error_requires_post_verify_after_delete() -> None:
     assert "/var/log/auth-api01/app" in err
 
 
+def test_rescan_ancestor_root_verifies_deleted_target() -> None:
+    # 回归：删除成功后文件已不在结果里，agent 用 dir_largest_files 重扫祖先根目录
+    # （而非精确父目录）应能复核 target，否则 final_error 永远拦截 → 死循环。
+    checklist = _checklist(required_roots=("/var/cache/auth-api01",))
+    target = "/var/cache/auth-api01/app/old.bin"
+    checklist.scanned_roots.add("/var/cache/auth-api01")
+    checklist.candidate_paths.add(target)
+    checklist.candidate_labels[target] = "delete"
+    checklist.record_write_result(target, ok=True)
+    assert "unverified changes" in checklist.final_error()
+
+    # 重扫根目录，结果里已不含被删文件（只剩其他保留文件）
+    checklist.record_read_result(
+        "dir_largest_files",
+        {"path": "/var/cache/auth-api01"},
+        "12M /var/cache/auth-api01/app/keep.bin\n",
+    )
+
+    assert checklist.final_error() == ""
+
+
 def test_followup_cleanup_inherits_previous_discovery_candidates() -> None:
     previous = _checklist(required_roots=("/var/log/web-app01",))
     previous.scanned_roots.add("/var/log/web-app01")
