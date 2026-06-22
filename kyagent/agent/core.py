@@ -627,6 +627,9 @@ class Agent:
         notes: list[str] = []
         iterations = 0
         denied = False
+        # 防回环：累计每个"工具+参数"签名的失败次数，达到阈值即中止本次运行。
+        repeated_failures: dict[str, int] = {}
+        repeated_abort: tuple[str, int] | None = None
         evidence_gate_required = self._is_os_question(user_input)
         evidence_gate_forced_once = False
         evidence_gate_extra_summary = False
@@ -1036,6 +1039,10 @@ class Agent:
                     result_block = fut.result()
                     if result_block.is_error and result_block.content.startswith("[denied]"):
                         denied = True
+                    if repeated_abort is None and result_block.is_error:
+                        repeated_abort = self._record_tool_failure(
+                            repeated_failures, tu
+                        )
                     tool_results[idx] = {
                         "type": "tool_result",
                         "tool_use_id": tu.id,
@@ -1048,6 +1055,10 @@ class Agent:
                     result_block = self._handle_tool_use(trace, tu, notes, False)
                     if result_block.is_error and result_block.content.startswith("[denied]"):
                         denied = True
+                    if repeated_abort is None and result_block.is_error:
+                        repeated_abort = self._record_tool_failure(
+                            repeated_failures, tu
+                        )
                     tool_results[idx] = {
                         "type": "tool_result",
                         "tool_use_id": tu.id,
@@ -1057,6 +1068,43 @@ class Agent:
 
             # 把 tool_result 作为下一轮 user 消息送回（顺序与 tool_uses 一致）
             self.messages.append({"role": "user", "content": tool_results})
+
+            # 防回环：同一工具调用（名称+参数）被反复拒绝/报错时中止，避免空转到
+            # max_iterations。破坏性操作被拒后应停下来交人工，而非无限重试。
+            if repeated_abort is not None:
+                tool_name, count = repeated_abort
+                notes.append(
+                    f"防回环：{tool_name} 同一调用连续 {count} 次失败/被拒，已中止，需人工介入"
+                )
+                self.audit.event(trace, EventKind.ERROR, {
+                    "reason": "repeated_tool_failure",
+                    "tool": tool_name,
+                    "count": count,
+                })
+                if plan is not None:
+                    plan = self._set_plan_step(
+                        trace, plan, "reason", "failed",
+                        f"Aborted: {tool_name} repeatedly failed ({count}x)",
+                        event_kind="plan_step_end",
+                    )
+                    plan = self._set_plan_status(
+                        trace, plan, "failed", current_step="reason"
+                    )
+                self.audit.close(trace)
+                self._emit(ProgressEvent(
+                    kind="error",
+                    text=f"{tool_name} 反复被拒绝/报错，已中止，需人工介入",
+                    meta={"reason": "repeated_tool_failure", "tool": tool_name},
+                ))
+                return AgentRunResult(
+                    trace=trace,
+                    final_text=(
+                        f"已中止：{tool_name} 同一调用连续 {count} 次失败或被拒绝且"
+                        "未获放行，需要人工介入处理，请勿继续自动重试。"
+                    ),
+                    tool_iterations=iterations, denied=True, notes=notes,
+                    plan_id=plan.plan_id if plan else None,
+                )
 
         # 超出最大迭代
         notes.append(f"达到最大迭代次数 {self.cfg.agent.max_iterations}")
@@ -1279,6 +1327,79 @@ class Agent:
             return False
         verdict = self.guardrail.check_argv(argv, declared_risk=tool.risk_level)
         return verdict.decision is Decision.ALLOW
+
+    def _record_tool_failure(
+        self, counters: dict[str, int], tu: ToolUseBlock
+    ) -> tuple[str, int] | None:
+        """累计同一"工具+参数"调用的失败次数；达到阈值时返回 (工具名, 次数)。
+
+        以工具名 + 规范化后的入参作为签名：模型在被拒后反复"重新枚举→再删"针对
+        同一目标的调用会命中同一签名，使空转能被及时识别并中止。
+        """
+        limit = self.cfg.agent.max_repeated_tool_failures
+        if limit <= 0:
+            return None
+        try:
+            args_sig = json.dumps(tu.input or {}, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            args_sig = repr(tu.input)
+        signature = f"{tu.name}\x00{args_sig}"
+        count = counters.get(signature, 0) + 1
+        counters[signature] = count
+        if count >= limit:
+            return (tu.name, count)
+        return None
+
+    def _escalate_checklist_block(
+        self, trace: Trace, tu: ToolUseBlock, prep, reason: str
+    ) -> ToolResultBlock | None:
+        """清理核对清单拦截破坏性写操作时，升级为人工审批而非让模型反复重试。
+
+        返回 None 表示人工已批准，调用方应继续执行；返回 ToolResultBlock 表示终止
+        （人工拒绝/超时，或当前不在运行线程无法发起审批）。终止文案明确要求模型
+        停止重试与重新枚举，改为向用户报告该发现并等待人工处置。
+        """
+        path = str(prep.cleaned.get("path") or "")
+        # confirm() 只能在拥有交互通道的运行线程执行；并行只读池线程不应到这里
+        # （破坏性工具串行执行），但仍兜底，避免静默回退成可被模型反复重试的拒绝。
+        if threading.get_ident() != self._active_run_thread_id:
+            self.audit.event(trace, EventKind.ERROR, {
+                "reason": "checklist_escalation_off_thread",
+                "tool": tu.name, "path": path,
+            })
+            return ToolResultBlock(
+                tool_use_id=tu.id, is_error=True,
+                content=("[stop] 破坏性操作被清理核对清单拦截、需人工审批，但当前不在"
+                         "运行线程，无法发起审批。请停止重试与重新枚举，向用户报告该发现"
+                         "并等待人工处置。"),
+            )
+        self.audit.event(trace, EventKind.PLAN_UPDATE, {
+            "event": "checklist_escalated_to_human",
+            "tool": tu.name, "path": path, "detail": reason,
+        })
+        approved = False
+        try:
+            approved = self.confirm(
+                confirm_adapter.for_checklist_block(tu.name, path, reason)
+            )
+        except Exception:
+            approved = False
+        if approved:
+            self.audit.event(trace, EventKind.SAFETY_CHECK, {
+                "user_confirmed": True, "tool": tu.name,
+                "reason": "checklist_block_overridden",
+            })
+            return None
+        self.audit.event(trace, EventKind.ERROR, {
+            "reason": "checklist_escalation_denied",
+            "tool": tu.name, "path": path,
+        })
+        return ToolResultBlock(
+            tool_use_id=tu.id, is_error=True,
+            content=("[stop] 该破坏性操作未获人工批准（被清理核对清单拦截后已升级人工"
+                     "审批，人工拒绝或超时）。请勿重试或重新枚举，直接向用户报告该发现"
+                     f"并等待人工处置。\n原因: {reason}"),
+        )
 
     def _safe_remediation_auto_approval_reason(self, trace: Trace, tu: ToolUseBlock, prep) -> str:
         if not self.auto_approve_safe_remediation:
@@ -1670,6 +1791,9 @@ class Agent:
                 tu.name, list(prep.argv), prep.cleaned or tu.input)},
         ))
 
+        # 清理核对清单拦截破坏性写操作时，不再把"重新枚举再重试"的提示回灌给模型
+        # （那会让模型误以为是拼写/枚举问题而无限重试），而是升级为人工审批。
+        human_approved_destructive = False
         if tu.name in _AUTO_APPROVE_FILE_REMEDIATION_TOOLS:
             checklist = self._file_remediation_checklist
             if checklist is not None:
@@ -1686,11 +1810,12 @@ class Agent:
                         "path": prep.cleaned.get("path"),
                         "detail": checklist_error,
                     })
-                    return ToolResultBlock(
-                        tool_use_id=tu.id,
-                        is_error=True,
-                        content="System feedback: " + checklist_error,
+                    decision = self._escalate_checklist_block(
+                        trace, tu, prep, checklist_error
                     )
+                    if decision is not None:
+                        return decision
+                    human_approved_destructive = True
 
         # 2. 安全护栏（即便是 read_only 工具也过一遍，防止参数注入）
         verdict = check_safety(prep, trace=trace, audit=self.audit, guardrail=self.guardrail)
@@ -1704,7 +1829,10 @@ class Agent:
                          + "\n".join(verdict.rationale)),
             )
 
-        if verdict.decision is Decision.CONFIRM:
+        if verdict.decision is Decision.CONFIRM and human_approved_destructive:
+            # 人工已在清理核对清单升级流程中批准这次破坏性写操作，不再重复弹窗。
+            pass
+        elif verdict.decision is Decision.CONFIRM:
             # 兜底：confirm() 只能在当前 Agent.ask turn 的拥有线程执行。
             # TUI/CLI 通常是 MainThread；Web/FastAPI 会把 ask 放进 worker
             # 线程。并行工具池线程即使意外拿到 CONFIRM 也必须拒绝，
@@ -1748,7 +1876,8 @@ class Agent:
                              {"user_confirmed": True, "tool": tu.name})
 
         if (
-            tu.name in _FILE_MUTATION_TOOLS
+            not human_approved_destructive
+            and tu.name in _FILE_MUTATION_TOOLS
             and self._file_remediation_checklist is not None
         ):
             write_path = str(prep.cleaned.get("path") or "")
@@ -1763,11 +1892,12 @@ class Agent:
                     "path": write_path,
                     "detail": checklist_err,
                 })
-                return ToolResultBlock(
-                    tool_use_id=tu.id,
-                    is_error=True,
-                    content=checklist_err,
+                decision = self._escalate_checklist_block(
+                    trace, tu, prep, checklist_err
                 )
+                if decision is not None:
+                    return decision
+                human_approved_destructive = True
 
         # 3. 落地执行 + 格式化（共享流水线，含 stderr 拼接 + 长度截断）
         _, formatted, content = execute_and_format(

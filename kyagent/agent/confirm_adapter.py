@@ -32,6 +32,21 @@ def for_tool_call(verdict: Verdict, tool_name: str, argv: list[str]) -> ConfirmR
     )
 
 
+def for_checklist_block(tool_name: str, path: str, reason: str) -> ConfirmRequest:
+    """清理核对清单拦截的破坏性写操作 → ConfirmRequest。
+
+    清单拦截不是"模型拼错/枚举不全"，而是一次需要人工裁决的破坏性动作
+    （删除/截断疑似受保护或不在候选列表的文件）。这里把拦截理由原样展示给
+    审批人，让其决定放行还是拒绝，而不是把"重新枚举再重试"的提示丢回给模型。
+    """
+    return ConfirmRequest(
+        title=f"file cleanup checklist escalation: {tool_name}",
+        risk="high",
+        summary_lines=[reason],
+        body=path or None,
+    )
+
+
 def for_intent(verdict: IntentVerdict) -> ConfirmRequest:
     """意图层裁决 → ConfirmRequest。
 

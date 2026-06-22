@@ -95,6 +95,9 @@ class AgentConfig(BaseModel):
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
     qwen: QwenConfig = Field(default_factory=QwenConfig)
     max_iterations: int = 40
+    # 防回环：同一工具+参数被连续拒绝/报错达到该次数后中止本次运行并提示人工介入，
+    # 避免模型在被拒绝的破坏性操作上空转到 max_iterations。
+    max_repeated_tool_failures: int = 3
 
 
 class ExecutorConfig(BaseModel):
