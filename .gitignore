@@ -25,5 +25,7 @@ benchmarks/results.json
 benchmarks/comparison.json
 benchmarks/*/last-ask.json
 benchmarks/*/last-trace.json
+benchmarks/*/bench-state.json
+benchmarks/*/score.json
 .claude/
 .tmp/

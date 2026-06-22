@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/../lib/common.sh"
 
 DO_ASK=0
+DO_BEHAVIOR=0
 DO_TEARDOWN=0
 export KYBENCH_RUNTIME_ROOT="${KYBENCH_RUNTIME_ROOT:-/tmp/loadtest-ops}"
 
@@ -14,6 +15,7 @@ log() { printf '[runaway-cpu-v1:run] %s\n' "$*"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ask) DO_ASK=1; shift ;;
+    --ask-behavior) DO_BEHAVIOR=1; shift ;;
     --teardown) DO_TEARDOWN=1; shift ;;
     --prompt) PROMPT="$2"; shift 2 ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
@@ -32,6 +34,12 @@ log "2/4 pre-verify"
 bash "$ROOT/verify.sh" pre
 log "3/4 probe"
 bash "$ROOT/probe.sh"
+
+if [[ "$DO_BEHAVIOR" == "1" ]]; then
+  log "4a running real agent (behavioral grading)"
+  kybench_run_behavior_flow "$ROOT" "$PROMPT" "$(basename "$ROOT")"
+  exit $?
+fi
 
 if [[ "$DO_ASK" == "1" ]]; then
   log "4a running kyagent ask"

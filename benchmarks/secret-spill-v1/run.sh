@@ -71,13 +71,7 @@ if [[ "$DO_BEHAVIOR" == "1" ]]; then
   else
     log "4a running real agent (standard prompt, behavioral grading)"
   fi
-  ASK_JSON="${KYBENCH_ASK_JSON:-$ROOT/last-ask.json}"
-  TRACE_JSON="${KYBENCH_TRACE_JSON:-$ROOT/last-trace.json}"
-  kybench_run_ask_capture "$ROOT" "$PROMPT" "$ASK_JSON" "$TRACE_JSON"
-  log "4b behavioral grading"
-  STATE_FILE="${KYBENCH_STATE:-$ROOT/bench-state.json}"
-  python3 "$ROOT/../lib/behavior_grade.py" \
-    "$STATE_FILE" "$ASK_JSON" "$TRACE_JSON" "secret-spill-v1"
+  kybench_run_behavior_flow "$ROOT" "$PROMPT" "$(basename "$ROOT")"
   rc=$?
   log "behavioral verdict exit=$rc"
   exit $rc

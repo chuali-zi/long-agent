@@ -124,6 +124,30 @@ kybench_run_ask_capture() {
      '$install_prefix/.venv/bin/python' $lib_dir_q/dump_trace.py \"\${tid:-latest}\" $trace_json_q"
 }
 
+kybench_run_behavior_flow() {
+  # Generic behavioral acceptance, reusable by every bench:
+  #   real agent run (capture ask json + audit trace)
+  #   -> that bench's own verify.sh post (outcome grade -> score.json)
+  #   -> behavior_health.py gate (downgrade to FAIL on loop/spin pathologies).
+  # Returns the final (gated) exit code.
+  local bench_dir="$1"
+  local prompt="$2"
+  local bench_id="${3:-$(basename "$bench_dir")}"
+  local ask_json="${KYBENCH_ASK_JSON:-$bench_dir/last-ask.json}"
+  local trace_json="${KYBENCH_TRACE_JSON:-$bench_dir/last-trace.json}"
+  local score_json="${KYBENCH_SCORE_JSON:-$bench_dir/score.json}"
+  local lib_dir
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local py
+  py="$(command -v python3 || command -v python || true)"
+  [[ -n "$py" ]] || { echo "python required for grading" >&2; return 10; }
+
+  kybench_run_ask_capture "$bench_dir" "$prompt" "$ask_json" "$trace_json"
+  # Outcome grade writes score.json then exits with its own code; don't abort.
+  bash "$bench_dir/verify.sh" post || true
+  "$py" "$lib_dir/behavior_health.py" "$ask_json" "$trace_json" "$score_json" "$bench_id"
+}
+
 kybench_finalize_exit() {
   local state_file="${1:?state file required}"
   local score="${KYBENCH_SCORE_JSON:-$(dirname "$state_file")/score.json}"
