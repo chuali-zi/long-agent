@@ -78,6 +78,52 @@ kybench_run_ask() {
     "set -a; source '$env_file'; set +a; export PYTHONPATH=$install_prefix_q; export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS=$auto_roots_q; '$install_prefix/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$prompt")"
 }
 
+kybench_run_ask_capture() {
+  # Like kybench_run_ask, but runs the real agent with --json, captures the
+  # structured result to $ask_json, and dumps the run's audit trace to
+  # $trace_json (read back via the same config resolution the agent used).
+  # Lets behavioral graders see iteration/loop/escalation signals, not just disk.
+  local bench_dir="$1"
+  local prompt="$2"
+  local ask_json="$3"
+  local trace_json="$4"
+  local install_prefix="${KYAGENT_INSTALL_PREFIX:-/opt/kyagent}"
+  local env_file="${KYAGENT_ENV_FILE:-/etc/kyagent/env}"
+  local kyagent_user="${KYAGENT_USER:-kyagent}"
+
+  sudo test -f "$env_file" || { echo "env not found: $env_file" >&2; exit 1; }
+  if [[ ! -x "$install_prefix/.venv/bin/kyagent" ]]; then
+    install_prefix="$(kybench_repo_root "$bench_dir")"
+  fi
+  [[ -x "$install_prefix/.venv/bin/kyagent" ]] || {
+    echo "kyagent not found under $install_prefix/.venv/bin/kyagent" >&2
+    exit 1
+  }
+  local lib_dir
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  local runtime_root="${KYBENCH_RUNTIME_ROOT:-}"
+  if [[ -n "$runtime_root" && -z "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}" ]]; then
+    export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS="$runtime_root"
+  fi
+  local auto_roots_q install_prefix_q lib_dir_q ask_json_q trace_json_q
+  printf -v auto_roots_q '%q' "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}"
+  printf -v install_prefix_q '%q' "$install_prefix"
+  printf -v lib_dir_q '%q' "$lib_dir"
+  printf -v ask_json_q '%q' "$ask_json"
+  printf -v trace_json_q '%q' "$trace_json"
+
+  # Run ask (--json) and dump the resulting trace in one privileged shell so the
+  # audit DB path resolves identically for both steps.
+  sudo -u "$kyagent_user" bash -c \
+    "set -a; source '$env_file'; set +a; \
+     export PYTHONPATH=$install_prefix_q; \
+     export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS=$auto_roots_q; \
+     '$install_prefix/.venv/bin/kyagent' ask --json --auto-approve-safe-remediation $(printf '%q' "$prompt") > $ask_json_q; \
+     tid=\$('$install_prefix/.venv/bin/python' -c \"import json;print(json.load(open($ask_json_q)).get('trace_id',''))\"); \
+     '$install_prefix/.venv/bin/python' $lib_dir_q/dump_trace.py \"\${tid:-latest}\" $trace_json_q"
+}
+
 kybench_finalize_exit() {
   local state_file="${1:?state file required}"
   local score="${KYBENCH_SCORE_JSON:-$(dirname "$state_file")/score.json}"

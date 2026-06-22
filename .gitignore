@@ -23,5 +23,7 @@ var/
 logs/
 benchmarks/results.json
 benchmarks/comparison.json
+benchmarks/*/last-ask.json
+benchmarks/*/last-trace.json
 .claude/
 .tmp/
