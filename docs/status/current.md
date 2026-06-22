@@ -1,6 +1,6 @@
 # 仓库当前状态 - A2 麒麟安全智能运维 Agent
 
-更新时间：2026-06-17 +08:00
+更新时间：2026-06-21 05:55 +08:00
 
 ## 当前定位
 
@@ -63,9 +63,12 @@ sudo -u kyagent bash -c 'set -a; source /etc/kyagent/env; set +a; /opt/kyagent/.
 ## 当前验证状态
 
 - Python 3.10+ 是运行与测试硬要求；若系统默认 `python` 为 3.9，应使用项目 `.venv` 或显式 Python 3.10+。
-- 最新全量 pytest：`834 passed, 3 skipped, 10 warnings, 0 failed`。
-- 最新真实 DeepSeek + `/opt/kyagent` 生产前缀 RealOps：9 个 bench 全部 `PERFECT`。
-- 最新性能微基准：`overall_pass=false`；仅 `ask_p50` 未达到 25% 降幅目标，`ask_p95`、`guardrail_p50`、`audit_total` 均达标。
+- TODO 已重构为独立、可选的结构化观测状态：LLM 不调用 `todo_write` 时照常执行工具；无文本解析、无工具调用反推、无结束前补写 TODO；非法 TODO 也不会阻断同轮合法业务工具。
+- TODO 前端状态只接受后端 `todo_snapshot` 权威快照，以稳定 ID、单调 revision、完整替换和 turn 隔离避免 TUI/Web 乱序、重复与旧轮次覆盖。
+- 最新项目虚拟环境全量回归（2026-06-21 05:55）：`851 passed, 3 skipped, 0 failed`；Web Playwright/Server/Security/StartWeb `39 passed`；脚本入口 + bench runner `14 passed`。
+- 最新真实 DeepSeek（`deepseek_httpx`）+ 当前源码 RealOps 9 bench 全部 `PERFECT`、`exit_code=0`，汇总位于 `tmp/full-regression-20260621/bench/kybench-summary-20260621-055227.tsv`；首轮 cron-injection-v1 因上轮残留 cron 文件触发 setup 拒绝覆盖，清理残留后复跑 `PERFECT`（环境脏，非代码回归）。
+- 最新性能微基准（2026-06-21）：`overall_pass=true`；`ask_p50` -84.8%、`ask_p95` -65.3%、`guardrail_p50` -90.5%、`audit_total` -85.3% 全部达标。
+- 真实 DeepSeek 端到端：`kyagent ask` 返回真实答案；`test_real_llm_todo_write_coercion_repro_entry` 在 `KYAGENT_RUN_REAL_LLM_TODO_REPRO=1` 下 `PASSED`，确认 TODO 非强制。
 
 ## 权限边界
 

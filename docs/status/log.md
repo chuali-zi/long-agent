@@ -1,5 +1,28 @@
 # 工作日志
 
+## 2026-06-21 07:30:00 +08:00
+
+- 按用户要求对仓库全部脚本做"正常使用"验证，覆盖 `scripts/`、`benchmarks/` 顶层与 9 个 bench 子目录的每一 个脚本，不只是已跑过的入口。
+- 语法：`bash -n` 覆盖全部 `.sh`（0 失败）；`py_compile` 覆盖 7 个 `kyagent-*` Python wrapper + `benchmarks/lib/grade.py` + 9 个 `gen_artifacts.py` + `bench_ask.py`（0 失败，清理了一处 root 残留的 `benchmarks/lib/__pycache__`）。`ruff check` 发现 3 处 F401 未使用 import（`cleanup-v2/gen_artifacts.py` 的 `time`、`dataclasses.field`；`stale-lock-v1/gen_artifacts.py` 的 `signal`），已清理；`bench_ask.py` 头部声明 FROZEN，未改。修后两个 `gen_artifacts.py` 重新跑 setup/teardown 仍 `SETUP_OK`，`test_script_entrypoints` + `test_benchmark_suite_runner` + `test_todos` + `test_planner` 共 `20 passed`。
+- `scripts/` 入口（11 个）：`kyagent.sh --help`/`tools list`、`install.sh --help`、`full-test.sh --help`、`start-web.sh --help`、`start-web-backend.sh --help`、`open-web.sh --help`、`write-prod-env.sh`（写到 tmp env 真实落盘验证）、`setup-sudoers.sh`（sudo 真实部署 + visudo OK）、`setup-sudoers-prod.sh --yes`（真实部署 + visudo OK）、`setup-sudoers-max-test.sh --yes`（真实部署 + visudo OK）、`install-loongarch.sh --dry-run --yes --with-web --deepseek-key-file`（完整 dry-run 打印全部步骤，0 错误）。
+- `kyagent-*` wrapper（7 个）：`cron-trace --list`、`lock-stale inspect/remove`、`unix-socket-stale inspect/remove`、`log-dir-perms`（`/var/log/<service>` 真实收紧 0777→0750）、`cron-disable`（真实 fixture 重命名禁用 + 指标命中）、`file-delete`（tmp fixture 删除 + 拒绝相对路径）、`log-clean`（tmp fixture 截断 1MB→0）。3 个无 `--help` 的 wrapper（cron-disable/file-delete/log-clean）按位置参数正常工作，拒绝非法输入返回 exit 2。
+- `demo.sh`：mock 后端完整跑完 10 个演示步骤（工具清单、3 类安全护栏、3 轮 ask、audit list/show），exit 0；需显式给可写 `KYAGENT_AUDIT_DB` 否则默认 `./var/` 权限不足。`developer-quick-test.sh --help` 输出完整用法。
+- `benchmarks/` 顶层：`run-suite.sh --help`、`run-real-llm.sh`（= run-suite.sh wrapper）、`setup-all.sh --help`、`teardown-all.sh --help`、`verify-all.sh --help` 全部 OK。真实执行 `setup-all.sh --probe`：9 bench × (setup + pre-verify + probe) = 27 步全绿，`hard_failures: 0`；`verify-all.sh --pre`：9 bench 全 `SETUP_OK` exit 0；`verify-all.sh --post`（未修复）：9 bench 全 `INCONCLUSIVE` exit 3（预期）；`teardown-all.sh`：9 bench 全部清理。
+- 各 bench 子脚本覆盖：`setup.sh`×9（setup-all 调用）、`verify.sh` pre×9 + post×9（setup-all + verify-all + run-suite 调用）、`probe.sh`×9（setup-all --probe 调用）、`teardown.sh`×9（teardown-all + run-suite --teardown-each 调用）、`run.sh`×9（run-suite 调用，9/9 PERFECT）、`gen_artifacts.py`×9（setup.sh 内部调用，setup-all 成功即全部通过）。
+- 结论：仓库全部脚本（11 个 scripts/ 入口 + 7 个 kyagent-* wrapper + 5 个 benchmarks/ 顶层 + 9×5 个 bench 子脚本 + 9 个 gen_artifacts.py + grade.py + bench_ask.py）在真实环境（真实 DeepSeek + 真实 sudo + 真实 /var /tmp /etc/cron.d 写入）下均正常使用，无回归。唯一环境注意：`demo.sh` 需显式给可写 audit 路径，已在脚本注释前提里说明。
+
+## 2026-06-21 05:55:00 +08:00
+
+- 按用户要求对最新工作树（Cursor 式渲染 + TODO 重构 + planner 稳定 ID/revision）做全量回归，覆盖 TODO 单测、全量 pytest、Web 前端 Playwright、脚本入口/ bench runner 单测、RealOps 9 bench、性能微基准、真实 DeepSeek 后端。
+- TODO/planner 聚焦：`tests/test_todos.py` + `tests/test_planner.py` 共 `6 passed`，验证 `failed` 状态、`todo_revision` 单调递增、稳定 ID 内容复用、非法快照原子回滚、终态收敛幂等。
+- 全量 pytest（`scripts/kyagent.sh test`）：`851 passed, 3 skipped, 0 failed`（17.28s），与 `docs/status/current.md` 记录一致；3 skipped 均为预期（Windows 分支、需 `KYAGENT_RUN_REAL_LLM_TODO_REPRO=1` 的真实 LLM 复测、需 root 的日志权限用例）。
+- Web 全量：`test_web_frontend_playwright.py` + `test_web_server.py` + `test_web_security.py` + `test_start_web_script.py` 共 `39 passed`，其中 6 个 Playwright 用例真起 Chromium 跑 `index.html` 的 SSE 审批、TODO 快照、最终 Markdown 渲染。
+- 脚本入口与 bench runner：`test_script_entrypoints.py` + `test_benchmark_suite_runner.py` 共 `14 passed`，覆盖 `scripts/kyagent.sh` 抽象命令、`full-test.sh` 串联、prod-env 最小化、install prefix 选择。
+- RealOps 9 bench（`sudo bash benchmarks/run-suite.sh --teardown-each`，真实 DeepSeek `deepseek_httpx`）：`cleanup-v2 / secret-spill-v1 / port-conflict-v1 / open-deleted-v1 / runaway-cpu-v1 / stale-lock-v1 / unix-socket-stale-v1 / logrotate-perms-v1 / cron-injection-v1` 全部 `PERFECT`、`exit_code=0`。首轮 cron-injection-v1 因上一轮残留 `/etc/cron.d/nightly-ledger-backup` 触发 setup 拒绝覆盖（环境脏，非代码回归），清理残留后单独复跑 `PERFECT`。
+- 性能微基准（`benchmarks/bench_ask.py`，对比 `baseline.json`）：`overall_pass=true`；`ask_p50` ratio 0.152（-84.8%）、`ask_p95` ratio 0.347（-65.3%）、`guardrail_p50` ratio 0.095（-90.5%）、`audit_total` ratio 0.147（-85.3%）全部达标。
+- 真实 DeepSeek 后端：`kyagent ask --auto-approve-safe-remediation` 以 kyagent 用户source `/etc/kyagent/env` 成功返回真实主机名/内核答案；`test_real_llm_todo_write_coercion_repro_entry` 在 `KYAGENT_RUN_REAL_LLM_TODO_REPRO=1 KYAGENT_REAL_LLM_BACKEND=deepseek_httpx` 下 `PASSED`，确认用户显式“不要先写 TODO”时 Agent 不再强制 TODO、不触发 `tool_use_without_todo_write`。
+- 结论：当前工作树相对 TODO 重构无回归；唯一失败来自上轮 bench 残留 cron 文件，已清理并复跑通过。汇总日志在 `tmp/full-regression-20260621/`。
+
 ## 2026-06-17 21:35:00 +08:00
 
 - 修复 Agent TODO 计划协议：首次漏 TODO 的工具调用会被拒绝并要求模型重发；二次仍漏时优先触发无工具计划轮生成 TODO，只有计划轮失败才按工具调用兜底合成计划；同时接受 `1. ...` 这类编号计划。
@@ -154,3 +177,14 @@
 - 写操作均为固定命令 + 锚定参数正则（非通配）；先打印授权摘要再交互确认（--yes 跳过，非交互无 --yes 退 1），最终仍走核心脚本 visudo 校验 + 失败回滚。默认只读基线与既有不变量不受影响。
 - kyagent.sh 新增 permissions-prod 子命令与 usage；README 新增「写操作授权（一键生产预设）」一节；tests/test_sudoers_least_privilege.py +5 用例（默认开关/常见服务/非交互守卫/覆盖生效/子命令存在）。
 - 验证：bash -n 两脚本通过；渲染模拟产出合法完整 sudoers；tests/test_sudoers_least_privilege.py 26 passed；全量回归见下方命令。
+
+## 2026-06-21 04:05:00 -07:00
+
+- 对 TODO 重构后的大面积回归做根因级重构：删除 Agent 主循环对 TODO 的前置门禁、文本计划解析、基于 tool call 的自动合成、最终回复前补写以及失败重试 coercion。`todo_write` 现在是可选的独立结构化工具；LLM 不生成 TODO 时业务工具直接执行，非法 TODO 与同轮合法业务工具互不阻塞。
+- 新增 `TodoService` 与权威 `TodoSnapshot`：完整快照替换、稳定 item ID、单调 revision、事务写入、状态校验和真实终态收敛。成功结束时未完成项记为 `cancelled`，失败时活动项记为 `failed`，不伪造 `completed`。
+- 统一 TUI/Web TODO 渲染：只消费后端 `todo_snapshot`，按 revision 和 turn 拒绝乱序/过期事件；移除前端文本正则、tool-end 自动推进和 final 自动完成，解决重复、跳项、旧轮覆盖等乱渲染。
+- 修正真实 benchmark 基础设施：runner 显式导出所选安装前缀到 `PYTHONPATH`，避免 editable install 偷偷加载旧 `/opt/kyagent`；为 `disk_open_deleted` 增加精确锚定的只读 root `lsof -nP +L1` sudoers 权限，并通过 `visudo` 校验。
+- 回归覆盖新增/扩展：无 TODO 直接执行、无 TODO 不伪造、非法 TODO 不拦截同轮动作、结构化 TODO、文本/编号计划不改状态、快照 revision/稳定 ID/原子拒绝/真实终态、浏览器旧 turn 与旧 revision 隔离、benchmark 源码选择。
+- 验证：项目虚拟环境全量 `851 passed, 3 skipped, 0 failed`；系统依赖集 `818 passed, 6 skipped, 0 failed`；真实 DeepSeek 无 TODO 复现测试 `1 passed`；sudoers/runner 定向测试 `56 passed`；`compileall`、`git diff --check` 与变更文件 Ruff 通过。
+- RealOps 最终验收：清理中断运行遗留 fixture、重新安装当前 sudoers 后，单次运行 9/9 `PERFECT` 且全部 `exit_code=0`。汇总：`tmp/todo-refactor-realops-final/kybench-summary-20260621-035319.tsv`。
+- 性能验收：`benchmarks/bench_ask.py` Overall PASS；ask p50 -85.3%、p95 -62.0%、guardrail p50 -90.4%、audit total -86.3%。

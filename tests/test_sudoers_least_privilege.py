@@ -61,7 +61,10 @@ def test_non_root_readonly_commands_are_not_granted_via_sudo() -> None:
 
 def test_dynamic_root_commands_use_anchored_argument_regexes() -> None:
     text = _sudoers()
-    required = [r"/usr/bin/crontab ^-l -u [a-z_][a-z0-9_-]{0,31}$"]
+    required = [
+        r"/usr/bin/crontab ^-l -u [a-z_][a-z0-9_-]{0,31}$",
+        r"/usr/bin/lsof ^-nP \+L1( -p [1-9][0-9]*)?$",
+    ]
     for path in ("/usr/bin", "/usr/sbin", "/sbin"):
         required.extend(
             [

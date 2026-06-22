@@ -38,6 +38,7 @@ from kyagent.executor.proxy import ExecutionProxy
 from kyagent.mcp.tools.base import ToolError, ToolRegistry
 from kyagent.progress import ProgressCallback, ProgressEvent, noop_progress
 from kyagent.planner import PlanSnapshot, PlanStore, PlanTodoItem
+from kyagent.todos import TodoService, TodoSnapshot
 from kyagent.mcp.tools.pipeline import (
     PipelineError,
     check_safety,
@@ -111,7 +112,7 @@ _TODO_ITEM_SCHEMA = {
         "content": {"type": "string", "minLength": 1, "maxLength": 500},
         "status": {
             "type": "string",
-            "enum": ["pending", "in_progress", "completed", "cancelled"],
+            "enum": ["pending", "in_progress", "completed", "failed", "cancelled"],
         },
         "priority": {"type": "string", "enum": ["high", "medium", "low"]},
     },
@@ -512,6 +513,7 @@ class Agent:
         # ask_user_choice 工具的回调；UI 未注入时默认拒绝（保守）
         self.on_user_choice: UserChoiceFn = on_user_choice or auto_cancel_choice
         self.plan_store = plan_store
+        self.todo_service = TodoService(plan_store) if plan_store is not None else None
         self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
         self._file_remediation_checklist: _FileRemediationChecklist | None = None
@@ -620,6 +622,7 @@ class Agent:
             )
             trace.metadata["plan_id"] = plan.plan_id
             self._emit_plan(trace, plan, kind="plan_start", text=plan.title)
+            self._emit_todo_snapshot(trace, TodoSnapshot.from_plan(plan))
 
         notes: list[str] = []
         iterations = 0
@@ -970,6 +973,11 @@ class Agent:
 
                 self.messages.append({"role": "assistant",
                                       "content": [{"type": "text", "text": final}]})
+                if plan is not None and self.todo_service is not None:
+                    previous_revision = plan.todo_revision
+                    plan, final_todos = self.todo_service.finalize(plan.plan_id, success=True)
+                    if plan.todo_revision != previous_revision:
+                        self._emit_todo_snapshot(trace, final_todos)
                 if plan is not None:
                     plan = self._set_plan_step(
                         trace, plan, "reason", "complete", "No more tool calls",
@@ -990,66 +998,6 @@ class Agent:
                 return AgentRunResult(trace=trace, final_text=final,
                                       tool_iterations=iterations, denied=denied, notes=notes,
                                       plan_id=plan.plan_id if plan else None)
-
-            todo_write_uses = [tu for tu in tool_uses if tu.name == "todo_write"]
-            action_tool_uses = [tu for tu in tool_uses if tu.name not in _TODO_TOOL_NAMES]
-            todos = self._extract_todo_plan(assistant.texts())
-            todo_source = "text" if todos else ""
-            if todo_write_uses:
-                try:
-                    todos = self._todo_items_from_tool_input(todo_write_uses[-1].input or {})
-                    todo_source = "tool"
-                except ToolError as exc:
-                    notes.append(f"todo_write 参数非法: {exc}")
-                    payload = {
-                        "event": "plan_required",
-                        "reason": "invalid_todo_write",
-                        "detail": str(exc),
-                        "tool_calls": [t.name for t in tool_uses],
-                        "plan_id": plan.plan_id if plan else None,
-                    }
-                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                    self._emit(ProgressEvent(
-                        kind="plan_required",
-                        text=f"todo_write 参数非法：{exc}",
-                        meta=payload,
-                    ))
-                    self.messages.append({
-                        "role": "user",
-                        "content": (
-                            "System feedback: todo_write 参数非法，todos 必须是完整数组；"
-                            "每项包含 content/status/priority，status 只能是 "
-                            "pending/in_progress/completed/cancelled，priority 只能是 high/medium/low。"
-                        ),
-                    })
-                    continue
-            if action_tool_uses and not todos:
-                # 模型未先给 todo 计划：不阻断、不额外发 LLM 轮、不伪造 todo_write，
-                # 直接按本轮 tool_call 静默合成 TODO，并在同一轮放行工具执行。
-                todos = self._synthesize_todo_plan(action_tool_uses)
-                if todos:
-                    assistant.blocks.insert(0, TextBlock(text=self._todo_items_to_text(todos)))
-                    notes.append("模型在工具调用前未给出 todo 计划，已根据 tool_call 自动合成 TODO")
-                    payload = {
-                        "event": "plan_auto_synthesized",
-                        "reason": "tool_use_without_todo_plan_synthesized",
-                        "tool_calls": [t.name for t in action_tool_uses],
-                        "plan_id": plan.plan_id if plan else None,
-                    }
-                    self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
-                    self._emit(ProgressEvent(
-                        kind="plan_step_update",
-                        text="已根据工具调用自动合成 TODO 计划",
-                        meta=payload,
-                    ))
-
-            if plan is not None and self.plan_store is not None and todo_source != "tool":
-                plan = self.plan_store.replace_todos(plan.plan_id, todos)
-                self._emit_plan(
-                    trace, plan, kind="plan_step_update",
-                    text="Todo plan accepted before tool execution",
-                    step_id="reason",
-                )
 
             # 把 assistant 消息原样追加（含 tool_use 块）
             self.messages.append({"role": "assistant",
@@ -1141,24 +1089,29 @@ class Agent:
         text: str = "",
         step_id: str = "",
     ) -> None:
-        snapshot = plan.to_dict()
-        payload = {"event": kind, "plan": snapshot, "plan_id": plan.plan_id}
+        payload = {
+            "event": kind,
+            "plan_id": plan.plan_id,
+            "plan_status": plan.status,
+            "current_step": plan.current_step,
+        }
         if step_id:
             payload["step_id"] = step_id
+            step = next((item for item in plan.steps if item.step_id == step_id), None)
+            if step is not None:
+                payload["step_status"] = step.status
+                payload["detail"] = step.detail
         self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
         self._emit(ProgressEvent(kind=kind, text=text, meta=payload))  # type: ignore[arg-type]
-        self._emit(ProgressEvent(
-            kind="plan_snapshot",
-            text=plan.title,
-            meta={"plan": snapshot, "plan_id": plan.plan_id},
-        ))
+        # Internal run phases remain separate from the user-facing todo stream.
 
-    _TODO_LINE_RE = re.compile(
-        r"^\s*(?:[-*]\s*)?(?:TODO|Todo|todo|PLAN|Plan|plan|任务|步骤)\s*"
-        r"\d{1,2}\s*[:：.)、-]\s*(.+?)\s*$"
-    )
-    _CHECKBOX_TODO_RE = re.compile(r"^\s*[-*]\s*\[[ xX-]\]\s*(.+?)\s*$")
-    _NUMBERED_TODO_RE = re.compile(r"^\s*\d{1,2}\s*[\.:：\)、-]\s*(.+?)\s*$")
+    def _emit_todo_snapshot(self, trace: Trace, snapshot: TodoSnapshot) -> None:
+        payload = snapshot.to_dict()
+        self.audit.event(trace, EventKind.PLAN_UPDATE, {
+            "event": "todo_snapshot",
+            **payload,
+        })
+        self._emit(ProgressEvent(kind="todo_snapshot", meta=payload))  # type: ignore[arg-type]
 
     def _todo_items_from_tool_input(self, data: dict) -> list[PlanTodoItem]:
         if not isinstance(data, dict):
@@ -1166,21 +1119,25 @@ class Agent:
         raw = data.get("todos")
         if not isinstance(raw, list):
             raise ToolError("todos must be an array")
+        if len(raw) > 20:
+            raise ToolError("todos may contain at most 20 items")
         items: list[PlanTodoItem] = []
-        for idx, item in enumerate(raw[:20], start=1):
+        for idx, item in enumerate(raw, start=1):
             if not isinstance(item, dict):
                 raise ToolError(f"todos[{idx - 1}] must be an object")
             content = str(item.get("content", "")).strip()
             if not content:
                 raise ToolError(f"todos[{idx - 1}].content is required")
+            if len(content) > 500:
+                raise ToolError(f"todos[{idx - 1}].content is too long")
             status = str(item.get("status", "pending")).strip()
-            if status not in {"pending", "in_progress", "completed", "cancelled"}:
+            if status not in {"pending", "in_progress", "completed", "failed", "cancelled"}:
                 raise ToolError(f"todos[{idx - 1}].status is invalid")
             priority = str(item.get("priority", "medium")).strip()
             if priority not in {"high", "medium", "low"}:
                 raise ToolError(f"todos[{idx - 1}].priority is invalid")
             items.append(PlanTodoItem(
-                todo_id=f"todo-{idx}",
+                todo_id="",
                 content=content,
                 status=status,  # type: ignore[arg-type]
                 priority=priority,  # type: ignore[arg-type]
@@ -1235,80 +1192,25 @@ class Agent:
                 "detail": str(exc),
             })
             return ToolResultBlock(tool_use_id=tu.id, is_error=True, content=f"工具参数非法：{exc}")
-        plan = self.plan_store.replace_todos(plan_id, todos)
-        self._emit_plan(
-            trace,
-            plan,
-            kind="plan_step_update",
-            text="Todo list updated",
-            step_id="reason",
-        )
+        if self.todo_service is None:
+            return ToolResultBlock(
+                tool_use_id=tu.id, is_error=True,
+                content="todo_write unavailable: todo service is disabled",
+            )
+        try:
+            plan, snapshot = self.todo_service.replace(plan_id, todos)
+        except ValueError as exc:
+            self.audit.event(trace, EventKind.ERROR, {
+                "reason": "invalid_args",
+                "tool": "todo_write",
+                "detail": str(exc),
+            })
+            return ToolResultBlock(
+                tool_use_id=tu.id, is_error=True, content=f"工具参数非法：{exc}"
+            )
+        self._emit_todo_snapshot(trace, snapshot)
         content = json.dumps({"todos": [todo.to_dict() for todo in plan.todos]}, ensure_ascii=False)
         return ToolResultBlock(tool_use_id=tu.id, content=content)
-
-    def _extract_todo_plan(self, texts: list[str]) -> list[PlanTodoItem]:
-        items: list[PlanTodoItem] = []
-        for text in texts:
-            for line in text.splitlines():
-                match = (
-                    self._TODO_LINE_RE.match(line)
-                    or self._CHECKBOX_TODO_RE.match(line)
-                    or self._NUMBERED_TODO_RE.match(line)
-                )
-                if not match:
-                    continue
-                content = match.group(1).strip()
-                if not content:
-                    continue
-                priority = "high" if self._todo_looks_high_priority(content) else "medium"
-                status = "in_progress" if not items else "pending"
-                items.append(PlanTodoItem(
-                    todo_id=f"todo-{len(items) + 1}",
-                    content=content,
-                    status=status,
-                    priority=priority,
-                ))
-        return items[:20]
-
-    def _synthesize_todo_plan(self, tool_uses: list[ToolUseBlock]) -> list[PlanTodoItem]:
-        items: list[PlanTodoItem] = []
-        for tu in tool_uses[:12]:
-            tool = self.registry.get(tu.name)
-            if tool is not None and tool.read_only:
-                content = f"调用只读工具 {tu.name} 感知当前系统状态。"
-            elif tool is not None:
-                content = f"在安全校验后调用变更工具 {tu.name} 处理已确认目标。"
-            else:
-                content = f"校验并调用工具 {tu.name}。"
-            priority = "high" if tool is not None and not tool.read_only else "medium"
-            items.append(PlanTodoItem(
-                todo_id=f"todo-{len(items) + 1}",
-                content=content,
-                status="in_progress" if not items else "pending",
-                priority=priority,
-            ))
-        if items:
-            items.append(PlanTodoItem(
-                todo_id=f"todo-{len(items) + 1}",
-                content="根据工具结果验证影响范围并返回结论。",
-                status="pending",
-                priority="medium",
-            ))
-        return items[:20]
-
-    @staticmethod
-    def _todo_items_to_text(items: list[PlanTodoItem]) -> str:
-        return "\n".join(
-            f"TODO {idx}: {item.content}"
-            for idx, item in enumerate(items, start=1)
-        )
-
-    def _todo_looks_high_priority(self, content: str) -> bool:
-        lowered = content.lower()
-        return any(token in lowered for token in (
-            "high", "critical", "危险", "高危", "变更", "重启", "删除", "清空",
-            "restart", "remove", "truncate", "kill",
-        ))
 
     def _set_plan_step(
         self,
@@ -1339,6 +1241,11 @@ class Agent:
         updated = self.plan_store.set_status(
             plan.plan_id, status, current_step=current_step
         )
+        if status == "failed" and self.todo_service is not None:
+            previous_revision = updated.todo_revision
+            updated, snapshot = self.todo_service.finalize(plan.plan_id, success=False)
+            if updated.todo_revision != previous_revision:
+                self._emit_todo_snapshot(trace, snapshot)
         self._emit_plan(trace, updated, kind="plan_step_update", text=status)
         return updated
 

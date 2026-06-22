@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 PlanStatus = Literal["pending", "running", "blocked", "complete", "failed"]
 StepStatus = Literal["pending", "running", "complete", "failed", "skipped"]
-TodoStatus = Literal["pending", "in_progress", "completed", "cancelled"]
+TodoStatus = Literal["pending", "in_progress", "completed", "failed", "cancelled"]
 TodoPriority = Literal["high", "medium", "low"]
 
 
@@ -72,6 +72,7 @@ class PlanSnapshot:
     todos: list[PlanTodoItem] = field(default_factory=list)
     current_step: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    todo_revision: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +85,7 @@ class PlanSnapshot:
             "updated_at": self.updated_at,
             "current_step": self.current_step,
             "metadata": self.metadata,
+            "todo_revision": self.todo_revision,
             "steps": [s.to_dict() for s in self.steps],
             "todos": [t.to_dict() for t in self.todos],
         }
@@ -142,6 +144,39 @@ class PlanStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Apply additive migrations for databases created by older releases."""
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(plans)").fetchall()
+        }
+        if "todo_revision" not in columns:
+            self._conn.execute(
+                "ALTER TABLE plans ADD COLUMN todo_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        trigger_row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ("validate_plan_todo_insert",),
+        ).fetchone()
+        if trigger_row and "'failed'" not in (trigger_row[0] or ""):
+            self._conn.executescript("""
+            DROP TRIGGER IF EXISTS validate_plan_todo_insert;
+            DROP TRIGGER IF EXISTS validate_plan_todo_update;
+            """)
+        self._conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS validate_plan_todo_insert
+        BEFORE INSERT ON plan_todos
+        WHEN NEW.status NOT IN ('pending','in_progress','completed','failed','cancelled')
+          OR NEW.priority NOT IN ('high','medium','low')
+        BEGIN SELECT RAISE(ABORT, 'invalid plan todo state'); END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_plan_todo_update
+        BEFORE UPDATE ON plan_todos
+        WHEN NEW.status NOT IN ('pending','in_progress','completed','failed','cancelled')
+          OR NEW.priority NOT IN ('high','medium','low')
+        BEGIN SELECT RAISE(ABORT, 'invalid plan todo state'); END;
+        """)
 
     def create_run_plan(
         self,
@@ -253,35 +288,67 @@ class PlanStore:
     ) -> PlanSnapshot:
         now = time.time()
         with self._lock:
-            self._conn.execute("DELETE FROM plan_todos WHERE plan_id=?", (plan_id,))
-            for ordinal, todo in enumerate(todos):
+            existing = self._conn.execute(
+                "SELECT todo_id,content FROM plan_todos WHERE plan_id=? ORDER BY ordinal",
+                (plan_id,),
+            ).fetchall()
+            ids_by_content: dict[str, list[str]] = {}
+            for old_id, old_content in existing:
+                ids_by_content.setdefault(old_content, []).append(old_id)
+
+            reconciled: list[PlanTodoItem] = []
+            used_ids: set[str] = set()
+            for todo in todos:
+                todo_id = todo.todo_id.strip()
+                if not todo_id or todo_id in used_ids:
+                    candidates = ids_by_content.get(todo.content[:500], [])
+                    todo_id = next((item for item in candidates if item not in used_ids), "")
+                if not todo_id:
+                    todo_id = f"todo-{uuid.uuid4().hex[:12]}"
+                used_ids.add(todo_id)
+                reconciled.append(PlanTodoItem(
+                    todo_id=todo_id,
+                    content=todo.content[:500],
+                    status=todo.status,
+                    priority=todo.priority,
+                    updated_at=now,
+                ))
+
+            # isolation_level=None means every statement would otherwise commit
+            # independently. Keep delete/insert/revision as one visible state.
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM plan_todos WHERE plan_id=?", (plan_id,))
+                for ordinal, todo in enumerate(reconciled):
+                    self._conn.execute(
+                        """
+                        INSERT INTO plan_todos(
+                            plan_id,todo_id,ordinal,content,status,priority,updated_at
+                        ) VALUES(?,?,?,?,?,?,?)
+                        """,
+                        (
+                            plan_id, todo.todo_id, ordinal, todo.content,
+                            todo.status, todo.priority, now,
+                        ),
+                    )
                 self._conn.execute(
-                    """
-                    INSERT INTO plan_todos(
-                        plan_id,todo_id,ordinal,content,status,priority,updated_at
-                    ) VALUES(?,?,?,?,?,?,?)
-                    """,
-                    (
-                        plan_id,
-                        todo.todo_id,
-                        ordinal,
-                        todo.content[:500],
-                        todo.status,
-                        todo.priority,
-                        now,
-                    ),
+                    """UPDATE plans
+                       SET updated_at=?, todo_revision=todo_revision+1
+                       WHERE plan_id=?""",
+                    (now, plan_id),
                 )
-            self._conn.execute(
-                "UPDATE plans SET updated_at=? WHERE plan_id=?",
-                (now, plan_id),
-            )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
         return self.get(plan_id)
 
     def get(self, plan_id: str) -> PlanSnapshot:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT plan_id,trace_id,user,title,status,current_step,metadata,created_at,updated_at
+                SELECT plan_id,trace_id,user,title,status,current_step,metadata,
+                       created_at,updated_at,todo_revision
                 FROM plans WHERE plan_id=?
                 """,
                 (plan_id,),
@@ -312,6 +379,7 @@ class PlanStore:
             metadata=json.loads(row[6]) if row[6] else {},
             created_at=row[7],
             updated_at=row[8],
+            todo_revision=row[9],
             steps=[
                 PlanStep(step_id=s[0], title=s[1], status=s[2], detail=s[3], updated_at=s[4])
                 for s in step_rows

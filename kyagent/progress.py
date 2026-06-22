@@ -23,11 +23,11 @@ ProgressKind = Literal[
     "tool_call_start",   # About to invoke tool; payload: tool, argv
     "tool_call_end",     # Tool returned; payload: tool, text=truncated_output, meta={"ok": bool}
     "user_choice",       # Agent asks the user to pick from options; payload: text=question, meta={"options": [...]}
-    "plan_start",        # Durable plan created; payload: meta={"plan": snapshot, "plan_id": ...}
-    "plan_step_start",   # Plan step entered; payload: meta={"plan_id": ..., "step_id": ..., "status": "running"}
-    "plan_step_update",  # Plan step changed; payload: meta={"plan_id": ..., "step_id": ..., "status": ...}
-    "plan_step_end",     # Plan step ended; payload: meta={"plan_id": ..., "step_id": ..., "status": ...}
-    "plan_snapshot",     # Full current plan snapshot; payload: meta={"plan": snapshot}
+    "plan_start",        # Durable run created; payload: meta={"plan_id": ..., "plan_status": ...}
+    "plan_step_start",   # Plan step entered; meta={"plan_id": ..., "step_id": ..., "step_status": ...}
+    "plan_step_update",  # Plan step changed; meta={"plan_id": ..., "step_id": ..., "step_status": ...}
+    "plan_step_end",     # Plan step ended; meta={"plan_id": ..., "step_id": ..., "step_status": ...}
+    "todo_snapshot",     # Authoritative todo state; meta={plan_id, revision, items}
     "budget_update",     # Iteration/tool budget; payload: meta={"iteration": N, "max_iterations": M}
     "agent_final",       # Final answer ready; payload: text=final_text
     "error",             # Any unrecoverable error; payload: text=detail, meta={"reason": code}

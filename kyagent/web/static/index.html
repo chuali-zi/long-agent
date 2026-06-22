@@ -1320,9 +1320,14 @@ function renderMarkdownInto(el, text) {
 function approvalDomId(id) {
   return 'approval-' + encodeURIComponent(id).replace(/%/g, '_');
 }
-const planState = { items: [], planId: '', fromBackend: false };
-const TODO_LINE_RE = /^\s*(?:[-*]\s*)?(?:TODO|Todo|todo|PLAN|Plan|plan|任务|步骤)\s*\d{1,2}\s*[:：.)、-]\s*(.+?)\s*$/i;
-const CHECKBOX_TODO_RE = /^\s*[-*]\s*\[([ xX\-])\]\s*(.+?)\s*$/;
+const planState = { items: [], planId: '', revision: -1 };
+function beginPlan(planId) {
+  if (!planId || planState.planId === planId) return;
+  planState.planId = planId;
+  planState.revision = -1;
+  planState.items = [];
+  drawPlan();
+}
 function planEmptyHtml() {
   return `<div class="dock-empty">
       <svg viewBox="0 0 120 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1350,51 +1355,6 @@ function normalizePlanTodos(todos) {
     return { id, text, status: normalizePlanStatus(t.status) };
   });
 }
-function markActiveTodo(items) {
-  if (!items.length) return items;
-  const hasRunning = items.some(t => t.status === 'in_progress');
-  if (hasRunning) return items;
-  const next = items.find(t => t.status === 'pending');
-  if (next) next.status = 'in_progress';
-  else if (items.every(t => t.status === 'pending')) items[0].status = 'in_progress';
-  return items;
-}
-function extractTodosFromText(text) {
-  if (!text) return [];
-  const items = [];
-  for (const line of text.split('\n')) {
-    let content = '';
-    let checked = false;
-    const box = CHECKBOX_TODO_RE.exec(line);
-    if (box) {
-      checked = box[1].toLowerCase() === 'x';
-      content = box[2].trim();
-    } else {
-      const todo = TODO_LINE_RE.exec(line);
-      if (todo) content = todo[1].trim();
-    }
-    if (!content) continue;
-    items.push({
-      id: 'todo-' + (items.length + 1),
-      text: content,
-      status: checked ? 'completed' : 'pending',
-    });
-  }
-  return markActiveTodo(items.slice(0, 20));
-}
-function mergeTodoStatuses(current, incoming) {
-  if (!incoming.length) return current;
-  if (!current.length) return incoming;
-  return incoming.map((item, i) => {
-    const prev = current.find(x => x.id === item.id)
-      || current.find(x => x.text === item.text)
-      || current[i];
-    if (!prev) return item;
-    const rank = { pending: 0, in_progress: 1, completed: 2, cancelled: 2, failed: 3 };
-    const nextStatus = rank[item.status] >= rank[prev.status] ? item.status : prev.status;
-    return { ...item, id: prev.id, status: nextStatus };
-  });
-}
 function updatePlanCount() {
   const el = document.getElementById('planCount');
   if (!el) return;
@@ -1406,10 +1366,9 @@ function drawPlan() {
   const dock = document.getElementById('planDock');
   if (!dock) return;
   if (!planState.items.length) { dock.innerHTML = planEmptyHtml(); updatePlanCount(); return; }
-  const order = { in_progress: 0, pending: 1, completed: 2, cancelled: 3, failed: 4 };
   const list = document.createElement('ul');
   list.dataset.component = 'todos';
-  planState.items.slice().sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9)).forEach((s) => {
+  planState.items.forEach((s) => {
     const row = document.createElement('li');
     row.dataset.slot = 'item';
     row.dataset.status = s.status || 'pending';
@@ -1423,76 +1382,43 @@ function drawPlan() {
   dock.replaceChildren(list);
   updatePlanCount();
 }
-function renderTodos(todos, planId = '', fromBackend = false) {
-  const normalized = fromBackend ? normalizePlanTodos(todos) : markActiveTodo(normalizePlanTodos(todos));
-  if (!normalized.length) return;
-  planState.items = fromBackend
-    ? normalized
-    : mergeTodoStatuses(planState.items, normalized);
-  if (planId) planState.planId = planId;
-  if (fromBackend) planState.fromBackend = true;
-  drawPlan();
-}
-function setTodoItem(id, status) {
-  const itemId = id ?? '';
-  const item = planState.items.find(x => x.id === itemId);
-  if (!item) return;
-  item.status = normalizePlanStatus(status);
-  markActiveTodo(planState.items);
-  drawPlan();
-}
-function renderBackendPlan(plan) {
-  if (!plan || !Array.isArray(plan.todos) || !plan.todos.length) return;
-  renderTodos(plan.todos, plan.plan_id || planState.planId, true);
-}
-function maybeUpdateTodosFromText(text) {
-  const parsed = extractTodosFromText(text);
-  if (!parsed.length) return;
-  if (planState.fromBackend) {
-    return;
-  }
-  renderTodos(parsed);
-}
-function advanceTodoOnToolEnd() {
-  if (!planState.items.length) return;
-  if (planState.fromBackend) return;
-  const runningIdx = planState.items.findIndex(t => t.status === 'in_progress');
-  if (runningIdx < 0) return;
-  planState.items[runningIdx].status = 'completed';
-  const nextIdx = planState.items.findIndex((t, i) => i > runningIdx && t.status === 'pending');
-  if (nextIdx >= 0) planState.items[nextIdx].status = 'in_progress';
-  drawPlan();
-}
-function completeAllTodos() {
-  if (!planState.items.length) return;
-  if (planState.fromBackend) return;
-  planState.items.forEach(t => { if (t.status !== 'failed') t.status = 'completed'; });
+function renderTodoSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.items)) return;
+  const revision = Number(snapshot.revision ?? -1);
+  const planId = snapshot.plan_id || '';
+  if (!planId || !Number.isInteger(revision) || revision < 0) return;
+  /* plan_start owns turn selection. A delayed fetch/SSE frame from an older
+     turn must never replace the currently visible todo list. */
+  if (planState.planId && planState.planId !== planId) return;
+  if (!planState.planId) beginPlan(planId);
+  if (revision <= planState.revision) return;
+  planState.revision = revision;
+  planState.items = normalizePlanTodos(snapshot.items);
   drawPlan();
 }
 function handlePlanProgress(p) {
-  if (Array.isArray(p.todos) && p.todos.length) {
-    renderTodos(p.todos, p.plan_id || p.id || '', true);
-  }
-  const plan = p.meta?.plan || p.plan;
-  if (plan) renderBackendPlan(plan);
-  const planId = p.meta?.plan_id || p.plan_id || plan?.plan_id;
-  if (planId) planState.planId = planId;
-  const itemId = p.meta?.todo_id || p.todo_id;
-  if (itemId && p.status) setTodoItem(itemId, p.status);
+  const planId = p.meta?.plan_id || p.plan_id;
+  if (p.kind === 'plan_start' && planId) beginPlan(planId);
 }
 async function loadPlan(planId) {
   if (!planId) return;
+  if (planState.planId && planState.planId !== planId) return;
   try {
     const r = await fetch(`/api/plans/${encodeURIComponent(planId)}`, {headers: apiHeaders()});
     if (!r.ok) return;
     const j = await r.json();
-    if (j.plan) renderBackendPlan(j.plan);
+    if (planState.planId && planState.planId !== planId) return;
+    if (j.plan) renderTodoSnapshot({
+      plan_id: j.plan.plan_id,
+      revision: j.plan.todo_revision ?? 0,
+      items: j.plan.todos || [],
+    });
   } catch (_) {}
 }
 function resetPlan() {
   planState.items = [];
   planState.planId = '';
-  planState.fromBackend = false;
+  planState.revision = -1;
   const dock = document.getElementById('planDock');
   if (dock) dock.innerHTML = planEmptyHtml();
   updatePlanCount();
@@ -1561,6 +1487,12 @@ function toolName(p) {
 }
 function toolArgv(p) {
   return p.argv ?? p.args ?? p.arguments ?? {};
+}
+function toolArgvHint(p) {
+  const argv = toolArgv(p);
+  if (Array.isArray(argv)) return argv.join(' ');
+  if (argv && typeof argv === 'object') return JSON.stringify(argv);
+  return String(argv ?? '');
 }
 
 /* ============================================================================
@@ -1671,7 +1603,7 @@ function toolStart(p) {
     if (row) {                       // 第二次（带 argv）：精炼同一条内部行
       row.argvSet = true;
       row.actEl.textContent = action;
-      row.line.title = (p.argv || []).join(' ');
+      row.line.title = toolArgvHint(p);
       return;
     }
   }
@@ -1686,7 +1618,7 @@ function toolStart(p) {
   const row = {name, line, ended: false, argvSet: !!p.argv,
                statEl: line.querySelector('.tl-stat'), actEl: line.querySelector('.tl-act'),
                resEl: line.querySelector('.tl-result')};
-  if (p.argv) row.line.title = (p.argv || []).join(' ');
+  if (p.argv) row.line.title = toolArgvHint(p);
   b.rows.push(row);
   b.count += 1;
   const label = b.el.querySelector('.pill-label');
@@ -1697,7 +1629,6 @@ function toolStart(p) {
 function toolEnd(p) {
   const name = toolName(p);
   const ok = (p.meta?.ok ?? p.ok) !== false;
-  if (ok) advanceTodoOnToolEnd();
   if (!openBlock || openBlock.type !== 'tool') return;
   const row = toolRowByName(openBlock, name);
   if (!row) return;
@@ -1745,7 +1676,6 @@ function handleProgress(p) {
   } else if (p.kind === 'thinking_delta') {
     state.metrics.thinking += 1; updateMetrics();
     appendAnswer(p.delta || '');
-    maybeUpdateTodosFromText(openBlock && openBlock.type === 'answer' ? openBlock.text : '');
     setStatus('生成中');
   } else if (p.kind === 'thinking_end') {
     /* 轮结束：若是答案轮则保留 answer；否则交由后续事件收口 */
@@ -1760,7 +1690,9 @@ function handleProgress(p) {
     /* 不再把 {iterations:n} 打到主聊天框 */
   } else if (p.kind === 'approval_required') {
     renderApproval(p);
-  } else if (p.kind === 'plan' || p.kind === 'plan_step' || p.kind === 'plan_start' || p.kind === 'plan_snapshot' || p.kind === 'plan_step_start' || p.kind === 'plan_step_update' || p.kind === 'plan_step_end') {
+  } else if (p.kind === 'todo_snapshot') {
+    renderTodoSnapshot(p.meta || p);
+  } else if (p.kind === 'plan' || p.kind === 'plan_step' || p.kind === 'plan_start' || p.kind === 'plan_step_start' || p.kind === 'plan_step_update' || p.kind === 'plan_step_end') {
     handlePlanProgress(p);
   } else if (p.kind === 'approval_resolved') {
     resolveApproval(p);
@@ -1859,11 +1791,8 @@ function handleSseFrame(frame) {
       appendMsg('agent', 'agent · final', finalText, {markdown: true});
       followChatOutput();
     }
-    maybeUpdateTodosFromText(finalText);
     if (p.denied) appendMsg('error', 'safety', '被安全护栏拦截');
-    const finishTodos = () => { if (!p.denied) completeAllTodos(); };
-    if (p.plan_id) loadPlan(p.plan_id).then(finishTodos);
-    else finishTodos();
+    if (p.plan_id) loadPlan(p.plan_id);
   } else {
     handleProgress({kind: event, ...p});
   }

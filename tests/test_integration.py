@@ -154,6 +154,30 @@ class _TodoWriteToolBackend(LlmBackend):
         )
 
 
+class _InvalidTodoAlongsideActionBackend(LlmBackend):
+    name = "invalid_todo_alongside_action"
+
+    def chat(self, system, messages, tools):  # noqa: ANN001, ARG002
+        last = messages[-1] if messages else {}
+        if last.get("role") == "user" and isinstance(last.get("content"), list):
+            return AssistantMessage(blocks=[TextBlock(text="正常工具已执行。")])
+        return AssistantMessage(
+            blocks=[
+                ToolUseBlock(
+                    id="invalid-todo",
+                    name="todo_write",
+                    input={"todos": [{"content": "", "status": "pending", "priority": "medium"}]},
+                ),
+                ToolUseBlock(
+                    id="action-next-to-invalid-todo",
+                    name="process_list",
+                    input={"sort_by": "cpu", "limit": 3},
+                ),
+            ],
+            stop_reason="tool_use",
+        )
+
+
 class _FinalThenSummaryBackend(LlmBackend):
     name = "final_then_summary"
 
@@ -411,19 +435,13 @@ def test_low_risk_query_flows_through(agent):
     assert kinds.index(EventKind.EXECUTION_RESULT.value) < kinds.index(EventKind.PERCEPTION.value)
 
 
-def test_tool_use_without_todo_plan_is_synthesized_immediately(agent):
-    """模型直接调工具且无 todo 时：静默合成 TODO 并同轮执行，不阻断、不逼写。"""
+def test_tool_use_without_todo_plan_executes_without_fabricating_todos(agent):
+    """TODO is optional observability state, never an execution prerequisite."""
     agent.llm = _NoPlanToolBackend()
     agent.cfg.agent.max_iterations = 1
     result = agent.ask("查下 CPU 占用最高的进程")
 
-    synthesized = [
-        e for e in result.trace.events
-        if e.kind is EventKind.PLAN_UPDATE
-        and e.payload.get("event") == "plan_auto_synthesized"
-    ]
-    assert synthesized
-    # 不再阻断：没有 plan_required，也没有逼写 todo_write
+    # No rejection, coercion, synthetic plan, or extra LLM repair round.
     assert not any(
         e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_required"
         for e in result.trace.events
@@ -437,6 +455,10 @@ def test_tool_use_without_todo_plan_is_synthesized_immediately(agent):
         e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "todo_write"
         for e in result.trace.events
     )
+    assert not any(
+        e.kind is EventKind.PLAN_UPDATE and e.payload.get("event") == "plan_auto_synthesized"
+        for e in result.trace.events
+    )
     # 工具在同一轮即执行
     assert any(
         e.kind is EventKind.TOOL_REQUEST and e.payload.get("tool") == "process_list"
@@ -445,7 +467,7 @@ def test_tool_use_without_todo_plan_is_synthesized_immediately(agent):
     assert any(e.kind is EventKind.EXECUTION for e in result.trace.events)
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
-    assert plan.todos[0].content.startswith("调用只读工具 process_list")
+    assert plan.todos == []
 
 
 def test_tool_use_without_todo_plan_is_not_coerced_into_todo_write(agent):
@@ -465,6 +487,26 @@ def test_tool_use_without_todo_plan_is_not_coerced_into_todo_write(agent):
         for e in result.trace.events
     )
     assert all(names != ["todo_write"] for names in backend.tool_sets)
+
+
+def test_invalid_todo_write_does_not_block_sibling_action_tool(agent):
+    agent.llm = _InvalidTodoAlongsideActionBackend()
+
+    result = agent.ask("查下 CPU 占用最高的进程")
+
+    todo_requests = [
+        event for event in result.trace.events
+        if event.kind is EventKind.TOOL_REQUEST and event.payload.get("tool") == "todo_write"
+    ]
+    process_requests = [
+        event for event in result.trace.events
+        if event.kind is EventKind.TOOL_REQUEST and event.payload.get("tool") == "process_list"
+    ]
+    assert todo_requests and process_requests
+    assert any(event.kind is EventKind.EXECUTION for event in result.trace.events)
+    assert result.final_text == "正常工具已执行。"
+    assert result.plan_id is not None
+    assert agent.plan_store.get(result.plan_id).todos == []
 
 
 def test_real_llm_todo_write_coercion_repro_entry(tmp_path):
@@ -545,11 +587,18 @@ def test_tool_use_with_todo_plan_executes_and_persists_todos(agent):
     assert EventKind.EXECUTION.value in kinds
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
-    assert [todo.content for todo in plan.todos] == [
-        "调用只读工具查看 CPU 进程列表。",
-        "根据结果返回关键证据。",
+    # Text that happens to look like a plan is display text, not mutable state.
+    assert plan.todos == []
+    snapshots = [
+        event.payload for event in result.trace.events
+        if event.kind is EventKind.PLAN_UPDATE
+        and event.payload.get("event") == "todo_snapshot"
     ]
-    assert plan.todos[0].status == "in_progress"
+    assert len(snapshots) == 1
+    assert [item["revision"] for item in snapshots] == sorted(
+        item["revision"] for item in snapshots
+    )
+    assert snapshots[-1]["revision"] == plan.todo_revision
 
 
 def test_tool_use_with_structured_todo_write_executes_without_text_repair(agent):
@@ -578,12 +627,12 @@ def test_tool_use_with_structured_todo_write_executes_without_text_repair(agent)
     assert result.trace.events.index(todo_requests[0]) < result.trace.events.index(process_requests[0])
     plan = agent.plan_store.get(result.plan_id)
     assert [(todo.content, todo.status, todo.priority) for todo in plan.todos] == [
-        ("调用只读工具查看 CPU 进程列表。", "in_progress", "high"),
-        ("根据结果返回关键证据。", "pending", "medium"),
+        ("调用只读工具查看 CPU 进程列表。", "cancelled", "high"),
+        ("根据结果返回关键证据。", "cancelled", "medium"),
     ]
 
 
-def test_numbered_plan_is_accepted_as_todo_plan(agent):
+def test_numbered_text_plan_does_not_override_runtime_todo_state(agent):
     agent.llm = _NumberedPlanBackend()
     result = agent.ask("查下 CPU 占用最高的进程")
     assert not any(
@@ -592,10 +641,7 @@ def test_numbered_plan_is_accepted_as_todo_plan(agent):
     )
     assert result.plan_id is not None
     plan = agent.plan_store.get(result.plan_id)
-    assert [todo.content for todo in plan.todos] == [
-        "调用只读工具查看 CPU 进程列表。",
-        "根据结果返回关键证据。",
-    ]
+    assert plan.todos == []
 
 
 def test_os_question_final_without_evidence_forces_read_only_perception(agent):

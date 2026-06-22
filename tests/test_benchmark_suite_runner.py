@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_SUITE = ROOT / "benchmarks" / "run-suite.sh"
+COMMON = ROOT / "benchmarks" / "lib" / "common.sh"
 
 
 def test_run_suite_captures_expected_nonzero_bench_results() -> None:
@@ -25,3 +26,9 @@ def test_run_suite_captures_nonperfect_score_exit_without_aborting() -> None:
     assert grade_exit_lines == [
         'if "$py" "$ROOT/lib/grade.py" exit "$score_copy"; then'
     ]
+
+
+def test_real_agent_uses_code_from_selected_install_prefix() -> None:
+    script = COMMON.read_text(encoding="utf-8")
+
+    assert "export PYTHONPATH=$install_prefix_q" in script

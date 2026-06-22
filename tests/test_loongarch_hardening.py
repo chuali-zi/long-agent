@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -31,6 +32,10 @@ def require_usable_bash() -> None:
 
 def _run_bash(command: str) -> subprocess.CompletedProcess[str]:
     require_usable_bash()
+    env = os.environ.copy()
+    # Installer tests must not consume a developer/CI secret from the host.
+    # Tests that exercise key handling pass an explicit key file instead.
+    env.pop("DEEPSEEK_API_KEY", None)
     return subprocess.run(
         ["bash", "-c", command],
         check=False,
@@ -39,6 +44,7 @@ def _run_bash(command: str) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         cwd=ROOT,
+        env=env,
     )
 
 

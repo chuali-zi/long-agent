@@ -71,9 +71,11 @@ kybench_run_ask() {
   fi
   local auto_roots_q
   printf -v auto_roots_q '%q' "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}"
+  local install_prefix_q
+  printf -v install_prefix_q '%q' "$install_prefix"
 
   sudo -u "$kyagent_user" bash -c \
-    "set -a; source '$env_file'; set +a; export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS=$auto_roots_q; '$install_prefix/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$prompt")"
+    "set -a; source '$env_file'; set +a; export PYTHONPATH=$install_prefix_q; export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS=$auto_roots_q; '$install_prefix/.venv/bin/kyagent' ask --auto-approve-safe-remediation $(printf '%q' "$prompt")"
 }
 
 kybench_finalize_exit() {

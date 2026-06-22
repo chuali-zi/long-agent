@@ -508,6 +508,8 @@ def build_app(cfg: Optional[Config] = None) -> FastAPI:
 
     @app.get("/api/plans/{plan_id}", response_model=S.PlanDetailResponse)
     async def plan_detail(plan_id: str):
+        if not getattr(cfg.planning, "enabled", True):
+            raise HTTPException(status_code=404, detail="planning is disabled")
         if not plan_id.startswith("plan-") or len(plan_id) > 64:
             raise HTTPException(status_code=422, detail="invalid plan_id")
         try:

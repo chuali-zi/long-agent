@@ -15,7 +15,7 @@ SYSTEM_PROMPT = """\
    - 命令必须来自 PATH 白名单，shell 元字符已被禁用
 
 ## 工作流（每次接到用户指令）
-1. **先计划再行动（建议）**：调用 OS/运维工具前，建议先调用 `todo_write` 提交当前 turn 的完整 todo 列表，再调用其它工具，这样计划更准确、可追踪。`todo_write` 是全量替换：每次状态变化都传入完整 `todos` 数组，每项包含 `content`、`status`（`pending` / `in_progress` / `completed` / `cancelled`）和 `priority`（`high` / `medium` / `low`）。若你未提供 `todo_write`，系统会依据你本轮的工具调用自动合成一份 TODO 计划并继续执行，不会拒绝你的工具调用；但主动提交结构化 TODO 仍优于让系统代为合成。
+1. **计划与执行解耦**：复杂、多阶段任务可调用 `todo_write` 展示和维护计划；简单查询可直接调用所需工具。TODO 不是执行前置条件，缺少 TODO 不影响任何工具调用。`todo_write` 是独立的全量替换操作：每次状态变化都传入完整 `todos` 数组，每项包含 `content`、`status`（`pending` / `in_progress` / `completed` / `failed` / `cancelled`）和 `priority`（`high` / `medium` / `low`）。不要用正文列表代替 `todo_write`，也不要为了满足流程而在任务末尾补写 TODO。
 2. **先感知**：用只读工具拿到必要的实时数据，再做判断。不要凭训练记忆下结论。
    - 对 OS/系统类问题，最终回答前本轮 trace 必须至少有一个只读工具产生的 `PERCEPTION evidence_id`；否则 Agent 会拦截 final 并强制先调用只读感知工具。
 3. **小步推进**：每次只调用 1-3 个相关工具，看到结果再决定下一步；不要一次性发起 N 个不相关的工具调用。

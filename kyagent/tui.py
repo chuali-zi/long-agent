@@ -208,6 +208,9 @@ class TuiApp:
         # turn 内变化的状态
         self._status = _Status(label="等待输入", spinner=None, tone="dim")
         self._thinking_buffer: list[str] = []  # 用 list 拼接比 str+= 快
+        self._todo_items: list[dict[str, Any]] = []
+        self._todo_plan_id = ""
+        self._todo_revision = -1
         self._live: Any = None  # rich.live.Live | None；仅在 turn 期间非空
         self._pending_final: str | None = None  # 由 agent_final 事件递交给 _run_turn
 
@@ -256,6 +259,9 @@ class TuiApp:
         if kind == "agent_start":
             # 新 turn：清空思考 buffer。
             self._thinking_buffer.clear()
+            self._todo_items.clear()
+            self._todo_plan_id = ""
+            self._todo_revision = -1
             self._status = _Status(label="🧠 思考中...", spinner="dots", tone="cyan")
             return
 
@@ -265,7 +271,7 @@ class TuiApp:
             self._status = _Status(label=label, spinner="dots", tone="cyan")
             return
 
-        if kind == "thinking_delta":
+        if kind in {"thinking_delta", "reasoning_delta"}:
             if event.delta:
                 self._thinking_buffer.append(event.delta)
             return
@@ -273,6 +279,34 @@ class TuiApp:
         if kind == "thinking_end":
             # 不清空 buffer —— 多轮工具调用之间思考会接续。
             self._status = _Status(label="🧠 整理思路...", spinner="dots", tone="cyan")
+            return
+
+        if kind == "plan_start":
+            plan_id = str(meta.get("plan_id") or "")
+            if plan_id and plan_id != self._todo_plan_id:
+                self._todo_plan_id = plan_id
+                self._todo_revision = -1
+                self._todo_items.clear()
+            return
+
+        if kind == "todo_snapshot":
+            plan_id = str(meta.get("plan_id") or "")
+            try:
+                revision = int(meta.get("revision", -1))
+            except (TypeError, ValueError):
+                return
+            if not plan_id or revision < 0:
+                return
+            if self._todo_plan_id and plan_id != self._todo_plan_id:
+                return
+            if not self._todo_plan_id:
+                self._todo_plan_id = plan_id
+            if revision <= self._todo_revision:
+                return
+            items = meta.get("items")
+            if isinstance(items, list):
+                self._todo_revision = revision
+                self._todo_items = [item for item in items if isinstance(item, dict)]
             return
 
         if kind == "tool_call_start":
@@ -348,6 +382,19 @@ class TuiApp:
                     padding=(0, 1),
                 )
             )
+
+        if self._todo_items:
+            rows = Table.grid(padding=(0, 1))
+            rows.add_column(width=2)
+            rows.add_column(overflow="fold")
+            icons = {
+                "completed": "✓", "in_progress": "●", "cancelled": "–",
+                "failed": "!", "pending": "○",
+            }
+            for item in self._todo_items:
+                status = str(item.get("status") or "pending")
+                rows.add_row(icons.get(status, "○"), str(item.get("content") or ""))
+            chunks.append(Panel(rows, title="本轮待办", border_style="grey30", padding=(0, 1)))
 
         chunks.append(self._status.renderable())
         return Group(*chunks)
