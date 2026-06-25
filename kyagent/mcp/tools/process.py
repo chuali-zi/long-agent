@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kyagent.mcp.tools.base import Tool, ToolRegistry
+from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolResult
 from kyagent.safety.patterns import RiskLevel
 
 _USER_PATTERN = r"^[a-z_][a-z0-9_-]{0,31}$"
@@ -65,6 +65,25 @@ class LsofPortTool(Tool):
         proto = args.get("proto", "tcp")
         port = args["port"]
         return ["lsof", "-nP", "-i", f"{proto.upper()}:{port}"]
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        # lsof uses exit 1 for a valid query with no matches.  For a perception
+        # tool that is positive evidence that the port is free, not an error.
+        if (
+            exec_result.returncode == 1
+            and not exec_result.stdout.strip()
+            and not exec_result.stderr.strip()
+            and not exec_result.timed_out
+            and not exec_result.skipped_reason
+        ):
+            data = exec_result.to_dict()
+            data["no_match"] = True
+            return ToolResult(
+                ok=True,
+                content="No process is using the requested port.",
+                data=data,
+            )
+        return super().format_result(exec_result)
 
 
 class LsofPidTool(Tool):

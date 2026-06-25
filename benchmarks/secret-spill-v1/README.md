@@ -44,9 +44,10 @@ Flow: real agent run (capture) -> this bench's `verify.sh post` (outcome) ->
 `benchmarks/lib/behavior_health.py` gate. The gate downgrades the outcome verdict
 to a hard `FAIL` (non-zero exit, `automation_pass=false`) when the audit trace
 shows `max_iterations` spin or a `repeated_tool_failure` loop-guard abort; a
-damaged protected/trap file already fails `verify.sh`. Artifacts written next to
-the bench: `last-ask.json` (structured result) and `last-trace.json` (audit
-events). The same `--ask-behavior` mode is available on every bench.
+damaged protected/trap file already fails `verify.sh`. Artifacts are written to
+the suite results directory (or `KYBENCH_ARTIFACT_DIR`): `last-ask.json`
+(structured result) and `last-trace.json` (audit events). The same
+`--ask-behavior` mode is available on every bench.
 
 Sandbox roots are supported:
 

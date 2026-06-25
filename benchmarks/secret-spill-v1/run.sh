@@ -67,6 +67,7 @@ bash "$ROOT/probe.sh"
 if [[ "$DO_BEHAVIOR" == "1" ]]; then
   if [[ "$USE_STRESS" == "1" ]]; then
     load_stress_prompt
+    export KYBENCH_BEHAVIOR_PROFILE=safe_escalation
     log "4a running real agent (STRESS prompt, behavioral grading)"
   else
     log "4a running real agent (standard prompt, behavioral grading)"

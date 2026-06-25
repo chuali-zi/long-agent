@@ -106,22 +106,76 @@ kybench_run_ask_capture() {
   if [[ -n "$runtime_root" && -z "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}" ]]; then
     export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS="$runtime_root"
   fi
-  local auto_roots_q install_prefix_q lib_dir_q ask_json_q trace_json_q
-  printf -v auto_roots_q '%q' "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}"
-  printf -v install_prefix_q '%q' "$install_prefix"
-  printf -v lib_dir_q '%q' "$lib_dir"
-  printf -v ask_json_q '%q' "$ask_json"
-  printf -v trace_json_q '%q' "$trace_json"
+  local artifact_dir
+  artifact_dir="$(dirname "$ask_json")"
+  mkdir -p "$artifact_dir"
+  chmod 0700 "$artifact_dir"
 
-  # Run ask (--json) and dump the resulting trace in one privileged shell so the
-  # audit DB path resolves identically for both steps.
-  sudo -u "$kyagent_user" bash -c \
-    "set -a; source '$env_file'; set +a; \
-     export PYTHONPATH=$install_prefix_q; \
-     export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS=$auto_roots_q; \
-     '$install_prefix/.venv/bin/kyagent' ask --json --auto-approve-safe-remediation $(printf '%q' "$prompt") > $ask_json_q; \
-     tid=\$('$install_prefix/.venv/bin/python' -c \"import json;print(json.load(open($ask_json_q)).get('trace_id',''))\"); \
-     '$install_prefix/.venv/bin/python' $lib_dir_q/dump_trace.py \"\${tid:-latest}\" $trace_json_q"
+  # The caller (normally root) owns the redirections.  The agent itself still
+  # runs as the restricted account, so it never needs write access to /opt.
+  # Positional parameters keep paths/prompts out of shell source code.
+  (
+    umask 077
+    sudo -u "$kyagent_user" bash -c '
+      set -euo pipefail
+      set -a
+      source "$1"
+      set +a
+      export PYTHONPATH="$2"
+      export KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS="$3"
+      exec "$4" ask --json --auto-approve-safe-remediation "$5"
+    ' _ "$env_file" "$install_prefix" \
+      "${KYAGENT_AUTO_APPROVE_RUNTIME_ROOTS:-}" \
+      "$install_prefix/.venv/bin/kyagent" "$prompt" > "$ask_json"
+  )
+
+  local trace_id
+  trace_id="$("$install_prefix/.venv/bin/python" - "$ask_json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    doc = json.load(fh)
+trace_id = doc.get("trace_id")
+if not isinstance(trace_id, str) or not trace_id:
+    raise SystemExit("ask JSON is missing trace_id")
+print(trace_id)
+PY
+)"
+
+  (
+    umask 077
+    sudo -u "$kyagent_user" bash -c '
+      set -euo pipefail
+      set -a
+      source "$1"
+      set +a
+      export PYTHONPATH="$2"
+      exec "$3" "$4" "$5" -
+    ' _ "$env_file" "$install_prefix" \
+      "$install_prefix/.venv/bin/python" "$lib_dir/dump_trace.py" \
+      "$trace_id" > "$trace_json"
+  )
+
+  "$install_prefix/.venv/bin/python" - "$ask_json" "$trace_json" <<'PY'
+import json
+import sys
+
+ask = json.load(open(sys.argv[1], encoding="utf-8"))
+trace = json.load(open(sys.argv[2], encoding="utf-8"))
+if ask.get("trace_id") != trace.get("trace_id"):
+    raise SystemExit("ask/trace IDs do not match")
+events = trace.get("events")
+if not isinstance(events, list):
+    raise SystemExit("trace JSON is missing events")
+if not events:
+    raise SystemExit("trace JSON has no events")
+kinds = {event.get("kind") for event in events if isinstance(event, dict)}
+if "user_input" not in kinds:
+    raise SystemExit("trace JSON is missing user_input event")
+if not ({"agent_reply", "error"} & kinds):
+    raise SystemExit("trace JSON is missing terminal agent_reply/error event")
+PY
 }
 
 kybench_run_behavior_flow() {
@@ -133,8 +187,14 @@ kybench_run_behavior_flow() {
   local bench_dir="$1"
   local prompt="$2"
   local bench_id="${3:-$(basename "$bench_dir")}"
-  local ask_json="${KYBENCH_ASK_JSON:-$bench_dir/last-ask.json}"
-  local trace_json="${KYBENCH_TRACE_JSON:-$bench_dir/last-trace.json}"
+  local artifact_dir="${KYBENCH_ARTIFACT_DIR:-}"
+  if [[ -z "$artifact_dir" ]]; then
+    artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/kybench-${bench_id}-behavior.XXXXXX")"
+  fi
+  mkdir -p "$artifact_dir"
+  chmod 0700 "$artifact_dir"
+  local ask_json="${KYBENCH_ASK_JSON:-$artifact_dir/last-ask.json}"
+  local trace_json="${KYBENCH_TRACE_JSON:-$artifact_dir/last-trace.json}"
   local score_json="${KYBENCH_SCORE_JSON:-$bench_dir/score.json}"
   local lib_dir
   lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -142,10 +202,15 @@ kybench_run_behavior_flow() {
   py="$(command -v python3 || command -v python || true)"
   [[ -n "$py" ]] || { echo "python required for grading" >&2; return 10; }
 
-  kybench_run_ask_capture "$bench_dir" "$prompt" "$ask_json" "$trace_json"
+  echo "behavior artifacts: $artifact_dir"
+  local capture_rc=0
+  kybench_run_ask_capture "$bench_dir" "$prompt" "$ask_json" "$trace_json" || capture_rc=$?
   # Outcome grade writes score.json then exits with its own code; don't abort.
   bash "$bench_dir/verify.sh" post || true
-  "$py" "$lib_dir/behavior_health.py" "$ask_json" "$trace_json" "$score_json" "$bench_id"
+  "$py" "$lib_dir/behavior_health.py" \
+    "$ask_json" "$trace_json" "$score_json" "$bench_id" \
+    --profile "${KYBENCH_BEHAVIOR_PROFILE:-standard}" \
+    --capture-exit "$capture_rc"
 }
 
 kybench_finalize_exit() {

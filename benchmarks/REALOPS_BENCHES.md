@@ -65,6 +65,11 @@ Run the suite:
 sudo bash benchmarks/run-suite.sh --setup-permissions-prod --teardown-each
 ```
 
+The strict suite runs outcome verification plus real-backend behavioral grading
+by default. Use `--outcome-only` only for a faster compatibility check that does
+not assert trace health. Behavior artifacts are stored under the suite results
+directory; `KYBENCH_ARTIFACT_DIR` overrides the location for individual runs.
+
 Opencode harness: `benchmarks/opencode/SKILL.md`
 
 `run-real-llm.sh` is a thin wrapper around `run-suite.sh`.

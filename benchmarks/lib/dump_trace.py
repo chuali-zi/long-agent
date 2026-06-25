@@ -1,7 +1,7 @@
 """Dump one audit trace's events to JSON for behavioral grading.
 
 Usage:
-    python dump_trace.py <trace_id> <out.json> [latest]
+    python dump_trace.py <trace_id> <out.json|->
 
 Opens the audit store using the *same* config resolution the agent used
 (``load_config(None)`` + ``build_audit_store``), so it reads exactly the DB the
@@ -22,7 +22,7 @@ def main(argv: list[str]) -> int:
         print("usage: dump_trace.py <trace_id> <out.json>", file=sys.stderr)
         return 2
     trace_id = argv[0].strip()
-    out_path = Path(argv[1])
+    out_arg = argv[1]
 
     from kyagent.config import load_config
     from kyagent.runtime import build_audit_store
@@ -38,12 +38,18 @@ def main(argv: list[str]) -> int:
         trace_id = traces[0]["trace_id"]
 
     events = store.get_events(trace_id)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps({"trace_id": trace_id, "events": events}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    print(f"dumped {len(events)} events for trace {trace_id} -> {out_path}")
+    payload = json.dumps(
+        {"trace_id": trace_id, "events": events},
+        ensure_ascii=False,
+        indent=2,
+    ) + "\n"
+    if out_arg == "-":
+        sys.stdout.write(payload)
+    else:
+        out_path = Path(out_arg)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(payload, encoding="utf-8")
+        print(f"dumped {len(events)} events for trace {trace_id} -> {out_path}")
     return 0
 
 

@@ -20,9 +20,11 @@ Usage: sudo bash scripts/full-test.sh [options] [-- pytest_arg ...]
 Runs the full validation set in one command:
   1. bash scripts/kyagent.sh install
   2. bash scripts/kyagent.sh test [pytest_arg ...]
-  3. sudo bash benchmarks/run-suite.sh --log-dir DIR
+  3. sudo bash benchmarks/run-suite.sh --log-dir DIR (outcome + behavior)
+  4. run the secret-spill safe-escalation stress acceptance
 
-Benchmark pass criteria are strict: every selected benchmark must score PERFECT.
+Benchmark pass criteria are strict: every selected benchmark must score PERFECT
+and pass behavior grading with real trace evidence.
 
 Options:
   --log-dir DIR                 Store benchmark logs/results under DIR.
@@ -113,6 +115,23 @@ if [[ "$RUN_BENCHMARKS" == "1" ]]; then
 
   log "running strict RealOps benchmark suite"
   bash "$ROOT/benchmarks/run-suite.sh" "${bench_args[@]}"
+
+  stress_dir="$LOG_DIR/secret-spill-stress"
+  mkdir -p "$stress_dir"
+  chmod 0700 "$stress_dir"
+  log "running secret-spill safe-escalation stress acceptance"
+  stress_rc=0
+  if KYBENCH_ARTIFACT_DIR="$stress_dir/artifacts" \
+      bash "$ROOT/benchmarks/secret-spill-v1/run.sh" --stress \
+      2>&1 | tee "$stress_dir/run.log"; then
+    :
+  else
+    stress_rc=$?
+  fi
+  if [[ -f "$ROOT/benchmarks/secret-spill-v1/teardown.sh" ]]; then
+    bash "$ROOT/benchmarks/secret-spill-v1/teardown.sh" >> "$stress_dir/run.log" 2>&1 || true
+  fi
+  [[ "$stress_rc" -eq 0 ]] || die "secret-spill stress acceptance failed (exit=$stress_rc)"
 fi
 
 log "full validation passed"

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from kyagent.audit.logger import AuditLogger
+from kyagent.audit.store import AuditStore
+from kyagent.audit.trace import EventKind, Trace
+from kyagent.mcp.tools import default_registry
+from kyagent.mcp.tools.pipeline import prepare_call
 from kyagent.safety.write_preflight import (
     PathMetadata,
     WritePreflightDecision,
@@ -73,6 +78,28 @@ def test_write_preflight_denies_incident_review_audit_trap():
     )
     assert result.decision is WritePreflightDecision.DENY
     assert result.rule_id == "audit-log"
+
+
+def test_prepare_call_reports_write_preflight_denial_as_safety_stop(tmp_path):
+    store = AuditStore(tmp_path / "audit.db")
+    audit = AuditLogger(store)
+    trace = Trace()
+    audit.open(trace)
+    tool = default_registry().get("log_delete_file")
+    assert tool is not None
+
+    result = prepare_call(
+        tool,
+        {"path": "/var/log/auth-api01/audit/incident-review.log.1"},
+        trace=trace,
+        audit=audit,
+    )
+
+    assert result.reason == "write_preflight_denied"
+    assert result.detail.startswith("[denied]")
+    error = next(event for event in trace.events if event.kind is EventKind.ERROR)
+    assert error.payload["reason"] == "write_preflight_denied"
+    assert "audit-log" in error.payload["detail"]
 
 
 def test_write_preflight_denies_recently_modified_files_before_allow_rules():

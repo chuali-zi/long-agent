@@ -90,11 +90,15 @@ class PipelineError:
 
     调用方拿到它就知道：审计 ERROR 已落、可以直接把 detail 包成通道自己的错误返回。
     """
-    reason: str   # "invalid_args" / "build_argv"
+    reason: str   # "invalid_args" / "write_preflight_denied" / "build_argv"
     detail: str   # 给用户/客户端的文字
 
 
 # ---- 各阶段 ----------------------------------------------------------------
+
+
+def _write_preflight_denied(exc: ToolError) -> bool:
+    return "preflight denied (" in str(exc)
 
 
 def prepare_call(
@@ -112,9 +116,12 @@ def prepare_call(
     try:
         cleaned = tool.validate(args)
     except ToolError as e:
+        reason = "write_preflight_denied" if _write_preflight_denied(e) else "invalid_args"
         audit.event(trace, EventKind.ERROR,
-                    {"reason": "invalid_args", "tool": tool.name, "detail": str(e)})
-        return PipelineError("invalid_args", f"工具参数非法：{e}")
+                    {"reason": reason, "tool": tool.name, "detail": str(e)})
+        if reason == "write_preflight_denied":
+            return PipelineError(reason, f"[denied] 写入预检拒绝：{e}")
+        return PipelineError(reason, f"工具参数非法：{e}")
 
     try:
         argv = tool.build_argv(cleaned)

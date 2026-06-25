@@ -17,6 +17,7 @@ import pytest
 
 from kyagent.mcp.tools import default_registry
 from kyagent.mcp.tools.base import ToolError
+from kyagent.executor.proxy import ExecutionResult
 from kyagent.mcp.tools.logs import LogSizeSampleTool
 
 
@@ -62,6 +63,34 @@ def test_lsof_port_range():
         tool.validate({"port": 70000})
     cleaned = tool.validate({"port": 80})
     assert cleaned["port"] == 80
+
+
+def test_lsof_port_no_match_is_successful_absence_evidence():
+    tool = default_registry().get("lsof_port")
+    result = tool.format_result(ExecutionResult(
+        argv=["lsof", "-nP", "-i", "TCP:18080"],
+        returncode=1,
+        stdout="",
+        stderr="",
+        truncated=False,
+        duration=0.01,
+    ))
+    assert result.ok is True
+    assert result.data["no_match"] is True
+
+
+def test_lsof_port_real_exit_one_error_stays_failure():
+    tool = default_registry().get("lsof_port")
+    result = tool.format_result(ExecutionResult(
+        argv=["lsof", "-nP", "-i", "TCP:18080"],
+        returncode=1,
+        stdout="",
+        stderr="permission denied",
+        truncated=False,
+        duration=0.01,
+    ))
+    assert result.ok is False
+    assert result.error == "permission denied"
 
 
 def test_process_list_sort_enum():

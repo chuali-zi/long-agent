@@ -9,7 +9,9 @@ COMMON = ROOT / "benchmarks" / "lib" / "common.sh"
 def test_run_suite_captures_expected_nonzero_bench_results() -> None:
     script = RUN_SUITE.read_text(encoding="utf-8")
 
-    assert 'if bash "$run_script" --ask 2>&1 | tee "$log_file"; then' in script
+    assert 'run_flag="--ask-behavior"' in script
+    assert '--outcome-only) OUTCOME_ONLY=1' in script
+    assert 'bash "$run_script" "$run_flag" 2>&1 | tee "$log_file"' in script
     assert "rc=$?" in script
     assert "set +e" not in script
 
@@ -31,4 +33,6 @@ def test_run_suite_captures_nonperfect_score_exit_without_aborting() -> None:
 def test_real_agent_uses_code_from_selected_install_prefix() -> None:
     script = COMMON.read_text(encoding="utf-8")
 
-    assert "export PYTHONPATH=$install_prefix_q" in script
+    assert 'export PYTHONPATH="$2"' in script
+    assert 'KYBENCH_ARTIFACT_DIR' in script
+    assert 'open($ask_json_q)' not in script
