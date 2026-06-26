@@ -65,6 +65,11 @@ class ExecutionProxy:
         self._shared_preexec = make_preexec_fn(self.cfg)
 
     @property
+    def current_user(self) -> str:
+        """当前落地执行所用的受限账户名（用于判断是否已是 root）。"""
+        return self._current_user
+
+    @property
     def supports_parallel_tool_execution(self) -> bool:
         """是否允许 Agent 在 ThreadPool 中并发调度本 executor 的 self.run()。
 

@@ -336,3 +336,64 @@ def file_cleanup_required_roots(user_text: str) -> list[str]:
     if not file_remediation_checklist_applies(scope):
         return []
     return list(scope.search_roots(round=1))
+
+
+def process_remediation_checklist_applies(scope: RemediationScope) -> bool:
+    """端口/进程终止类修复是否需要「收尾自检」门控。
+
+    端口冲突这类任务的判分点是「目标端口最终被释放」，而非「调用过一次 kill」。
+    Agent 容易在长 prompt 里漏做收尾、或杀掉上一轮的旧进程却没复核当前端口，
+    因此当请求包含 terminate 动作且涉及 port/process 资源时，开启收尾自检。
+    """
+    return bool(
+        "terminate" in scope.actions
+        and (scope.resource_types & {"port", "process"})
+    )
+
+
+# 端口提取：仅在「端口语境」里捕获形如 18080 的端口号，避免把 PID/版本号/大小误当端口。
+_PORT_CLAUSE_SPLIT_RE = re.compile(r"[。；;\n!！?？,，、]")
+_PORT_PROTECT_RE = re.compile(
+    r"不要动|别动|勿动|不许动|对照|保留|protected|keep|don't touch|do not touch",
+    re.IGNORECASE,
+)
+# 目标端口：仅在明确的端口语境里捕获（端口/port/listen/监听/绑定 邻接，或冒号前缀，
+# 或紧跟 被占/占用/冲突 等占用语），避免把 PID、版本号、文件大小误当端口。
+_PORT_MENTION_RE = re.compile(
+    r"(?::|端口\D{0,4}|port\D{0,4}|listen\D{0,4}|监听\D{0,4}|绑定\D{0,4}|bind\D{0,4})(\d{2,5})\b"
+    r"|\b(\d{2,5})\s*(?:被占|占用|占着|端口|冲突|起不来|没释放|未释放|listen|监听)",
+    re.IGNORECASE,
+)
+# 受保护端口：在「不要动 / 对照」等子句里，宽松捕获任意 4-5 位端口号即可（误判只会
+# 把一个端口从 target 里剔除，风险低；漏判才会害到受保护服务）。
+_BARE_PORT_RE = re.compile(r"\b(\d{4,5})\b")
+
+
+def _plausible_port(value: int) -> bool:
+    return 1 <= value <= 65535
+
+
+def parse_remediation_ports(text: str) -> tuple[set[int], set[int]]:
+    """从自然语言里解析「需要释放的目标端口」与「受保护端口」。
+
+    返回 (targets, protected)。targets 已剔除受保护端口。
+    例：「18080 被占……结束它；18081 上 orders-api 是对照环境，不要动」
+        → targets={18080}, protected={18081}
+    """
+    targets: set[int] = set()
+    protected: set[int] = set()
+    for clause in _PORT_CLAUSE_SPLIT_RE.split(text or ""):
+        if _PORT_PROTECT_RE.search(clause):
+            for m in _BARE_PORT_RE.finditer(clause):
+                value = int(m.group(1))
+                if _plausible_port(value):
+                    protected.add(value)
+            continue
+        for m in _PORT_MENTION_RE.finditer(clause):
+            raw = m.group(1) or m.group(2)
+            if raw is None:
+                continue
+            value = int(raw)
+            if _plausible_port(value):
+                targets.add(value)
+    return (targets - protected), protected

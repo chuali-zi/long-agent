@@ -28,7 +28,9 @@ from kyagent.agent.scope import (
     extract_absolute_paths,
     file_remediation_checklist_applies,
     normalize_abs_path,
+    parse_remediation_ports,
     path_is_within,
+    process_remediation_checklist_applies,
 )
 from kyagent.agent.completion import assess_file_cleanup_completion
 from kyagent.safety.write_preflight import categorize_cleanup_candidate
@@ -466,6 +468,89 @@ class _FileRemediationChecklist:
         return False
 
 
+_SS_PORT_RE = re.compile(r":(\d{2,5})\b")
+
+
+@dataclass
+class _ProcessRemediationChecklist:
+    """端口/进程终止类任务的「收尾自检」状态。
+
+    判分点是「目标端口最终被释放」，而非「调用过一次 kill」。本 checklist 在 Agent
+    要给最终回答前，要求对每个目标端口做一次 *kill 之后* 的只读复核（lsof_port 报无
+    占用，或 net_listen 不再有该端口的 LISTEN），否则拦回继续。这样可挡住两类失败：
+      1) 长 prompt 里漏做端口收尾；
+      2) 杀掉了上一轮残留进程，却没复核当前这轮端口是否仍被占。
+    """
+
+    target_ports: set[int] = field(default_factory=set)
+    protected_ports: set[int] = field(default_factory=set)
+    kill_issued: bool = False
+    # 端口状态：released（已确认释放）/ bound（仍被占）/ needs_reverify（kill 后待复核）
+    port_state: dict[int, str] = field(default_factory=dict)
+    observation_count: int = 0
+
+    @classmethod
+    def from_user_text(cls, text: str) -> "_ProcessRemediationChecklist":
+        targets, protected = parse_remediation_ports(text)
+        return cls(target_ports=set(targets), protected_ports=set(protected))
+
+    def record_kill(self) -> None:
+        self.kill_issued = True
+        # 任一次 kill 之后，所有目标端口都必须重新确认是否真的释放。
+        for port in self.target_ports:
+            self.port_state[port] = "needs_reverify"
+
+    def record_read_result(
+        self, tool_name: str, args: dict, content: str, data: dict | None
+    ) -> None:
+        data = data or {}
+        if tool_name == "lsof_port":
+            port = _coerce_port(args.get("port"))
+            if port is None or port not in self.target_ports:
+                return
+            self.observation_count += 1
+            if data.get("no_match") or "No process is using" in (content or ""):
+                self.port_state[port] = "released"
+            else:
+                self.port_state[port] = "bound"
+        elif tool_name == "net_listen":
+            # net_listen 只用于确认「仍在监听」（presence ⇒ bound）；不据其「不在列表」
+            # 判定释放，避免被 6KB 截断或权限盲区误清。
+            listening = {int(m) for m in _SS_PORT_RE.findall(content or "")}
+            for port in self.target_ports:
+                if port in listening:
+                    self.observation_count += 1
+                    self.port_state[port] = "bound"
+
+    def progress(self) -> int:
+        return self.observation_count
+
+    def final_error(self) -> str:
+        if not self.target_ports:
+            return ""
+        unresolved = sorted(
+            port for port in self.target_ports
+            if self.port_state.get(port) != "released"
+        )
+        if not unresolved:
+            return ""
+        ports = ", ".join(str(p) for p in unresolved)
+        return (
+            "port remediation checklist blocked final response: target port(s) "
+            f"{ports} not yet confirmed released. After terminating the current owner, "
+            "re-check each port with lsof_port (cross-check net_listen); only conclude "
+            "release when lsof_port reports no process is using the port."
+        )
+
+
+def _coerce_port(value) -> int | None:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 def _extract_ls_children(path_arg: str, content: str) -> set[str]:
     children: set[str] = set()
     for line in (content or "").splitlines():
@@ -535,6 +620,7 @@ class Agent:
         self.auto_approve_safe_remediation = auto_approve_safe_remediation
         self.messages: list[dict] = []
         self._file_remediation_checklist: _FileRemediationChecklist | None = None
+        self._process_remediation_checklist: _ProcessRemediationChecklist | None = None
         self._tools_for_llm = self._build_tools_for_llm()
         self.system_prompt = SYSTEM_PROMPT
         if auto_approve_safe_remediation:
@@ -656,6 +742,9 @@ class Agent:
         # 阈值即放行（带未复核告警），避免空转到 max_iterations。
         checklist_block_count = 0
         last_checklist_progress = 0
+        # 同型守卫：端口/进程终止 checklist 反复拦截最终回答时的进度守卫。
+        proc_checklist_block_count = 0
+        last_proc_progress = 0
 
         # ===== 赛题第 3 条：NL 意图层 + 抗 Prompt Injection =====
         # 这是 LLM 看到 user_input 之前的"一次过滤"。argv 层 Guardrail 是 LLM 输出
@@ -748,6 +837,21 @@ class Agent:
                 )
         else:
             self._file_remediation_checklist = None
+
+        # 端口/进程终止收尾自检：当用户点名了要释放的端口、且意图是终止类时启用。
+        # 以解析到的目标端口为主信号（关键词分类对「被占/占」覆盖不全），辅以 scope 谓词。
+        proc_target_ports, _proc_protected = parse_remediation_ports(effective_input)
+        process_checklist_applies = bool(proc_target_ports) and (
+            "terminate" in current_scope.actions
+            or process_remediation_checklist_applies(current_scope)
+        )
+        if process_checklist_applies:
+            self._process_remediation_checklist = (
+                _ProcessRemediationChecklist.from_user_text(effective_input)
+            )
+        else:
+            self._process_remediation_checklist = None
+
         self.messages.append({"role": "user", "content": effective_input})
         turn_system_prompt = self.system_prompt
         if checklist_applies:
@@ -768,6 +872,16 @@ class Agent:
         ):
             turn_system_prompt += (
                 "\n\n## 当前范围模型\n" + remediation_scope.summary()
+            )
+        if self._process_remediation_checklist is not None and proc_target_ports:
+            ports = ", ".join(str(p) for p in sorted(proc_target_ports))
+            turn_system_prompt += (
+                "\n\n## 端口收尾自检\n"
+                f"本次需要释放的目标端口：{ports}。\n"
+                "1. 普通用户的 lsof 返回空、ss 看不到进程名，都不代表端口空闲——"
+                "root 起的监听进程对非特权感知是隐形的；用 lsof_port/net_listen/process_list 交叉确认占用者。\n"
+                "2. 终止占用者后，必须再次用 lsof_port 复核该端口已无人占用，"
+                "确认释放前不要下「已解决」的最终结论。"
             )
 
         tools_for_llm = self._tools_for_llm
@@ -1057,6 +1171,72 @@ class Agent:
                     final = (
                         final
                         + "\n\n> 注意：部分清理结果未能自动复核（系统已尽力重扫验证），请人工确认。"
+                    ).strip()
+
+                # 端口/进程终止收尾自检：目标端口未确认释放前，拦回最终回答要求复核。
+                # 同型进度守卫，防止无法释放（如端口本就空不掉）时空转到 max_iterations。
+                proc_error = ""
+                if self._process_remediation_checklist is not None:
+                    proc_error = self._process_remediation_checklist.final_error()
+                if proc_error:
+                    proc_progress_now = (
+                        self._process_remediation_checklist.progress()
+                        if self._process_remediation_checklist is not None
+                        else 0
+                    )
+                    if proc_progress_now > last_proc_progress:
+                        proc_checklist_block_count = 0
+                        last_proc_progress = proc_progress_now
+                    else:
+                        proc_checklist_block_count += 1
+
+                    if proc_checklist_block_count < self.cfg.agent.max_repeated_tool_failures:
+                        notes.append("port remediation checklist blocked final response")
+                        payload = {
+                            "event": "port_remediation_checklist_required",
+                            "reason": "final_without_port_release_verify",
+                            "detail": proc_error,
+                            "plan_id": plan.plan_id if plan else None,
+                        }
+                        self.audit.event(trace, EventKind.PLAN_UPDATE, payload)
+                        self._emit(ProgressEvent(
+                            kind="plan_required",
+                            text=proc_error,
+                            meta=payload,
+                        ))
+                        if plan is not None:
+                            plan = self._set_plan_step(
+                                trace, plan, "verify", "running",
+                                "Port termination requires read-only post-verify",
+                                event_kind="plan_step_update",
+                            )
+                        self.messages.append({
+                            "role": "user",
+                            "content": "System feedback: " + proc_error,
+                        })
+                        continue
+
+                    # 守卫触发：连续拦截且无新增复核，放行但附未复核告警。
+                    notes.append(
+                        "port remediation checklist could not confirm port release; "
+                        "returned answer with caveat"
+                    )
+                    guard_payload = {
+                        "event": "port_remediation_unverified",
+                        "reason": "port_remediation_unverified",
+                        "detail": proc_error,
+                        "block_count": proc_checklist_block_count,
+                        "plan_id": plan.plan_id if plan else None,
+                    }
+                    self.audit.event(trace, EventKind.ERROR, guard_payload)
+                    self._emit(ProgressEvent(
+                        kind="error",
+                        text="目标端口是否释放未能自动复核，已带告警返回",
+                        meta=guard_payload,
+                    ))
+                    final = (
+                        final
+                        + "\n\n> 注意：目标端口是否已释放未能自动复核，请人工确认。"
                     ).strip()
 
                 self.messages.append({"role": "assistant",
@@ -1994,6 +2174,13 @@ class Agent:
             elif tool.read_only:
                 self._file_remediation_checklist.record_read_result(
                     tu.name, prep.cleaned, content if formatted.ok else ""
+                )
+        if self._process_remediation_checklist is not None:
+            if tu.name == "process_kill" and formatted.ok:
+                self._process_remediation_checklist.record_kill()
+            elif tool.read_only and formatted.ok:
+                self._process_remediation_checklist.record_read_result(
+                    tu.name, prep.cleaned, content, formatted.data
                 )
         return ToolResultBlock(tool_use_id=tu.id, is_error=not formatted.ok, content=content)
 

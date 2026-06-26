@@ -21,6 +21,8 @@
 
 # ---- 只读 root 查询：网络 / 日志 / 安全 --------------------------------
 Cmnd_Alias KY_ROOT_OBSERVE = \
+    /usr/sbin/ss -tlnp, /usr/sbin/ss -ulnp, /usr/sbin/ss -tulnp, \
+    /usr/bin/ss -tlnp, /usr/bin/ss -ulnp, /usr/bin/ss -tulnp, \
     /usr/sbin/iptables -L -n -v --line-numbers, \
     /usr/sbin/nft list ruleset, \
     /usr/sbin/aureport --summary, /sbin/aureport --summary, \
@@ -36,6 +38,7 @@ Cmnd_Alias KY_ROOT_OBSERVE = \
 # 参数正则必须同时以 ^ 开头、以 $ 结尾；否则 sudo 会退回跨空白 glob 语义。
 Cmnd_Alias KY_ROOT_REGEX_OBSERVE = \
     /usr/bin/lsof ^-nP \+L1( -p [1-9][0-9]*)?$, \
+    /usr/bin/lsof ^-nP -i (TCP|UDP):[1-9][0-9]{0,4}$, \
     /usr/bin/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$, \
     /usr/bin/smartctl ^-H -A -- /dev/nvme[0-9]+n[0-9]+(p[0-9]+)?$, \
     /usr/sbin/smartctl ^-H -A -- /dev/sd[a-z][0-9]*$, \

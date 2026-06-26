@@ -50,7 +50,12 @@ class PsListTool(Tool):
 
 class LsofPortTool(Tool):
     name = "lsof_port"
-    description = "查看占用某 TCP/UDP 端口的进程（lsof -i :PORT 包装）。"
+    description = (
+        "查看占用某 TCP/UDP 端口的进程（lsof -i :PORT 包装）。"
+        "注意：以普通用户运行时，看不到 root 起的监听进程——此时本工具会自动用 root "
+        "重跑一次确认。若仍返回「无进程占用」才可判定端口空闲；不要据单次普通用户的空结果"
+        "断定端口空闲或「孤悬 socket」，应结合 net_listen / process_list 交叉验证。"
+    )
     input_schema = {
         "type": "object",
         "required": ["port"],
@@ -66,16 +71,26 @@ class LsofPortTool(Tool):
         port = args["port"]
         return ["lsof", "-nP", "-i", f"{proto.upper()}:{port}"]
 
-    def format_result(self, exec_result):  # type: ignore[override]
-        # lsof uses exit 1 for a valid query with no matches.  For a perception
-        # tool that is positive evidence that the port is free, not an error.
-        if (
+    @staticmethod
+    def _is_blinded_empty(exec_result) -> bool:
+        # lsof 对「查询合法但无匹配」用 exit 1 + 空输出。这与「以普通用户查 root
+        # 起的监听进程被内核挡住」在退出码/输出上不可区分，因此这是「可能被权限蒙蔽」
+        # 的歧义信号，值得用 root 重跑一次再下结论。
+        return bool(
             exec_result.returncode == 1
             and not exec_result.stdout.strip()
             and not exec_result.stderr.strip()
             and not exec_result.timed_out
             and not exec_result.skipped_reason
-        ):
+        )
+
+    def wants_privileged_retry(self, exec_result) -> bool:  # type: ignore[override]
+        return self._is_blinded_empty(exec_result)
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        # 到这里若仍是 exit 1 + 空，表示连 root 重跑也无匹配（或本就以 root 运行），
+        # 此时「端口空闲」是可信结论，而非被权限蒙蔽的假象。
+        if self._is_blinded_empty(exec_result):
             data = exec_result.to_dict()
             data["no_match"] = True
             return ToolResult(

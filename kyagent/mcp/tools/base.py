@@ -215,6 +215,19 @@ class Tool(abc.ABC):
     def build_argv(self, args: dict[str, Any]) -> list[str]:
         """根据已校验过的 args 构造最终 argv。"""
 
+    def wants_privileged_retry(self, exec_result: ExecutionResult) -> bool:
+        """非提权运行后，结果是否「被权限蒙蔽」、值得用 root 再跑一次。
+
+        默认 False。感知工具（lsof_port / net_listen）在面对 root 起的监听进程时，
+        以普通用户跑会得到「空 / 无进程名」的歧义结果，容易被误读成「端口空闲 /
+        孤悬 socket」。这些工具覆盖本方法，仅在那种歧义场景返回 True，让流水线
+        以 ``requires_root=True`` 单次重跑同一 argv（最小权限：正常结果不提权）。
+
+        约束：仅在工具本身 ``requires_root=False`` 且当前非 root 时才会被流水线询问，
+        重跑后不再二次询问，因此不会递归。
+        """
+        return False
+
     def format_result(self, exec_result: ExecutionResult) -> ToolResult:
         """默认格式化：成功取 stdout，失败带 stderr。子类可定制结构化输出。"""
         # windows_mock 是开发态占位，仍按成功返回，让上层 LLM 看到提示性输出

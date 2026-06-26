@@ -3,13 +3,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from kyagent.mcp.tools.base import Tool, ToolRegistry
+from kyagent.mcp.tools.base import Tool, ToolRegistry, ToolResult
 from kyagent.safety.patterns import RiskLevel
+
+
+def _has_blinded_listen(stdout: str) -> bool:
+    """是否存在「在监听但看不到进程归属」的行。
+
+    以普通用户跑 ``ss -tlnp`` 时，别的用户（尤其 root）的监听 socket 会显示 LISTEN
+    但 Process 列为空（无 ``users:((...))``）。这正是端口冲突排查里最容易误判的盲区：
+    端口明明有人听，却看不出是谁。
+    """
+    for line in (stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        upper = stripped.upper()
+        if upper.startswith("STATE") or upper.startswith("NETID"):
+            continue  # header
+        if ("LISTEN" in upper or "UNCONN" in upper) and "users:(" not in stripped:
+            return True
+    return False
 
 
 class SsListenTool(Tool):
     name = "net_listen"
-    description = "列出所有监听端口（ss -tlnp，回退 netstat -tlnp）。"
+    description = (
+        "列出所有监听端口（ss -tlnp，回退 netstat -tlnp）。"
+        "注意：普通用户看不到别的用户（尤其 root）监听 socket 的进程名/PID（Process 列为空）。"
+        "本工具会在检测到此类「有监听但无归属」的行时自动用 root 重跑补全归属；"
+        "若结果仍标注 owner_hidden，请用 lsof_port / process_list 进一步确认，"
+        "不要把「看不见进程」当成「孤悬 socket / 无人占用」。"
+    )
     input_schema = {
         "type": "object",
         "properties": {
@@ -26,6 +51,25 @@ class SsListenTool(Tool):
         proto = args.get("proto", "tcp")
         flag = {"tcp": "-tlnp", "udp": "-ulnp", "all": "-tulnp"}[proto]
         return ["ss", flag]
+
+    def wants_privileged_retry(self, exec_result) -> bool:  # type: ignore[override]
+        if exec_result.returncode != 0 or exec_result.timed_out or exec_result.skipped_reason:
+            return False
+        return _has_blinded_listen(exec_result.stdout)
+
+    def format_result(self, exec_result):  # type: ignore[override]
+        out = super().format_result(exec_result)
+        # 到这里若仍存在「有监听但无进程归属」的行，说明连 root 重跑也未补全
+        # （多半 sudoers 未放行 ss），明确标注以免模型误判为「无人占用 / 孤悬 socket」。
+        if out.ok and _has_blinded_listen(out.content):
+            out.data = dict(out.data)
+            out.data["owner_hidden"] = True
+            out.content = (
+                out.content.rstrip("\n")
+                + "\n# 注意：上表存在「有监听但无进程归属」的行，当前权限无法解析其属主"
+                "（可能是 root 进程）。请用 lsof_port / process_list 进一步确认，勿判为无人占用。"
+            )
+        return out
 
 
 class SsConnTool(Tool):

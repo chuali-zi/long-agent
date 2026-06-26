@@ -1,5 +1,16 @@
 # 工作日志
 
+## 2026-06-25 23:30:00 +08:00
+
+- 按用户要求使用临时 DeepSeek key 与 sudo 密码，对仓库可见全部测试与全部脚本做“能跑”验证。
+- 全量 pytest：因历史 root 残留 `pytest_tmp_run` 目录导致首次 84 处 `FileExistsError`；清理后重跑 `python -m pytest -q --basetemp /tmp/opencode/pytest_run -p no:cacheprovider tests/`，结果 `904 passed, 3 skipped, 0 failed`。3 skipped 为预期（Windows 分支、需 `KYAGENT_RUN_REAL_LLM_TODO_REPRO=1` 的真实 LLM 复测、需 root 的 `/var/log` 写权限用例）。单独重跑 `tests/test_web_frontend_playwright.py`：`6 passed`。
+- `scripts/` 入口（11 个）+ 7 个 `kyagent-*` wrapper：`kyagent.sh --help`/`tools list`/`test`/`install`/`web --mock`/`web-backend --mock`/`web-open`、`install.sh --dev`、`full-test.sh --skip-benchmarks`、`demo.sh`（mock 完整 10 步）、`start-web.sh --mock --no-open-browser`、`start-web-backend.sh --mock`、`open-web.sh`、`write-prod-env.sh`（真实写入 `/etc/kyagent/env`）、`setup-sudoers.sh`（真实最小权限部署 + visudo OK）、`setup-sudoers-prod.sh --yes`（真实部署）、`setup-sudoers-max-test.sh --yes`（真实部署）、`install-loongarch.sh --dry-run --yes --with-web`（完整 dry-run 0 错误）、`developer-quick-test.sh --help`。7 个 wrapper 均通过无参/安全参数调用验证。发现 `setup-sudoers-max-test.sh --help` 未实现，会报“未知参数”。
+- `benchmarks/`：顶层 `run-suite.sh`、`run-real-llm.sh`、`setup-all.sh`、`verify-all.sh`、`teardown-all.sh` 均通过 `--help` 与真实执行验证。9 个 bench 各自的 `setup.sh`/`verify.sh`/`probe.sh`/`teardown.sh`/`run.sh` 均真实跑通：`setup-all.sh` + 逐个 `probe.sh` + `verify-all.sh --pre`（需 sudo 写 score.json）全部 `SETUP_OK`；各 `run.sh`（不加 `--ask`，避免消耗 LLM）setup/pre/probe 通过；最后 `teardown-all.sh` 清理全部场景。
+- 真实 LLM 端到端：以 `kyagent` 用户、加载 `/etc/kyagent/env`，执行 `/opt/kyagent/.venv/bin/kyagent ask "which process used the most cpu"`，DeepSeek 返回正确结果，`exit=0`。确认生产链路（DeepSeek httpx + sudoers + 审计目录）可用。
+- Web：mock 后端在 `127.0.0.1:8765/8766/8767` 健康检查均 OK；`start-web.sh`/`start-web-backend.sh`/`open-web.sh` 均能启动/探测。
+- 环境注意：历史 root 残留 `pytest_tmp_run` 会让 `full-test.sh`/`kyagent.sh test` 出现 `FileExistsError`，需 `sudo rm -rf pytest_tmp_run*` 后重跑；`verify-all.sh --pre` 需与 `setup-all.sh` 同用户（sudo）才能覆盖 root 创建的 `score.json`；cron-injection 场景若 `/tmp/secops-cron` 残留无 state 会拒绝覆盖，需先手动清理。
+- 收尾：已执行 `benchmarks/teardown-all.sh` 清理全部 9 个场景，并恢复最小权限 `setup-sudoers.sh`，删除 root 残留的 benchmark `score.json`/`bench-state.json`。
+
 ## 2026-06-21 07:30:00 +08:00
 
 - 按用户要求对仓库全部脚本做"正常使用"验证，覆盖 `scripts/`、`benchmarks/` 顶层与 9 个 bench 子目录的每一 个脚本，不只是已跑过的入口。

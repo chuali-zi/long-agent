@@ -194,6 +194,29 @@ def execute_and_format(
             prepared.argv,
             requires_root=prepared.tool.requires_root,
         )
+
+    # 权限蒙蔽时的单次提权重跑：感知工具以普通用户跑 root 起的端口监听，会得到
+    # 「空 / 无进程名」歧义结果。仅当工具本身不要求 root、当前非 root、且工具判定
+    # 结果被蒙蔽时，用 sudoers 白名单的 root 路径重跑一次同一 argv，避免把「看不见」
+    # 误当成「端口空闲 / 孤悬 socket」。重跑结果不再二次询问，不会递归。
+    if (
+        bench_result is None
+        and not prepared.tool.requires_root
+        and getattr(executor, "current_user", "") != "root"
+        and prepared.tool.wants_privileged_retry(exec_result)
+    ):
+        audit.event(trace, EventKind.EXECUTION, {
+            "argv": prepared.argv,
+            "requires_root": True,
+            "privileged_retry": True,
+        })
+        retry_result = executor.run(prepared.argv, requires_root=True)
+        retry_result.extra["privileged_retry"] = True
+        # 仅当提权确实拿到额外可见性（成功且有输出，即看到了 root 起的监听进程）
+        # 才采纳重跑结果。提权失败（sudoers 未放行）或同样为空（端口确实空闲）时，
+        # 保留原非提权结果——避免在未安装 sudoers 的开发机上把「空闲端口」误报成错误。
+        if retry_result.returncode == 0 and retry_result.stdout.strip():
+            exec_result = retry_result
     exec_result.extra["tool_args"] = prepared.cleaned
     execution_result = audit.event(trace, EventKind.EXECUTION_RESULT, exec_result.to_dict())
 
