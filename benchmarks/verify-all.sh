@@ -24,14 +24,17 @@ die() { printf '[kybench:verify-all][ERROR] %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: bash benchmarks/verify-all.sh [options] [bench ...]
+Usage: sudo bash benchmarks/verify-all.sh [options] [bench ...]
 
 Verify all selected benchmark scenes. Use --pre immediately after setup-all, and
 use the default --post after Web/Agent remediation.
 
+Must run as root (same as setup-all.sh) so score.json and fixture paths are
+readable/writable. See benchmarks/WEB_MANUAL_TEST.md for the full Web workflow.
+
 Options:
-  --pre           Run verify.sh pre.
-  --post          Run verify.sh post (default).
+  --pre           Run verify.sh pre (expect SETUP_OK on each bench).
+  --post          Run verify.sh post (default; expect PERFECT to pass).
   --log-dir DIR   Store logs and summary under DIR.
   -h, --help      Show help.
 
@@ -53,6 +56,10 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ ${#selected[@]} -gt 0 ]]; then
   BENCHES=("${selected[@]}")
+fi
+
+if [[ $EUID -ne 0 ]]; then
+  die "must run as root: sudo bash benchmarks/verify-all.sh"
 fi
 
 mkdir -p "$LOG_DIR"
@@ -137,6 +144,25 @@ print(data.get(sys.argv[2], "?"))
 PY
 }
 
+score_mode_mismatch() {
+  local score="$1"
+  local expected_mode="$2"
+  local py
+  py="$(command -v python3 || command -v python || true)"
+  [[ -n "$py" && -f "$score" ]] || return 1
+  "$py" - "$score" "$expected_mode" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if data.get("mode") != sys.argv[2] else 1)
+PY
+}
+
+log_has_permission_error() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 1
+  grep -q 'PermissionError' "$log_file" 2>/dev/null
+}
+
 failures=0
 for bench in "${BENCHES[@]}"; do
   bench_dir="$ROOT/$bench"
@@ -161,4 +187,58 @@ done
 
 log "summary: $summary"
 cat "$summary"
+
+pass_label="PERFECT"
+if [[ "$MODE" == "pre" ]]; then
+  pass_label="SETUP_OK"
+fi
+
+printf '\n=== kybench verify %s summary ===\n' "$MODE"
+
+passed=0
+not_passed=0
+declare -a passed_lines=()
+declare -a failed_lines=()
+
+while IFS=$'\t' read -r bench _mode verdict exit_code log_file score_path; do
+  [[ "$bench" == "bench" ]] && continue
+  if [[ "$verdict" == "$pass_label" ]]; then
+    passed=$((passed + 1))
+    passed_lines+=("  $bench	$verdict")
+  else
+    not_passed=$((not_passed + 1))
+    hint=""
+    if score_mode_mismatch "$score_path" "$MODE" || log_has_permission_error "$log_file"; then
+      hint=$'\n         hint: score.json may be stale — run with sudo (same user as setup-all)'
+    fi
+    failed_lines+=("  $bench	$verdict	exit=$exit_code"$'\n'"         log: $log_file$hint")
+  fi
+done < "$summary"
+
+total=$((passed + not_passed))
+if [[ "$passed" -gt 0 ]]; then
+  printf 'PASSED (%s/%s):\n' "$passed" "$total"
+  for line in "${passed_lines[@]}"; do
+    bench_name="${line%%	*}"
+    bench_name="${bench_name#  }"
+    verdict_name="${line##*	}"
+    printf '  %-24s %s\n' "$bench_name" "$verdict_name"
+  done
+fi
+if [[ "$not_passed" -gt 0 ]]; then
+  printf 'NOT PASSED (%s/%s):\n' "$not_passed" "$total"
+  for entry in "${failed_lines[@]}"; do
+    printf '%s\n' "$entry"
+  done
+fi
+
+printf '\nPASSED:   %s/%s\n' "$passed" "$total"
+printf 'NOT PASSED: %s/%s\n' "$not_passed" "$total"
+if [[ "$failures" -eq 0 ]]; then
+  printf 'Overall: ALL PASSED (%s) — READY\n' "$pass_label"
+else
+  printf 'Overall: %s/%s passed — NOT READY (only %s counts as pass)\n' "$passed" "$total" "$pass_label"
+fi
+printf 'Summary TSV: %s\n' "$summary"
+
 exit "$failures"

@@ -3,6 +3,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_SUITE = ROOT / "benchmarks" / "run-suite.sh"
+VERIFY_ALL = ROOT / "benchmarks" / "verify-all.sh"
+WEB_MANUAL = ROOT / "benchmarks" / "WEB_MANUAL_TEST.md"
 COMMON = ROOT / "benchmarks" / "lib" / "common.sh"
 
 
@@ -36,3 +38,26 @@ def test_real_agent_uses_code_from_selected_install_prefix() -> None:
     assert 'export PYTHONPATH="$2"' in script
     assert 'KYBENCH_ARTIFACT_DIR' in script
     assert 'open($ask_json_q)' not in script
+
+
+def test_verify_all_requires_root_and_prints_summary() -> None:
+    script = VERIFY_ALL.read_text(encoding="utf-8")
+
+    assert "sudo bash benchmarks/verify-all.sh" in script
+    assert '[[ $EUID -ne 0 ]]' in script
+    assert "must run as root" in script
+    assert "WEB_MANUAL_TEST.md" in script
+    assert "=== kybench verify" in script
+    assert "PASSED (" in script
+    assert "NOT PASSED (" in script
+    assert "score_mode_mismatch" in script
+
+
+def test_web_manual_test_doc_exists_and_covers_workflow() -> None:
+    text = WEB_MANUAL.read_text(encoding="utf-8")
+
+    assert "sudo bash benchmarks/setup-all.sh" in text
+    assert "sudo bash benchmarks/verify-all.sh --pre" in text
+    assert "sudo bash benchmarks/verify-all.sh --post" in text
+    assert "PERFECT" in text
+    assert "SETUP_OK" in text

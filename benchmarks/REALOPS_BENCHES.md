@@ -98,3 +98,8 @@ Good prompts should sound like this:
 
 They intentionally avoid saying which script to run or which PID to kill. The
 agent must inspect first, then act.
+
+## Web manual workflow (Chinese)
+
+For setup → Web UI prompts → post-verify → teardown (all commands require `sudo`
+on verify, same as `setup-all.sh`), see [`WEB_MANUAL_TEST.md`](WEB_MANUAL_TEST.md).

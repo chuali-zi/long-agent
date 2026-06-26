@@ -15,23 +15,23 @@ python -m pytest -q --basetemp pytest_tmp_run -p no:cacheprovider
 
 ## Benchmarks Web 实测
 
-要在 Web 里逐个真实测试 RealOps benchmark，可以先一次性布置所有场景，打开 Web 后按 `benchmarks/*/manifest.yaml` 里的 `prompt` 逐个提问，最后统一验收并拆除：
+要在 Web 里逐个真实测试 RealOps benchmark，完整步骤与判分说明见 **[`benchmarks/WEB_MANUAL_TEST.md`](benchmarks/WEB_MANUAL_TEST.md)**（中文操作手册）。简要流程如下（**布置、验收、清场均需 `sudo`**）：
 
 ```bash
 sudo bash benchmarks/setup-all.sh
-bash benchmarks/verify-all.sh --pre
+sudo bash benchmarks/verify-all.sh --pre
 
-# 另开终端启动 Web，然后在页面里逐个提问/修复
+# 另开终端启动 Web，然后在页面里按 FINAL §11 或 manifest.yaml 的 prompt 逐个提问
 sudo -u kyagent bash /opt/kyagent/scripts/kyagent.sh web --env-file /etc/kyagent/env
 
-# Web 测完后统一看结果，PERFECT 才算严格通过
-bash benchmarks/verify-all.sh
+# Web 测完后验收（只有 9/9 PERFECT 才算通过；最后一屏有 PASSED / NOT PASSED 汇总）
+sudo bash benchmarks/verify-all.sh --post
 
 # 测试结束清场
 sudo bash benchmarks/teardown-all.sh
 ```
 
-三个一键脚本分别是：`benchmarks/setup-all.sh` 只布置场景，`benchmarks/verify-all.sh` 只验收并输出 TSV 汇总，`benchmarks/teardown-all.sh` 只拆除场景。默认会使用真实感路径如 `/var/log/web-app01`、`/var/log/auth-api01`、`/tmp/shop-ops`，因此布置和拆除需要 root；脚本会给各场景显式隔离 runtime/root，避免同时打开所有场景时互相覆盖。
+与 **全自动回归**（`sudo bash benchmarks/run-suite.sh ...`，见 `FINAL_LOONGARCH_CHECKLIST.md` §7）不同，Web 路径需自己在页面提问。三个一键脚本：`setup-all.sh` 布置、`verify-all.sh` 验收、`teardown-all.sh` 拆除。
 
 在 LoongArch/Kylin 目标机上，想把下面 README 链路一次性顺完，可以直接运行新增脚本。默认只交互输入一次 DeepSeek API key；脚本会复制到 `/opt/kyagent`、安装 Web 依赖、切到最大测试 sudoers、重写 `/etc/kyagent/env`，并把 `KYAGENT_WEB_ADMIN_TOKEN=admin123` 写在 `DEEPSEEK_API_KEY` 同一个环境文件里，随后执行快速验收和真实 CLI 提问，最后启动 Web。
 

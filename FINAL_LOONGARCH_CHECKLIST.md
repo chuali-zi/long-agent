@@ -165,7 +165,9 @@ bash scripts/kyagent.sh test
 - 任何 failed/error。
 - Python 版本导致收集失败。
 
-## 7. RealOps 9 Bench
+## 7. RealOps 9 Bench（自动 LLM 回归）
+
+本节为 **全自动** 路径：`run-suite.sh` 会自行 ask Agent 并 post-verify。与 **§11 Web 手工实测**（`setup-all` + 页面提问 + `verify-all`）不同，不要混用命令。
 
 执行：
 
@@ -252,16 +254,18 @@ sudo -l -U kyagent
 - 文档写“性能达标”，但 `overall_pass=false`。
 - 交付包含密钥或运行态数据。
 
-## 11. Benchmarks 待测 Prompt
+## 11. Benchmarks 待测 Prompt（Web 手工实测）
 
-Web 实测时先执行：
+操作步骤、判分说明与常见坑见 **[`benchmarks/WEB_MANUAL_TEST.md`](benchmarks/WEB_MANUAL_TEST.md)**。本节仅放可复制 prompt；与 `benchmarks/*/manifest.yaml` 及 `run-suite.sh` / `verify-all.sh` 使用同一份工单文本。
+
+Web 实测时先执行（**verify 必须与 setup 一样使用 sudo**）：
 
 ```bash
 sudo bash benchmarks/setup-all.sh
-bash benchmarks/verify-all.sh --pre
+sudo bash benchmarks/verify-all.sh --pre
 ```
 
-然后在 Web 页面逐条输入以下 prompt（**与 `benchmarks/*/manifest.yaml` 及 `run-suite.sh` / `verify-all.sh` 使用同一份工单文本**；录制比赛视频时直接复制中文块即可）。每条完成后可先不拆场景，全部测完再统一执行 `bash benchmarks/verify-all.sh` 看是否全为 `PERFECT`，最后执行 `sudo bash benchmarks/teardown-all.sh` 清场。
+然后在 Web 页面逐条输入以下 prompt（录制比赛视频时直接复制中文块即可）。每条完成后可先不拆场景，全部测完再统一执行 `sudo bash benchmarks/verify-all.sh --post`（最后一屏会列出 PASSED / NOT PASSED，只有 9/9 `PERFECT` 才算通过），最后执行 `sudo bash benchmarks/teardown-all.sh` 清场。
 
 ### cleanup-v2
 
@@ -391,7 +395,7 @@ security found a suspicious cron on app01: /etc/cron.d/sys-stat-sync. Script com
 
 ## 12. 综合联调 Prompt（Final Test 一次性粘贴）
 
-场景已全部 `setup-all` 且 `verify-all.sh --pre` 为 `SETUP_OK` 后，可在 Web 页面**一次性粘贴**下面整段中文工单（与上文 §11 九条分场景 prompt 内容一致，合并为一条长消息，便于录制最终实机验收视频或做联调冒烟）。测完后执行 `bash benchmarks/verify-all.sh` 看 9 场景是否均为 `PERFECT`，再 `sudo bash benchmarks/teardown-all.sh` 清场。
+场景已全部 `setup-all` 且 `sudo bash benchmarks/verify-all.sh --pre` 为 9/9 `SETUP_OK` 后，可在 Web 页面**一次性粘贴**下面整段中文工单（与上文 §11 九条分场景 prompt 内容一致，合并为一条长消息，便于录制最终实机验收视频或做联调冒烟）。测完后执行 `sudo bash benchmarks/verify-all.sh --post` 看 9 场景是否均为 `PERFECT`，再 `sudo bash benchmarks/teardown-all.sh` 清场。详见 [`benchmarks/WEB_MANUAL_TEST.md`](benchmarks/WEB_MANUAL_TEST.md)。
 
 **中文（复制到 Web UI，整段一次发送）**
 

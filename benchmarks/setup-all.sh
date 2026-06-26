@@ -28,7 +28,8 @@ Usage: sudo bash benchmarks/setup-all.sh [options] [bench ...]
 
 Set up benchmark scenes without running kyagent ask. This is intended for Web
 manual testing: run this once, ask the Web Agent to fix each ticket, then run
-benchmarks/verify-all.sh.
+  sudo bash benchmarks/verify-all.sh --post
+See benchmarks/WEB_MANUAL_TEST.md for the full workflow.
 
 Options:
   --no-pre-verify   Skip verify.sh pre after each setup.
