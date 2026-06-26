@@ -76,6 +76,26 @@ def test_repeated_tool_failure_downgrades_to_fail() -> None:
     assert res["metrics"]["behavior_repeated_tool_failure"] == 1
 
 
+def test_file_remediation_unverified_downgrades_to_fail() -> None:
+    events = [
+        {
+            "kind": "error",
+            "payload": {
+                "reason": "file_remediation_unverified",
+                "detail": "cleanup could not be verified",
+            },
+        }
+    ]
+    res = behavior_health.augment(_score("PERFECT"), _ask(), events)
+
+    assert res["verdict"].startswith("FAIL")
+    assert res["signals"]["file_remediation_unverified"] == 1
+    assert res["metrics"]["behavior_file_remediation_unverified"] == 1
+    assert not next(
+        c for c in res["checks"] if c["name"] == "no_unverified_file_cleanup"
+    )["pass"]
+
+
 def test_already_failed_verdict_not_double_counted() -> None:
     events = [{"kind": "error", "payload": {"reason": "max_iterations"}}]
     res = behavior_health.augment(_score("FAIL (outcome)", hard=1), _ask(), events)

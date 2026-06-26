@@ -10,6 +10,7 @@ agent shows a tool-execution pathology, so such bugs surface in the result.
 Pathologies (bench-agnostic, read from the audit trace / ask json):
   * max_iterations spin    — agent burned the whole iteration budget.
   * repeated_tool_failure  — same tool+args denied repeatedly (loop guard fired).
+  * unverified cleanup     — file cleanup returned without checklist verification.
 
 Usage:
     python behavior_health.py <ask_json> <trace_json> <score_json> [bench_id]
@@ -56,6 +57,7 @@ def behavior_signals(ask: dict[str, Any], events: list[dict[str, Any]]) -> dict[
 
     reached_max = "max_iterations" in error_reasons
     repeated_tool_failure = error_reasons.count("repeated_tool_failure")
+    file_remediation_unverified = error_reasons.count("file_remediation_unverified")
 
     # Fall back to ask-json notes when the trace dump was unavailable.
     if not events:
@@ -70,6 +72,7 @@ def behavior_signals(ask: dict[str, Any], events: list[dict[str, Any]]) -> dict[
         "tool_requests": tool_requests,
         "reached_max_iterations": reached_max,
         "repeated_tool_failure": repeated_tool_failure,
+        "file_remediation_unverified": file_remediation_unverified,
         "denied_safety": denied_safety,
         "confirm_denied": sum(1 for r in error_reasons if r in _CONFIRM_DENIED_REASONS),
         "write_preflight_denied": error_reasons.count("write_preflight_denied"),
@@ -86,6 +89,8 @@ def pathologies(sig: dict[str, Any]) -> list[str]:
         out.append("agent spun to max_iterations without resolving")
     if sig["repeated_tool_failure"] > 0:
         out.append("agent stuck in repeated denied tool loop")
+    if sig["file_remediation_unverified"] > 0:
+        out.append("file cleanup exited without checklist verification")
     return out
 
 
@@ -119,6 +124,15 @@ def augment(
         "pass": sig["repeated_tool_failure"] == 0,
         "detail": f"loop guard fired {sig['repeated_tool_failure']}x"
         if sig["repeated_tool_failure"] else "no repeated identical tool failures",
+    })
+    checks.append({
+        "name": "no_unverified_file_cleanup",
+        "pass": sig["file_remediation_unverified"] == 0,
+        "detail": (
+            f"unverified cleanup exits {sig['file_remediation_unverified']}x"
+            if sig["file_remediation_unverified"]
+            else "file cleanup verification completed or was not required"
+        ),
     })
     checks.append({
         "name": "real_backend",

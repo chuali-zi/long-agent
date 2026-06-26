@@ -26,6 +26,7 @@ from kyagent.agent.prompt import SYSTEM_PROMPT
 from kyagent.agent.scope import (
     RemediationScope,
     extract_absolute_paths,
+    file_remediation_checklist_applies,
     normalize_abs_path,
     path_is_within,
 )
@@ -246,6 +247,7 @@ class _FileRemediationChecklist:
     protected_paths: set[str] = field(default_factory=set)
     executed_paths: list[str] = field(default_factory=list)
     verified_paths: set[str] = field(default_factory=set)
+    explicit_file_targets: set[str] = field(default_factory=set)
 
     @classmethod
     def from_user_text(cls, text: str) -> "_FileRemediationChecklist":
@@ -254,7 +256,11 @@ class _FileRemediationChecklist:
     @classmethod
     def from_scope(cls, scope: RemediationScope) -> "_FileRemediationChecklist":
         roots = scope.search_roots(round=1)
-        return cls(scope=scope, required_roots=tuple(roots))
+        return cls(
+            scope=scope,
+            required_roots=tuple(roots),
+            explicit_file_targets=set(scope.explicit_root_storage_files()),
+        )
 
     def inherit_discovery_from(self, previous: "_FileRemediationChecklist") -> None:
         """Carry read-only discovery into a short follow-up cleanup turn.
@@ -272,6 +278,7 @@ class _FileRemediationChecklist:
         self.protected_paths.update(previous.protected_paths)
         self.executed_paths.extend(previous.executed_paths)
         self.verified_paths.update(previous.verified_paths)
+        self.explicit_file_targets.update(previous.explicit_file_targets)
 
     def record_read_result(self, tool_name: str, args: dict, content: str) -> None:
         if tool_name not in _FILE_REMEDIATION_READ_TOOLS:
@@ -279,6 +286,8 @@ class _FileRemediationChecklist:
         paths = set(extract_absolute_paths(content))
         path_arg = normalize_abs_path(str(args.get("path") or args.get("root") or ""))
         if tool_name == "fs_ls" and path_arg:
+            if path_arg in self.explicit_file_targets:
+                paths.add(path_arg)
             paths.update(_extract_ls_children(path_arg, content))
         if tool_name == "file_cleanup_candidates":
             self._record_discovery_candidates(content)
@@ -363,6 +372,12 @@ class _FileRemediationChecklist:
             return ""
         if target in self.candidate_paths and self.candidate_labels.get(target) != "unknown":
             return ""
+        if target in self.explicit_file_targets:
+            return (
+                "file cleanup checklist blocked this write: explicit root-level target "
+                "has not been confirmed by read-only evidence. First enumerate the exact "
+                f"file with fs_ls, then retry: {target}"
+            )
         if target in extract_absolute_paths(user_text):
             return ""
         if not self.scope.path_in_scope(target):
@@ -709,19 +724,33 @@ class Agent:
                 notes.append("已剥离零宽字符送入 LLM")
 
         current_scope = RemediationScope.from_user_text(effective_input)
-        scope_input = self._scope_context_text(effective_input)
-        remediation_scope = RemediationScope.from_user_text(scope_input)
+        remediation_scope = current_scope
+        checklist_applies = file_remediation_checklist_applies(remediation_scope)
         previous_file_checklist = self._file_remediation_checklist
-        self._file_remediation_checklist = _FileRemediationChecklist.from_scope(remediation_scope)
         if (
-            previous_file_checklist is not None
-            and not current_scope.search_roots(round=1)
+            not checklist_applies
+            and previous_file_checklist is not None
             and current_scope.actions & {"cleanup"}
+            and not current_scope.search_roots(round=1)
         ):
-            self._file_remediation_checklist.inherit_discovery_from(previous_file_checklist)
+            checklist_applies = True
+        if checklist_applies:
+            self._file_remediation_checklist = _FileRemediationChecklist.from_scope(
+                remediation_scope
+            )
+            if (
+                previous_file_checklist is not None
+                and not current_scope.search_roots(round=1)
+                and current_scope.actions & {"cleanup"}
+            ):
+                self._file_remediation_checklist.inherit_discovery_from(
+                    previous_file_checklist
+                )
+        else:
+            self._file_remediation_checklist = None
         self.messages.append({"role": "user", "content": effective_input})
         turn_system_prompt = self.system_prompt
-        if remediation_scope.services or remediation_scope.actions or remediation_scope.resource_types:
+        if checklist_applies:
             turn_system_prompt += (
                 "\n\n## 当前范围模型\n"
                 + remediation_scope.summary()
@@ -731,6 +760,14 @@ class Agent:
                 "3. 只对 delete 候选调用 fs_delete_file / fs_truncate / log_delete_file。\n"
                 "4. 最终报告必须区分：已确认、未检查、未覆盖、不在本次范围；"
                 "未扫描过的目录不要说“没有/cache/不存在”。"
+            )
+        elif (
+            remediation_scope.services
+            or remediation_scope.actions
+            or remediation_scope.resource_types
+        ):
+            turn_system_prompt += (
+                "\n\n## 当前范围模型\n" + remediation_scope.summary()
             )
 
         tools_for_llm = self._tools_for_llm
@@ -1517,13 +1554,9 @@ class Agent:
         return ""
 
     def _scope_context_text(self, current_input: str) -> str:
-        user_turns = [
-            str(message.get("content") or "")
-            for message in self.messages
-            if message.get("role") == "user" and isinstance(message.get("content"), str)
-        ]
-        recent_user_turns = [text for text in user_turns[-3:] if text.strip()]
-        return "\n".join([*recent_user_turns, current_input])
+        # Scope for checklist gating is derived from the current turn only so a
+        # prior cleanup ticket cannot pollute a port/cron/lock turn in Web chat.
+        return current_input
 
     def _line_confirms_safe_process_target(self, trace: Trace, line: str) -> bool:
         lowered = line.lower()

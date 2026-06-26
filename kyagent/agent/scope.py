@@ -32,6 +32,14 @@ _PROTECTED_KEYWORDS: dict[str, frozenset[str]] = {
 }
 
 _STORAGE_BASES = ("/var/log", "/var/cache", "/var/tmp", "/tmp")
+# Keep aligned with kyagent.mcp.tools.filesystem._GLOBAL_STORAGE_ROOTS — tools reject these.
+_GLOBAL_STORAGE_ROOTS = frozenset({"/var/log", "/var/cache", "/var/tmp", "/tmp"})
+_STORAGE_RESOURCES = frozenset({"log", "cache", "tmp"})
+_NON_FILE_RESOURCES = frozenset({"port", "process", "cron"})
+_FILE_LIKE_SUFFIX_RE = re.compile(
+    r"\.(?:sock|lock|log(?:\.\d+)?|gz|bz2|xz|zst|core|dump|pid|tmp|old|bak|jsonl?)$",
+    re.IGNORECASE,
+)
 _ACTION_INTENT_RE = re.compile(
     r"(结束|终止|杀|释放|处理|处置|清理|修复|"
     r"stop|kill|terminate|release|remediate|cleanup|clean up|resolve|"
@@ -68,9 +76,30 @@ def _match_keywords(text: str, table: dict[str, frozenset[str]]) -> frozenset[st
     lowered = (text or "").lower()
     matched: set[str] = set()
     for label, keywords in table.items():
-        if any(kw.lower() in lowered for kw in keywords):
+        if any(
+            kw.lower() in lowered
+            and not (label == "cleanup" and _keyword_is_negated(lowered, kw.lower()))
+            for kw in keywords
+        ):
             matched.add(label)
     return frozenset(matched)
+
+
+def _keyword_is_negated(text: str, keyword: str) -> bool:
+    start = 0
+    found = False
+    while True:
+        idx = text.find(keyword, start)
+        if idx < 0:
+            return found
+        found = True
+        prefix = text[max(0, idx - 12):idx]
+        if not any(
+            marker in prefix
+            for marker in ("不要", "别", "不得", "禁止", "do not", "don't", "not ")
+        ):
+            return False
+        start = idx + len(keyword)
 
 
 def _extract_services(text: str) -> tuple[str, ...]:
@@ -84,10 +113,27 @@ def _extract_services(text: str) -> tuple[str, ...]:
     return tuple(services)
 
 
+def _looks_like_file_path(path: str) -> bool:
+    """Heuristic: explicit paths in tickets are usually directories, not scan roots."""
+    base = posixpath.basename(path)
+    if not base or base in {".", ".."}:
+        return False
+    if _FILE_LIKE_SUFFIX_RE.search(base):
+        return True
+    return "." in base and not base.startswith(".")
+
+
 def _explicit_storage_roots(paths: tuple[str, ...]) -> tuple[str, ...]:
     roots: list[str] = []
     seen: set[str] = set()
-    for path in paths:
+    for raw in paths:
+        path = normalize_abs_path(raw)
+        if not path or path in _GLOBAL_STORAGE_ROOTS:
+            continue
+        if _looks_like_file_path(path):
+            path = posixpath.dirname(path) or path
+        if path in _GLOBAL_STORAGE_ROOTS:
+            continue
         for base in _STORAGE_BASES:
             if path == base or path.startswith(base + "/"):
                 if path not in seen:
@@ -95,6 +141,35 @@ def _explicit_storage_roots(paths: tuple[str, ...]) -> tuple[str, ...]:
                     roots.append(path)
                 break
     return tuple(roots)
+
+
+def _explicit_root_storage_files(paths: tuple[str, ...]) -> tuple[str, ...]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        path = normalize_abs_path(raw)
+        if not path or not _looks_like_file_path(path):
+            continue
+        parent = posixpath.dirname(path) or path
+        if parent not in _GLOBAL_STORAGE_ROOTS:
+            continue
+        for base in _STORAGE_BASES:
+            if path.startswith(base + "/") and path not in seen:
+                seen.add(path)
+                files.append(path)
+                break
+    return tuple(files)
+
+
+def _collapse_nested_roots(roots: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep only minimal directory roots — scanning a parent covers children."""
+    ordered = sorted(set(roots), key=len)
+    kept: list[str] = []
+    for root in ordered:
+        if any(path_is_within(root, parent) for parent in kept):
+            continue
+        kept.append(root)
+    return tuple(kept)
 
 
 def _service_storage_roots(
@@ -177,7 +252,7 @@ class RemediationScope:
                 if root not in seen:
                     seen.add(root)
                     roots.append(root)
-        return tuple(roots)
+        return _collapse_nested_roots(tuple(roots))
 
     def round2_roots(self) -> tuple[str, ...]:
         """Expand to common runtime roots for the same services."""
@@ -220,6 +295,9 @@ class RemediationScope:
     def path_in_scope(self, path: str) -> bool:
         return self.root_for_path(path) is not None
 
+    def explicit_root_storage_files(self) -> tuple[str, ...]:
+        return _explicit_root_storage_files(self.explicit_paths)
+
     def summary(self) -> str:
         parts = [
             f"services={','.join(self.services) or 'none'}",
@@ -231,7 +309,30 @@ class RemediationScope:
         return "; ".join(parts)
 
 
+def file_remediation_checklist_applies(scope: RemediationScope) -> bool:
+    """Whether the file-delete candidate checklist should gate this turn."""
+    storage = scope.resource_types & _STORAGE_RESOURCES
+    if not storage:
+        return False
+    actions = scope.actions
+    if actions & {"disable", "terminate"}:
+        return False
+    if (
+        "process" in scope.resource_types
+        and not scope.services
+        and not (scope.resource_types & {"log", "cache"})
+    ):
+        return False
+    if "cleanup" in actions:
+        return True
+    if "repair" in actions:
+        return False
+    return bool(scope.services and storage and not (actions & _NON_FILE_RESOURCES))
+
+
 def file_cleanup_required_roots(user_text: str) -> list[str]:
     """Backward-compatible helper used by the remediation checklist."""
     scope = RemediationScope.from_user_text(user_text)
+    if not file_remediation_checklist_applies(scope):
+        return []
     return list(scope.search_roots(round=1))

@@ -131,3 +131,35 @@ def test_generic_cleanup_without_discovery_still_blocks_out_of_scope_write() -> 
     )
 
     assert "not in current scope" in err
+
+
+def test_root_level_explicit_file_blocks_until_read_only_discovery() -> None:
+    user_text = "清理 /var/log/messages.1 这个旧日志"
+    target = "/var/log/messages.1"
+    checklist = _FileRemediationChecklist.from_scope(
+        RemediationScope.from_user_text(user_text)
+    )
+
+    assert checklist.required_roots == ()
+    assert checklist.explicit_file_targets == {target}
+    err = checklist.pre_write_error(target, user_text)
+
+    assert "explicit root-level target" in err
+    assert "fs_ls" in err
+
+
+def test_fs_ls_exact_root_level_file_allows_safe_delete_candidate() -> None:
+    user_text = "清理 /var/log/messages.1 这个旧日志"
+    target = "/var/log/messages.1"
+    checklist = _FileRemediationChecklist.from_scope(
+        RemediationScope.from_user_text(user_text)
+    )
+
+    checklist.record_read_result(
+        "fs_ls",
+        {"path": target},
+        "-rw-r--r-- 1 root root 12 Jan 1 00:00 /var/log/messages.1\n",
+    )
+
+    assert checklist.candidate_labels[target] == "delete"
+    assert checklist.pre_write_error(target, user_text) == ""
