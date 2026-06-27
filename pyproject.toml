@@ -9,7 +9,7 @@ description = "面向麒麟操作系统的安全智能运维 Agent (A2 赛题作
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Team A2" }]
+authors = [{ name = "别跟我做对" }]
 keywords = ["mcp", "agent", "kylin", "ops", "security", "llm"]
 
 dependencies = [
